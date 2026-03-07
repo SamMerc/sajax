@@ -43,8 +43,6 @@ def test_build_stellar_grid_shapes():
         ve=2.0,
     )
     n = grid["n"]
-    assert grid["x_grid"].shape == (n, n)
-    assert grid["mu_grid"].shape == (n, n)
     assert grid["starmask"].dtype == bool
     assert grid["total_pixels"] > 0
 

@@ -7,7 +7,7 @@ name = "sajax"
 version = "0.1.0"
 description = "Stellar Activity Grid for Exoplanets — JAX implementation"
 authors = [
-    { name = "Samuel Mercier" },
+    { name = "Samson Mercier" },
     { name = "Hritam Chakraborty", email = "Hritam.Chakraborty@unige.ch" },
 ]
 license = { text = "MIT" }
