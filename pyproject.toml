@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "sajax"
+version = "0.1.0"
+description = "Stellar Activity Grid for Exoplanets — JAX implementation"
+authors = [
+    { name = "Samson Mercier" },
+    { name = "Hritam Chakraborty", email = "Hritam.Chakraborty@unige.ch" },
+]
+license = { text = "MIT" }
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "jax>=0.4",
+    "jaxlib>=0.4",
+    "matplotlib>=3.7",
+    "scipy>=1.10",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "jupyter", "ipykernel"]
+
+[project.urls]
+Repository = "https://github.com/SamMerc/sajax"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["sajax*"]

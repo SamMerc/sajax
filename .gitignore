@@ -1,6 +1,44 @@
-# Ignoring following files#
+# Python bytecode
 __pycache__/
-build/
-.DS_Store
-/SAGE1/__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
 
+# Distribution / packaging
+*.egg-info/
+dist/
+build/
+*.egg
+MANIFEST
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# macOS metadata
+.DS_Store
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# SAJAX output data (generated artefacts, not source)
+sage_output/
+*.npy
+*.npz
+
+# JAX / XLA compilation cache
+jax_cache/
+__jax_cache__/
