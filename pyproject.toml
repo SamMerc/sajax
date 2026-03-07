@@ -7,7 +7,7 @@ name = "sajax"
 version = "0.1.0"
 description = "Stellar Activity Grid for Exoplanets — JAX implementation"
 authors = [
-    { name = "Samson Mercier" },
+    { name = "Samuel Mercier" },
     { name = "Hritam Chakraborty", email = "Hritam.Chakraborty@unige.ch" },
 ]
 license = { text = "MIT" }
@@ -22,7 +22,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7", "jupyter", "ipykernel"]
+dev = ["pytest>=7", "pytest-cov", "jupyter", "ipykernel"]
 
 [project.urls]
 Repository = "https://github.com/SamMerc/sajax"
@@ -30,3 +30,10 @@ Repository = "https://github.com/SamMerc/sajax"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["sajax*"]
+
+[tool.pytest.ini_options]
+addopts = "--cov=sajax --cov-report=xml --cov-report=term-missing"
+
+[tool.coverage.run]
+source = ["sajax"]
+omit = ["tests/*"]
