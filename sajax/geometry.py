@@ -7,6 +7,7 @@ import matplotlib.gridspec as gridspec
 from scipy.interpolate import interp1d
 import astropy.units as u
 from astropy.coordinates.matrix_utilities import rotation_matrix # for stellar inclination
+import time 
 
 class sage_class:
     
@@ -29,16 +30,17 @@ class sage_class:
         self.fit_ldc= fit_ldc
         self.plot_map_wavelength= plot_map_wavelength
         self.phases_rot= phases_rot
+        self.time_store = time.time()
         
     def rotate_star(self):
-        
+
         if len(self.phases_rot) == 1:
             self.phases_rot= self.phases_rot[0] # The 0 is there to take the first entry. 
-            print('No rotation')
+            # print('No rotation')
             lc, epsilon_wl, star_maps= self.StarSpotSpec()
             
         elif len(self.phases_rot) != 1:
-            print('Rotating the star')
+            # print('Rotating the star')
             lc= []
             epsilon_wl= []
             star_maps= []
@@ -47,7 +49,9 @@ class sage_class:
                 flux_norm, contamination_factor, star_map= self.StarSpotSpec()
                 lc.append(flux_norm)    
                 epsilon_wl.append(contamination_factor)
-                star_maps.append(star_map)                                
+                star_maps.append(star_map)
+            lc= lc/np.median(lc) # added to remove the peak flux 1.0 case.   #TODO discuss with ML about what's best way of normalising. clear stellar spec or median of lc.                         
+
         return lc, epsilon_wl, star_maps
                 
         
@@ -64,7 +68,7 @@ class sage_class:
         fit_ldc [n, custom, exotic, adrien, intensity_profile], plot_map_wavelength defines the wavelength at which the map is calculated
         
         '''
-        
+
         if len(self.wavelength) == 1:
             wave_interp= np.zeros(2) + self.wavelength
             flux_hot_interp= np.zeros(2) + self.flux_hot
@@ -92,47 +96,46 @@ class sage_class:
         I_profile= self.params[5]
         # for stellar inclination
         inc_star= self.params[6]
-        
-        
+
         # Converting latitude to co-latitude
         spot_lat= 90 - np.asarray(self.spot_lat)
             
         # Convert input variables to system variables for further calculations:
         rs  = 1./semimajor
         rp  = radiusratio*rs
-        
+      
         # Select a grid size based on system size:
         # Creates a grid wich is twice the size of the planets' size in pixels * ratio of rs/rp
         n = (2.0*self.planet_pixel_size*(rs/rp) + 2.0*self.planet_pixel_size)
         grid = np.zeros((int(n),int(n)))
         
         star_pixel_rad = ((rs/rp) * self.planet_pixel_size)
-        
+
         # Create a grid:
         x=np.arange(int(n))-(n/2.)
         y=np.arange(int(n))-(n/2.)
         x1, y1 = np.meshgrid(x,y, sparse = True)
         
         r = np.sqrt((x1**2.0) + (y1**2.0))
-        
+
+        ### TIME CONSUMING ###
         # Which values of the stellar grid are within the stellar (pixel) radius (find star on grid):
 
         x2, y2 = np.meshgrid(x/ star_pixel_rad ,y/ star_pixel_rad, sparse = False)
         starmask_rad = ((y2 >= -1.0) & (y2 <= 1.0) & (x2**2+y2**2 <= 1.0))
         
         c = 300000 #km sec^{-1}
-        
+
         grid_new =  np.zeros((int(n),int(n)))
         grid_new[starmask_rad] = y2[starmask_rad] * (self.ve/ c)
         
         starmask = (r <= star_pixel_rad)
         total_pixels = len(r[starmask])      # Inside the stellar radius
-        
+        ######################
         bin_flux = []
         stellar_spec = []
         contamination_factor = []
         transit_depth = []
-        
         
         if self.fit_ldc == 'single':       
             u1= np.zeros(len(self.wavelength))
@@ -142,27 +145,23 @@ class sage_class:
             u2= np.zeros(len(self.wavelength)) + self.params[3]               
         elif self.fit_ldc == 'intensity_profile':
             I_interpolated= interp1d(mu_profile[0], I_profile, bounds_error = False, fill_value = 0.0, axis=1)
-            
 
         for i in range(len(self.wavelength)):
-            
+            ### TIME CONSUMING ###
             lambdaa= self.wavelength[i]
 
             mu = np.cos(np.arcsin(r[starmask]/star_pixel_rad))
-            
+
             grid[starmask] = lambdaa
-            grid = grid + (grid_new * grid)
-            
             star_grid = f_hot(grid)#/ np.max(photosHO[1][wave])
-            
+            star_grid = star_grid + (grid_new * star_grid)
             if self.fit_ldc == 'single' or self.fit_ldc == 'multi-color':           
                 star_grid[starmask] = star_grid[starmask] *  (1-u1[i]*(1-mu)-u2[i]*(1-mu)**2.0)
-
                 
             elif self.fit_ldc == 'intensity_profile':
                 interpolated_intensity_prof= I_interpolated(mu)
                 star_grid[starmask] = star_grid[starmask] * interpolated_intensity_prof[i] 
-            
+            ######################
             #Rotaional broadenned stellar grid
             #plt.imshow(star_grid, cmap = cm.hot , origin = 'lower', vmin = 0.0, vmax = 1.0)
             #plt.colorbar()
@@ -171,11 +170,11 @@ class sage_class:
             
             star_spec = np.sum(star_grid[starmask])/ total_pixels
             stellar_spec.append(star_spec)
-            
+
             if(self.spotnumber > 0.0):
                 
                 for sn in range(0, self.spotnumber):
-                    
+
                     #adding spot parameters
                     spotlong_rad = (np.pi*(self.spot_long[sn])/180.0)
                     spotlat_rad = (np.pi*(spot_lat[sn])/180.0)
@@ -194,7 +193,6 @@ class sage_class:
                     spot_inCart= np.array([[spx], [spy], [spz]])
                     spx, spy, spz= stellar_inc(stellar_inclination= (90 - inc_star)*u.deg, active_cord=spot_inCart) # for stellar inclination
 
-
                     # Converting rotated Cartesian pixels back to GCS. 
                     spotlong_rad_rot= np.arctan(spx/spz)
                     if spz < 0: 
@@ -209,6 +207,9 @@ class sage_class:
                     ypos1 = (spy-1.1*sps)
                     ypos2 = (spy+1.1*sps)
 
+                    if not (np.isfinite(xpos1) and np.isfinite(xpos2)) or (xpos2 <= xpos1):
+                        continue 
+
                     xelements = np.arange(xpos1, xpos2)
                     yelements = np.arange(ypos1, ypos2)
                     #print(xelements)
@@ -220,7 +221,6 @@ class sage_class:
 
                     zspot_p1 = np.sqrt((star_pixel_rad)**2.0 - xspot_p1**2.0 - yspot_p1**2.0)
 
-            
                     # Recalculate (x,y,z)-locations to longitude and latiude (in radians):
                     longi_rad = np.arctan(xspot_p1/zspot_p1)
                     lati_rad  = np.arccos(yspot_p1/star_pixel_rad)
@@ -245,13 +245,14 @@ class sage_class:
                                                         int(n)/2).astype(int)] = x2[(xspot_p1[star_mask & inspot_mask].astype(int) + 
                                                                                         int(n)/2).astype(int), (yspot_p1[star_mask & inspot_mask].astype(int) + 
                                                                                                                 int(n)/2).astype(int)] * (self.ve/ c)
-
-            # Define values for spot:
+                    ### TIME CONSUMING ###
+                    # Define values for spot:
                     mu_spot = np.cos(np.arcsin(r[(xspot_p1[star_mask & inspot_mask].astype(int) + int(n)/2).astype(int), (yspot_p1[star_mask & inspot_mask].astype(int) + int(n)/2).astype(int)]/star_pixel_rad))
                     spot[(xspot_p1[star_mask & inspot_mask].astype(int) + int(n)/2).astype(int), (yspot_p1[star_mask & inspot_mask].astype(int) + int(n)/2).astype(int)] = lambdaa
                     spot = spot + (spot * grid_new_spot)
-            
+
                     spot_grid = f_cold(spot)#/ np.max(photosHO[1][wave])
+
                     if self.fit_ldc == 'single' or self.fit_ldc == 'multi-color':            
                 
                         spot_grid[(xspot_p1[star_mask & inspot_mask].astype(int) + int(n)/2).astype(int), (yspot_p1[star_mask & inspot_mask].astype(int) + int(n)/2).astype(int)] = spot_grid[(xspot_p1[star_mask & inspot_mask].astype(int) + int(n)/2).astype(int), (yspot_p1[star_mask & inspot_mask].astype(int) + int(n)/2).astype(int)] * (1-u1[i]*(1-mu_spot)-u2[i]*(1-mu_spot)**2.0)
@@ -261,14 +262,14 @@ class sage_class:
                         interpolated_intensity_prof_spot= I_interpolated(mu_spot)
                         
                         spot_grid[(xspot_p1[star_mask & inspot_mask].astype(int) + int(n)/2).astype(int), (yspot_p1[star_mask & inspot_mask].astype(int) + int(n)/2).astype(int)] = spot_grid[(xspot_p1[star_mask & inspot_mask].astype(int) + int(n)/2).astype(int), (yspot_p1[star_mask & inspot_mask].astype(int) + int(n)/2).astype(int)] * (interpolated_intensity_prof_spot[i]) 
-                    
+                    ####################
 
                     # spot_grid[(xspot_p1[star_mask & inspot_mask].astype(int) + int(n)/2).astype(int), (yspot_p1[star_mask & inspot_mask].astype(int) + int(n)/2).astype(int)] = spot_grid[(xspot_p1[star_mask & inspot_mask].astype(int) + int(n)/2).astype(int), (yspot_p1[star_mask & inspot_mask].astype(int) + int(n)/2).astype(int)] * (1-u1[i]*(1-mu_spot)-u2[i]*(1-mu_spot)**2.0)
             
                     star_grid[(xspot_p1[star_mask & inspot_mask].astype(int) + int(n)/2).astype(int), (yspot_p1[star_mask & inspot_mask].astype(int) + int(n)/2).astype(int)] = 0.0
 
                     star_grid = star_grid + spot_grid            
-            
+
             total_flux = np.sum(star_grid[starmask])/ total_pixels # normalised with the number of pixels. 
             bin_flux.append(total_flux)
             
@@ -277,12 +278,13 @@ class sage_class:
             
             if abs(lambdaa - self.plot_map_wavelength) <= 10:
                 star_map_out= star_grid     
-        
+
         # calculating drop in stellar flux due to active regions.
         spotted_flux= np.sum(bin_flux)
         unspotted_flux= np.sum(stellar_spec)
-        flux_norm= spotted_flux/ unspotted_flux
-                         
+        flux_norm= spotted_flux/ unspotted_flux # Normalising by unspotted stellar flux sets the peak flux to 1.0. This might not be the case on the basis of your normalisation. 
+        # flux_norm= spotted_flux#/ np.median(spotted_flux)
+               
         return flux_norm, contamination_factor, star_map_out
 
 def stellar_inc(active_cord, stellar_inclination= 0.0 * u.deg):
