@@ -43,13 +43,18 @@ def test_build_stellar_grid_shapes():
         ve=2.0,
     )
     n = grid["n"]
-    assert grid["starmask"].dtype == bool
+    assert grid["n"] == 101
+    assert grid["star_pixel_rad"] == 50
     assert grid["total_pixels"] > 0
+    assert (len(grid["x"]) == grid["total_pixels"])
+    assert (len(grid["y"]) == grid["total_pixels"])
+    assert (len(grid["mu"]) == grid["total_pixels"])
+    assert (len(grid["vel"]) == grid["total_pixels"])
 
 
 def test_build_stellar_grid_mu_range():
     grid = build_stellar_grid(50, 2.0)
-    mu = grid["mu_grid"]
+    mu = grid["mu"]
     assert float(mu.min()) >= 0.0
     assert float(mu.max()) <= 1.0 + 1e-5
 
