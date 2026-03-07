@@ -10,21 +10,26 @@ Key differences from the original NumPy/SciPy implementation
    Here the entire spectral axis is handled by ``jax.vmap``, which maps
    the single-channel computation across all wavelengths in parallel.
 
-2. **No scatter-index spot placement.**
+2. **No phase loop.**
+   The original code iterated over rotational phases with a Python loop.
+   Here all phases are computed in a single ``jax.vmap`` call — this is
+   the main source of speedup over the original code.
+
+3. **No scatter-index spot placement.**
    The original code located spot pixels via integer scatter indices
    (fancy indexing with ``.astype(int)``), which is not differentiable
    and incompatible with ``jit``.  SAJAX instead computes an analytic
    angular-distance mask over the full (n, n) pixel grid using
    ``jnp.where``, which is fully vectorised and differentiable.
 
-3. **No class state mutation.**
+4. **No class state mutation.**
    The original ``sage_class.rotate_star()`` mutated ``self.phases_rot``
    inside a loop — a latent bug.  SAJAX uses pure functions throughout.
 
-4. **No astropy dependency for geometry.**
+5. **No astropy dependency for geometry.**
    Rotation matrices are implemented directly in JAX (see geometry.py).
 
-5. **Differentiable end-to-end.**
+6. **Differentiable end-to-end.**
    All operations are JAX-native, so ``jax.grad`` / ``jax.jacobian``
    work on the full pipeline — useful for gradient-based retrieval.
 """
@@ -126,7 +131,7 @@ def build_stellar_grid(
 
 
 # ---------------------------------------------------------------------------
-# 2. Spot mask  (JAX — called once per phase, not per wavelength)
+# 2. Spot mask  (JAX — vmapped over spots and phases)
 # ---------------------------------------------------------------------------
 
 def _compute_spot_mask(
@@ -212,10 +217,6 @@ def _flux_at_wavelength(
     """
     Compute integrated flux for a single wavelength channel.
 
-    Parameters
-    ----------
-    (See docstring of ``compute_light_curve`` for parameter descriptions.)
-
     Returns
     -------
     star_spec   : float  — unspotted disc-integrated flux (normalised)
@@ -257,11 +258,11 @@ def _flux_at_wavelength(
 
 
 # ---------------------------------------------------------------------------
-# 4. Single-phase computation
+# 4. Single-phase computation  (vmapped over the phase axis)
 # ---------------------------------------------------------------------------
 
 def _compute_single_phase(
-    spot_cart_all: jnp.ndarray,      # (nspot, 3) — only argument per phase
+    spot_cart_all: jnp.ndarray,      # (nspot, 3) — vmapped over phases
     *,
     # everything below is baked in via functools.partial
     wavelength: jnp.ndarray,         # (nwave,)
@@ -292,7 +293,6 @@ def _compute_single_phase(
     star_map             : (n, n) flux map at ``plot_map_wavelength``
     """
     # ---- Spot masks: (nspot, n, n) — computed once per phase ------------
-    # vmap _compute_spot_mask over the spot axis
     spot_masks = vmap(
         lambda cart, sr: _compute_spot_mask(
             x_grid, y_grid, star_pixel_rad,
@@ -324,11 +324,9 @@ def _compute_single_phase(
     )
 
     # ---- Broadband flux normalisation -----------------------------------
-    # Sum over wavelengths, then normalise spotted by unspotted
     flux_norm = jnp.sum(bin_fluxes) / jnp.sum(star_specs)
 
     # ---- Contamination factor per wavelength ----------------------------
-    # ε(λ) = F_unspotted(λ) / F_spotted(λ)
     contamination_factor = star_specs / jnp.where(bin_fluxes == 0.0, 1.0,
                                                    bin_fluxes)
 
@@ -340,7 +338,73 @@ def _compute_single_phase(
 
 
 # ---------------------------------------------------------------------------
-# 5. Public API
+# 5. All-phases computation — vmapped over the phase axis
+# ---------------------------------------------------------------------------
+
+def _compute_all_phases(
+    all_spot_carts: jnp.ndarray,     # (nphase, nspot, 3)
+    *,
+    # all constants baked in via functools.partial
+    wavelength: jnp.ndarray,
+    flux_hot_interp: jnp.ndarray,
+    flux_cold_interp: jnp.ndarray,
+    u1: jnp.ndarray,
+    u2: jnp.ndarray,
+    I_profile: jnp.ndarray,
+    mu_profile_pts: jnp.ndarray,
+    x_grid: jnp.ndarray,
+    y_grid: jnp.ndarray,
+    starmask: jnp.ndarray,
+    mu_grid: jnp.ndarray,
+    vel_grid: jnp.ndarray,
+    star_pixel_rad: float,
+    total_pixels: int,
+    spotsize_rads: jnp.ndarray,
+    ldc_mode: LdcMode,
+    plot_map_wavelength: float,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """
+    vmap _compute_single_phase over the phase axis.
+
+    Parameters
+    ----------
+    all_spot_carts : (nphase, nspot, 3)
+        Rotated spot Cartesian coordinates for every phase.
+
+    Returns
+    -------
+    lc_raw      : (nphase,)    raw flux ratio per phase (before median norm)
+    epsilon     : (nphase, nwave)
+    star_maps   : (nphase, n, n)
+    """
+    _phase_vmap = vmap(
+        functools.partial(
+            _compute_single_phase,
+            wavelength          = wavelength,
+            flux_hot_interp     = flux_hot_interp,
+            flux_cold_interp    = flux_cold_interp,
+            u1                  = u1,
+            u2                  = u2,
+            I_profile           = I_profile,
+            mu_profile_pts      = mu_profile_pts,
+            x_grid              = x_grid,
+            y_grid              = y_grid,
+            starmask            = starmask,
+            mu_grid             = mu_grid,
+            vel_grid            = vel_grid,
+            star_pixel_rad      = star_pixel_rad,
+            total_pixels        = total_pixels,
+            spotsize_rads       = spotsize_rads,
+            ldc_mode            = ldc_mode,
+            plot_map_wavelength = plot_map_wavelength,
+        ),
+        in_axes=0,   # vmap over phases (first axis of all_spot_carts)
+    )
+    return _phase_vmap(all_spot_carts)
+
+
+# ---------------------------------------------------------------------------
+# 6. Public API
 # ---------------------------------------------------------------------------
 
 def compute_light_curve(
@@ -367,8 +431,7 @@ def compute_light_curve(
     Parameters
     ----------
     wavelength : array_like, shape (nwave,)
-        Wavelength array.  Any consistent unit is accepted; the same unit
-        must be used for ``plot_map_wavelength``.
+        Wavelength array.
     flux_hot : array_like, shape (nwave,)
         Quiet-photosphere flux spectrum sampled at ``wavelength``.
     flux_cold : array_like, shape (nwave,)
@@ -379,13 +442,9 @@ def compute_light_curve(
         * ``radiusratio``  — Rp / Rs
         * ``semimajor``    — a / Rs
         * ``u1``, ``u2``  — quadratic limb-darkening coefficients
-          (scalar, broadcast to all wavelengths for ``multi-color``).
-        * ``mu_profile``  — 1-D array of μ sampling points, required for
-          ``intensity_profile`` mode.
-        * ``I_profile``   — 2-D array, shape (nwave, n_mu), required for
-          ``intensity_profile`` mode.
-        * ``inc_star``    — stellar inclination in degrees
-          (default 90 = equator-on).
+        * ``mu_profile``  — required for ``intensity_profile`` mode
+        * ``I_profile``   — required for ``intensity_profile`` mode
+        * ``inc_star``    — stellar inclination [deg] (default 90)
 
     spot_lat : array_like, shape (nspot,)
         Spot latitudes in degrees (−90 to +90).
@@ -394,36 +453,22 @@ def compute_light_curve(
     spot_size : array_like, shape (nspot,)
         Spot angular radii in degrees.
     phases_rot : array_like, shape (nphase,)
-        Rotational phases in degrees at which to evaluate the model.
+        Rotational phases in degrees.
     planet_pixel_size : int
-        Number of pixels across the planetary disc radius.  Controls the
-        spatial resolution of the grid.  Values of 15–50 are typical.
+        Spatial resolution of the grid (15–50 typical).
     ve : float
         Stellar equatorial velocity in km/s.
     ldc_mode : str
-        Limb-darkening mode.  One of:
-
-        * ``"single"``          — no LDC (u1 = u2 = 0).
-        * ``"multi-color"``     — single (u1, u2) pair for all wavelengths.
-        * ``"intensity_profile"`` — per-wavelength intensity profile.
-
+        ``"single"``, ``"multi-color"``, or ``"intensity_profile"``.
     plot_map_wavelength : float, optional
-        Wavelength at which to return the stellar flux map.  Defaults to
-        the midpoint of ``wavelength``.
+        Wavelength at which to return the stellar flux map.
 
     Returns
     -------
     dict with keys:
-
-    ``lc``
-        ndarray, shape (nphase,).  Broadband integrated flux normalised
-        by its median.  1.0 = unspotted level.
-    ``epsilon``
-        ndarray, shape (nphase, nwave).  Contamination factor
-        ε(λ) = F_unspotted(λ) / F_spotted(λ) per phase per wavelength.
-    ``star_maps``
-        ndarray, shape (nphase, n, n).  Stellar flux map at
-        ``plot_map_wavelength`` for each phase.
+        ``lc``        — (nphase,)       normalised broadband light curve
+        ``epsilon``   — (nphase, nwave) contamination factor ε(λ)
+        ``star_maps`` — (nphase, n, n)  stellar flux map per phase
     """
     # ---- Input coercion -------------------------------------------------
     wavelength  = np.asarray(wavelength,  dtype=np.float32)
@@ -434,8 +479,9 @@ def compute_light_curve(
     spot_long   = np.atleast_1d(np.asarray(spot_long,  dtype=np.float32))
     spot_size   = np.atleast_1d(np.asarray(spot_size,  dtype=np.float32))
 
-    nwave = len(wavelength)
-    nspot = len(spot_lat)
+    nwave  = len(wavelength)
+    nspot  = len(spot_lat)
+    nphase = len(phases_rot)
 
     # ---- Unpack params --------------------------------------------------
     radiusratio    = float(params["radiusratio"])
@@ -445,7 +491,6 @@ def compute_light_curve(
     u2_in          = params.get("u2", 0.0)
     mu_profile_pts = np.asarray(params.get("mu_profile", [0.0, 1.0]),
                                 dtype=np.float32)
-    # Default I_profile: uniform intensity (no wavelength-dependent LDC)
     I_profile = np.asarray(
         params.get("I_profile",
                    np.ones((nwave, len(mu_profile_pts)), dtype=np.float32)),
@@ -459,7 +504,7 @@ def compute_light_curve(
     elif ldc_mode == "multi-color":
         u1 = np.full(nwave, float(u1_in), dtype=np.float32)
         u2 = np.full(nwave, float(u2_in), dtype=np.float32)
-    else:  # intensity_profile — u1/u2 unused but kept for uniform signature
+    else:
         u1 = np.zeros(nwave, dtype=np.float32)
         u2 = np.zeros(nwave, dtype=np.float32)
 
@@ -469,73 +514,61 @@ def compute_light_curve(
     if plot_map_wavelength is None:
         plot_map_wavelength = float(wavelength[nwave // 2])
 
-    # ---- Convert spot parameters to Cartesian pixel coordinates ---------
-    # Co-latitude = 90° - latitude
+    # ---- Convert spot params to Cartesian pixel coordinates -------------
     spot_colat_rad = np.deg2rad(90.0 - spot_lat)
     spot_long_rad  = np.deg2rad(spot_long)
     spr            = grid["star_pixel_rad"]
 
     spot_cart_pixel = np.stack([
-        spr * np.sin(spot_long_rad) * np.sin(spot_colat_rad),  # x
-        spr * np.cos(spot_colat_rad),                           # y
-        spr * np.cos(spot_long_rad) * np.sin(spot_colat_rad),  # z
+        spr * np.sin(spot_long_rad) * np.sin(spot_colat_rad),
+        spr * np.cos(spot_colat_rad),
+        spr * np.cos(spot_long_rad) * np.sin(spot_colat_rad),
     ], axis=-1).astype(np.float32)  # (nspot, 3)
 
-    spotsize_rads = jnp.asarray(np.deg2rad(spot_size), dtype=jnp.float32)
+    # ---- Rotate ALL spots for ALL phases in one vmapped call ------------
+    # _rotate_spots_at_phase: given a phase scalar, return (nspot, 3)
+    def _rotate_spots_at_phase(phase_deg: float) -> jnp.ndarray:
+        return vmap(
+            lambda cart: rotate_active_region(cart, phase_deg, inc_star)
+        )(jnp.asarray(spot_cart_pixel))   # → (nspot, 3)
 
-    # ---- JIT-compile the phase function with all constants baked in -----
-    _phase_fn = jit(functools.partial(
-        _compute_single_phase,
-        wavelength         = jnp.asarray(wavelength),
-        flux_hot_interp    = jnp.asarray(flux_hot),
-        flux_cold_interp   = jnp.asarray(flux_cold),
-        u1                 = jnp.asarray(u1),
-        u2                 = jnp.asarray(u2),
-        I_profile          = jnp.asarray(I_profile),
-        mu_profile_pts     = jnp.asarray(mu_profile_pts),
-        x_grid             = jnp.asarray(grid["x_grid"]),
-        y_grid             = jnp.asarray(grid["y_grid"]),
-        starmask           = jnp.asarray(grid["starmask"]),
-        mu_grid            = jnp.asarray(grid["mu_grid"]),
-        vel_grid           = jnp.asarray(grid["vel_grid"]),
-        star_pixel_rad     = grid["star_pixel_rad"],
-        total_pixels       = grid["total_pixels"],
-        spotsize_rads      = spotsize_rads,
-        ldc_mode           = ldc_mode,
-        plot_map_wavelength= float(plot_map_wavelength),
+    # vmap over phases → (nphase, nspot, 3)
+    all_spot_carts = jit(vmap(_rotate_spots_at_phase))(
+        jnp.asarray(phases_rot)
+    )
+
+    # ---- JIT-compile the all-phases function ----------------------------
+    _all_phases_fn = jit(functools.partial(
+        _compute_all_phases,
+        wavelength          = jnp.asarray(wavelength),
+        flux_hot_interp     = jnp.asarray(flux_hot),
+        flux_cold_interp    = jnp.asarray(flux_cold),
+        u1                  = jnp.asarray(u1),
+        u2                  = jnp.asarray(u2),
+        I_profile           = jnp.asarray(I_profile),
+        mu_profile_pts      = jnp.asarray(mu_profile_pts),
+        x_grid              = jnp.asarray(grid["x_grid"]),
+        y_grid              = jnp.asarray(grid["y_grid"]),
+        starmask            = jnp.asarray(grid["starmask"]),
+        mu_grid             = jnp.asarray(grid["mu_grid"]),
+        vel_grid            = jnp.asarray(grid["vel_grid"]),
+        star_pixel_rad      = grid["star_pixel_rad"],
+        total_pixels        = grid["total_pixels"],
+        spotsize_rads       = jnp.asarray(np.deg2rad(spot_size),
+                                          dtype=jnp.float32),
+        ldc_mode            = ldc_mode,
+        plot_map_wavelength = float(plot_map_wavelength),
     ))
 
-    # ---- Loop over rotational phases ------------------------------------
-    # The first call triggers JIT compilation; subsequent calls are fast.
-    lc_list   = []
-    eps_list  = []
-    maps_list = []
+    # ---- Single compiled call for all phases ----------------------------
+    lc_raw, epsilon, star_maps = _all_phases_fn(all_spot_carts)
 
-    for phase in phases_rot:
-        # Rotate all spot positions for this phase
-        rotated = np.stack([
-            np.asarray(rotate_active_region(
-                jnp.asarray(spot_cart_pixel[s]),
-                phase_deg=float(phase),
-                inc_deg=inc_star,
-            ))
-            for s in range(nspot)
-        ]).astype(np.float32)  # (nspot, 3)
-
-        flux_norm, contamination, star_map = _phase_fn(
-            jnp.asarray(rotated)
-        )
-        lc_list.append(float(flux_norm))
-        eps_list.append(np.array(contamination))
-        maps_list.append(np.array(star_map))
-
-    lc = np.array(lc_list)
-    # Normalise by the median (same logic as original rotate_star)
-    if len(lc) > 1:
+    lc = np.array(lc_raw)
+    if nphase > 1:
         lc = lc / np.median(lc)
 
     return {
         "lc"        : lc,
-        "epsilon"   : np.array(eps_list),
-        "star_maps" : np.array(maps_list),
+        "epsilon"   : np.array(epsilon),
+        "star_maps" : np.array(star_maps),
     }
