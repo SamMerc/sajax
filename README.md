@@ -1,6 +1,6 @@
-<p align="center">
+<!-- <p align="center">
   <img src="docs/logo.png" alt="SAJAX logo" width="350"/>
-</p>
+</p> -->
 
 # SAJAX — Stellar Activity Grid for Exoplanets in JAX
 
