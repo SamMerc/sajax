@@ -198,7 +198,7 @@ def _compute_spot_mask(
     ))
 
     # Spots with spz < 0 are on the far side of the star — not visible
-    return (d_sigma <= spotsize_rad) & (spz >= 0.0)
+    return (d_sigma <= spotsize_rad)
 
 
 # ---------------------------------------------------------------------------
@@ -552,8 +552,6 @@ def compute_light_curve(
     lc_raw, epsilon, star_maps = _all_phases_fn(all_spot_carts)
 
     lc = np.array(lc_raw)
-    if nphase > 1:
-        lc = lc / np.median(lc)
 
     return {
         "lc"        : lc,
