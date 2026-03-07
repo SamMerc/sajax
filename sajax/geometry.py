@@ -98,8 +98,8 @@ def rotate_active_region(
     # Original SAGE applies (90 - inc_star) as the x-axis tilt
     tilt_rad = jnp.deg2rad(90.0 - inc_deg)
 
-    # .T because the original used rotation_matrix(...).T — passive convention
-    R_rot = rotation_matrix_y(phase_rad).T
-    R_inc = rotation_matrix_x(tilt_rad).T
+    #Getting rotation matrices
+    R_rot = rotation_matrix_y(phase_rad)
+    R_inc = rotation_matrix_x(tilt_rad)
 
     return R_inc @ R_rot @ cart

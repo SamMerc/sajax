@@ -191,6 +191,7 @@ def _compute_spot_mask(
 
     # Great-circle distance between spot centre and each pixel
     delta_lon = jnp.abs(spotlong_rot - longi)
+    delta_lon = jnp.minimum(delta_lon, 2 * jnp.pi - delta_lon)
     d_sigma = jnp.arccos(jnp.clip(
     jnp.sin(spotlat_rot) * jnp.sin(lati)
     + jnp.cos(spotlat_rot) * jnp.cos(lati) * jnp.cos(delta_lon),
