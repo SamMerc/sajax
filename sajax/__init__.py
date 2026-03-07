@@ -13,19 +13,14 @@ build_stellar_grid
 
 rotate_active_region
     Apply stellar rotation and inclination to a Cartesian spot position.
-
-interp_spectrum
-    Linearly interpolate a stellar spectrum onto a new wavelength grid.
 """
 
 from .core import compute_light_curve, build_stellar_grid
 from .geometry import rotate_active_region
-from .interpolation import interp_spectrum
 
 __version__ = "0.1.0"
 __all__ = [
     "compute_light_curve",
     "build_stellar_grid",
     "rotate_active_region",
-    "interp_spectrum",
 ]

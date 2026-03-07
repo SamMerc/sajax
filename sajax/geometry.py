@@ -21,7 +21,7 @@ import jax.numpy as jnp
 
 def rotation_matrix_y(angle_rad: float) -> jnp.ndarray:
     """
-    3×3 active rotation matrix around the y-axis.
+    3x3 active rotation matrix around the y-axis.
 
     Parameters
     ----------
@@ -43,7 +43,7 @@ def rotation_matrix_y(angle_rad: float) -> jnp.ndarray:
 
 def rotation_matrix_x(angle_rad: float) -> jnp.ndarray:
     """
-    3×3 active rotation matrix around the x-axis.
+    3x3 active rotation matrix around the x-axis.
 
     Parameters
     ----------

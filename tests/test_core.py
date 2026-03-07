@@ -27,11 +27,9 @@ def flat_spectra():
 @pytest.fixture
 def base_params():
     return dict(
-        radiusratio = 0.1,
-        semimajor   = 10.0,
-        u1          = 0.3,
-        u2          = 0.1,
-        inc_star    = 90.0,
+        u1       = 0.3,
+        u2       = 0.1,
+        inc_star = 90.0,
     )
 
 
@@ -41,9 +39,7 @@ def base_params():
 
 def test_build_stellar_grid_shapes():
     grid = build_stellar_grid(
-        planet_pixel_size=10,
-        radiusratio=0.1,
-        semimajor=10.0,
+        stellar_grid_size=50,
         ve=2.0,
     )
     n = grid["n"]
@@ -54,7 +50,7 @@ def test_build_stellar_grid_shapes():
 
 
 def test_build_stellar_grid_mu_range():
-    grid = build_stellar_grid(10, 0.1, 10.0, 2.0)
+    grid = build_stellar_grid(50, 2.0)
     mu = grid["mu_grid"]
     assert float(mu.min()) >= 0.0
     assert float(mu.max()) <= 1.0 + 1e-5
@@ -75,7 +71,7 @@ def test_output_shapes_single_phase(flat_spectra, base_params):
         spot_long          = [0.0],
         spot_size          = [10.0],
         phases_rot         = [0.0],
-        planet_pixel_size  = 10,
+        stellar_grid_size  = 50,
         ve                 = 2.0,
         ldc_mode           = "multi-color",
     )
@@ -100,7 +96,7 @@ def test_output_shapes_multi_phase(flat_spectra, base_params):
         spot_long          = [0.0],
         spot_size          = [10.0],
         phases_rot         = phases,
-        planet_pixel_size  = 10,
+        stellar_grid_size  = 50,
         ve                 = 2.0,
     )
     assert result["lc"].shape == (8,)
@@ -123,7 +119,7 @@ def test_no_spot_flux_is_unity(flat_spectra, base_params):
         spot_long          = [0.0],
         spot_size          = [0.001],   # effectively zero spot
         phases_rot         = [0.0],
-        planet_pixel_size  = 10,
+        stellar_grid_size  = 50,
         ve                 = 0.0,
         ldc_mode           = "single",
     )
@@ -142,7 +138,7 @@ def test_cold_spot_dims_flux(flat_spectra, base_params):
         spot_long          = [0.0],
         spot_size          = [20.0],    # large visible spot
         phases_rot         = [0.0],
-        planet_pixel_size  = 10,
+        stellar_grid_size  = 50,
         ve                 = 0.0,
         ldc_mode           = "single",
     )
@@ -161,7 +157,7 @@ def test_multi_spot(flat_spectra, base_params):
         spot_long          = [0.0,  180.0],
         spot_size          = [10.0,  10.0],
         phases_rot         = np.linspace(0, 360, 6, endpoint=False),
-        planet_pixel_size  = 10,
+        stellar_grid_size  = 50,
         ve                 = 2.0,
     )
     assert result["lc"].shape == (6,)
@@ -183,7 +179,7 @@ def test_ldc_modes(flat_spectra, base_params, ldc_mode):
         spot_long         = [0.0],
         spot_size         = [8.0],
         phases_rot        = [0.0, 90.0],
-        planet_pixel_size = 10,
+        stellar_grid_size = 50,
         ve                = 1.0,
         ldc_mode          = ldc_mode,
     )
