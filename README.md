@@ -1,5 +1,7 @@
 # SAJAX — Stellar Activity Grid for Exoplanets in JAX
 
+![Tests](https://github.com/SamMerc/sajax/actions/workflows/tests.yml/badge.svg)
+
 SAJAX is a JAX-accelerated reimplementation of
 [SAGE](https://github.com/chakrah/sage) ([Chakraborty et al. 2024](https://www.aanda.org/articles/aa/abs/2024/05/aa47727-23/aa47727-23.html)), a code
 that models stellar contamination of exoplanet transmission spectra from
