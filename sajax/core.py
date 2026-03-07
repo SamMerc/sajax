@@ -56,6 +56,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 from jax import jit, vmap
+jax.config.update("jax_enable_x64", True)
 
 from .geometry import rotate_active_region
 
@@ -118,18 +119,18 @@ def build_stellar_grid(
 
     # Apply mask → 1D in-disc arrays
     flat_indices = np.flatnonzero(starmask)   # (total_pixels,)
-    x_disc = xg.ravel()[flat_indices].astype(np.float32)
-    y_disc = yg.ravel()[flat_indices].astype(np.float32)
-    r_disc = np.sqrt(r2.ravel()[flat_indices]).astype(np.float32)
+    x_disc = xg.ravel()[flat_indices].astype(np.float64)
+    y_disc = yg.ravel()[flat_indices].astype(np.float64)
+    r_disc = np.sqrt(r2.ravel()[flat_indices]).astype(np.float64)
 
     # mu = cos θ  (limb-darkening angle)
     mu_disc = np.cos(
         np.arcsin(np.clip(r_disc / star_pixel_rad, 0.0, 1.0))
-    ).astype(np.float32)
+    ).astype(np.float64)
 
     # Doppler velocity factor:  Δv/c = (y / R_star) * (ve / c)
     # y increases upward → redshift on the receding limb
-    vel_disc = (y_disc / star_pixel_rad * (ve / C)).astype(np.float32)
+    vel_disc = (y_disc / star_pixel_rad * (ve / C)).astype(np.float64)
 
     return dict(
         n             = n,
@@ -463,13 +464,13 @@ def compute_light_curve(
     ``star_maps`` — (nphase, n, n)  stellar flux map per phase
     """
     # ---- Input coercion -------------------------------------------------
-    wavelength = np.asarray(wavelength, dtype=np.float32)
-    flux_hot   = np.asarray(flux_hot,   dtype=np.float32)
-    flux_cold  = np.asarray(flux_cold,  dtype=np.float32)
-    phases_rot = np.atleast_1d(np.asarray(phases_rot, dtype=np.float32))
-    spot_lat   = np.atleast_1d(np.asarray(spot_lat,   dtype=np.float32))
-    spot_long  = np.atleast_1d(np.asarray(spot_long,  dtype=np.float32))
-    spot_size  = np.atleast_1d(np.asarray(spot_size,  dtype=np.float32))
+    wavelength = np.asarray(wavelength, dtype=np.float64)
+    flux_hot   = np.asarray(flux_hot,   dtype=np.float64)
+    flux_cold  = np.asarray(flux_cold,  dtype=np.float64)
+    phases_rot = np.atleast_1d(np.asarray(phases_rot, dtype=np.float64))
+    spot_lat   = np.atleast_1d(np.asarray(spot_lat,   dtype=np.float64))
+    spot_long  = np.atleast_1d(np.asarray(spot_long,  dtype=np.float64))
+    spot_size  = np.atleast_1d(np.asarray(spot_size,  dtype=np.float64))
 
     nwave  = len(wavelength)
     nspot  = len(spot_lat)
@@ -480,23 +481,23 @@ def compute_light_curve(
     u1_in          = params.get("u1", 0.0)
     u2_in          = params.get("u2", 0.0)
     mu_profile_pts = np.asarray(params.get("mu_profile", [0.0, 1.0]),
-                                dtype=np.float32)
+                                dtype=np.float64)
     I_profile = np.asarray(
         params.get("I_profile",
-                   np.ones((nwave, len(mu_profile_pts)), dtype=np.float32)),
-        dtype=np.float32,
+                   np.ones((nwave, len(mu_profile_pts)), dtype=np.float64)),
+        dtype=np.float64,
     )
 
     # ---- Limb-darkening arrays (nwave,) ---------------------------------
     if ldc_mode == "single":
-        u1 = np.zeros(nwave, dtype=np.float32)
-        u2 = np.zeros(nwave, dtype=np.float32)
+        u1 = np.zeros(nwave, dtype=np.float64)
+        u2 = np.zeros(nwave, dtype=np.float64)
     elif ldc_mode == "multi-color":
-        u1 = np.full(nwave, float(u1_in), dtype=np.float32)
-        u2 = np.full(nwave, float(u2_in), dtype=np.float32)
+        u1 = np.full(nwave, float(u1_in), dtype=np.float64)
+        u2 = np.full(nwave, float(u2_in), dtype=np.float64)
     else:
-        u1 = np.zeros(nwave, dtype=np.float32)
-        u2 = np.zeros(nwave, dtype=np.float32)
+        u1 = np.zeros(nwave, dtype=np.float64)
+        u2 = np.zeros(nwave, dtype=np.float64)
 
     # ---- Build pre-masked stellar grid (NumPy, runs once) ---------------
     grid = build_stellar_grid(stellar_grid_size, ve)
@@ -513,7 +514,7 @@ def compute_light_curve(
         spr * np.sin(spot_long_rad) * np.cos(spot_lat_rad),
         spr * np.sin(spot_lat_rad),
         spr * np.cos(spot_long_rad) * np.cos(spot_lat_rad),
-    ], axis=-1).astype(np.float32)  # (nspot, 3)
+    ], axis=-1).astype(np.float64)  # (nspot, 3)
 
     # ---- Rotate all spots for all phases in one vmapped call ------------
     def _rotate_spots_at_phase(phase_deg: float) -> jnp.ndarray:
@@ -542,7 +543,7 @@ def compute_light_curve(
         star_pixel_rad      = grid["star_pixel_rad"],
         total_pixels        = grid["total_pixels"],
         spotsize_rads       = jnp.asarray(np.deg2rad(spot_size),
-                                          dtype=jnp.float32),
+                                          dtype=jnp.float64),
         ldc_mode            = ldc_mode,
         plot_map_wavelength = float(plot_map_wavelength),
         n                   = grid["n"],
