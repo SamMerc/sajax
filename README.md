@@ -1,5 +1,5 @@
-# SAGE
-Stellar Activity Grid for Exoplanets
+# SAGE-JAX or SAJAX
+Stellar Activity Grid for Exoplanets in JAX
 
 ## Installation
 python packages required:
