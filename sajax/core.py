@@ -469,8 +469,16 @@ def build_model(
         u1 = np.zeros(nwave, dtype=np.float64)
         u2 = np.zeros(nwave, dtype=np.float64)
     elif ldc_mode == "multi-color":
-        u1 = np.full(nwave, float(u1_in), dtype=np.float64)
-        u2 = np.full(nwave, float(u2_in), dtype=np.float64)
+        u1_arr = np.asarray(u1_in, dtype=np.float64)
+        u2_arr = np.asarray(u2_in, dtype=np.float64)
+        if u1_arr.ndim == 0:
+            print("build_model: single-wavelength LDCs — repeating scalar u1/u2 across all wavelengths.")
+            u1 = np.repeat(u1_arr, nwave)
+            u2 = np.repeat(u2_arr, nwave)
+        else:
+            print(f"build_model: multi-wavelength LDCs — using per-wavelength u1/u2 arrays (length {len(u1_arr)}).")
+            u1 = u1_arr
+            u2 = u2_arr
     else:
         u1 = np.zeros(nwave, dtype=np.float64)
         u2 = np.zeros(nwave, dtype=np.float64)
