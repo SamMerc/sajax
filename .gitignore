@@ -33,6 +33,7 @@ env/
 .pytest_cache/
 .coverage
 htmlcov/
+*.xml
 
 # SAJAX output data (generated artefacts, not source)
 sage_output/
