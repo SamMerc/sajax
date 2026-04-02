@@ -23,8 +23,8 @@ gradient-based inference with tools like NumPyro or Optax.
 
 - **Spectroscopic light curves** — provide a spectrum for the quiet star
   and the active region; SAJAX returns a light curve at every wavelength.
-- **Multiple limb-darkening modes** — quadratic coefficients
-  (`single`, `multi-color`) or a full intensity profile
+- **Multiple limb-darkening modes** — provide coefficients for your favorite laws
+  (`linear`,`quadratic`,`power2`,`kipping3`,`nonlinear4`) or a full intensity profile
   (`intensity_profile`).
 - **Stellar rotation + inclination** — arbitrary rotational phases and
   stellar-axis inclinations are supported.
