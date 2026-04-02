@@ -68,8 +68,6 @@ flux_hot    = np.ones_like(wavelength)
 flux_cold   = np.ones_like(wavelength) * 0.7   # spot is 30% dimmer
 
 params = dict(
-    radiusratio = 0.1,      # Rp / Rs
-    semimajor   = 10.0,     # a / Rs
     u1          = 0.3,      # quadratic LD coefficient
     u2          = 0.1,
     inc_star    = 90.0,     # stellar inclination [deg]  (equator-on)
@@ -86,7 +84,7 @@ result = compute_light_curve(
     phases_rot         = np.linspace(0, 360, 50, endpoint=False),
     planet_pixel_size  = 20,
     ve                 = 2.0,              # equatorial velocity [km/s]
-    ldc_mode           = "multi-color",
+    ldc_mode           = "Quadratic",      #treatment of limb darkening
     plot_map_wavelength= 1.0,
 )
 
@@ -107,9 +105,8 @@ sajax/
 │   ├── __init__.py          # public API
 │   ├── core.py              # JAX light-curve engine
 │   ├── geometry.py          # rotation matrices, coordinate transforms
-│   └── interpolation.py     # spectral interpolation helpers
 ├── examples/
-│   └── basic_lightcurve.ipynb
+│   └── sajax_quickstart.ipynb
 ├── tests/
 │   └── test_core.py
 ├── pyproject.toml
@@ -122,7 +119,7 @@ sajax/
 ## Credits
 
 SAJAX is a JAX port of SAGE, originally written by
-Hritam Chakraborty (Université de Genève).
+Hritam Chakraborty (University of Geneva).
 The physics and grid approach are described in Chakraborty et al. 2024.
 
 ---
