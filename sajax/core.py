@@ -60,7 +60,7 @@ from jax import jit, vmap
 from .geometry import rotate_active_region
 
 # Type alias
-LdcMode = Literal["single", "multi-color", "intensity_profile"]
+LdcMode = Literal["quadratic", "intensity_profile"]
 
 
 # ---------------------------------------------------------------------------
@@ -120,9 +120,9 @@ def build_stellar_grid(
     y_disc = yg.ravel()[flat_indices].astype(np.float32)
     r_disc = np.sqrt(r2.ravel()[flat_indices]).astype(np.float32)
 
-    # mu = cos θ = sqrt(1 - (r/R)²), clamped for float32 safety
-    mu_disc = np.sqrt(
-        np.clip(1.0 - (r_disc / star_pixel_rad) ** 2, 0.0, 1.0)
+    # mu = cos θ  (limb-darkening angle)
+    mu_disc = np.cos(
+        np.arcsin(np.clip(r_disc / star_pixel_rad, 0.0, 1.0))
     ).astype(np.float32)
 
     # Doppler velocity factor:  Δv/c = (y / R_star) * (ve / c)
@@ -230,10 +230,12 @@ def _flux_at_wavelength(
     flux_disc  : (total_pixels,)  — per-pixel flux values (for map output)
     """
     # ---- Limb darkening -------------------------------------------------
+    # "intensity_profile": interpolate a user-supplied I(mu) profile.
+    # "quadratic" (default): standard quadratic law using u1, u2.
     if ldc_mode == "intensity_profile":
         ldc = jnp.interp(mu_disc, mu_profile_pts, I_prof_wl,
                          left=0.0, right=0.0)
-    else:
+    else:  # "quadratic"
         ldc = 1.0 - u1_wl * (1.0 - mu_disc) - u2_wl * (1.0 - mu_disc) ** 2
 
     # ---- Unspotted grid -------------------------------------------------
@@ -419,7 +421,7 @@ def build_model(
     phases_rot: np.ndarray,
     stellar_grid_size: int,
     ve: float,
-    ldc_mode: LdcMode = "multi-color",
+    ldc_mode: LdcMode = "quadratic",
     plot_map_wavelength: Optional[float] = None,
 ) -> dict:
     """
@@ -465,23 +467,34 @@ def build_model(
         dtype=np.float64,
     )
 
-    if ldc_mode == "single":
+    if ldc_mode == "intensity_profile":
+        # Intensity-profile mode does not use u1/u2 at all
         u1 = np.zeros(nwave, dtype=np.float64)
         u2 = np.zeros(nwave, dtype=np.float64)
-    elif ldc_mode == "multi-color":
+    else:
+        # Quadratic limb-darkening: detect scalar float vs per-wavelength array
         u1_arr = np.asarray(u1_in, dtype=np.float64)
         u2_arr = np.asarray(u2_in, dtype=np.float64)
         if u1_arr.ndim == 0:
-            print("build_model: single-wavelength LDCs — repeating scalar u1/u2 across all wavelengths.")
-            u1 = np.repeat(u1_arr, nwave)
-            u2 = np.repeat(u2_arr, nwave)
+            print(
+                f"build_model: scalar LDCs provided "
+                f"(u1={float(u1_arr):.4f}, u2={float(u2_arr):.4f}) — "
+                f"broadcasting across all {nwave} wavelength bins."
+            )
+            u1 = np.full(nwave, float(u1_arr), dtype=np.float64)
+            u2 = np.full(nwave, float(u2_arr), dtype=np.float64)
         else:
-            print(f"build_model: multi-wavelength LDCs — using per-wavelength u1/u2 arrays (length {len(u1_arr)}).")
+            if len(u1_arr) != nwave:
+                raise ValueError(
+                    f"build_model: u1/u2 arrays have length {len(u1_arr)} "
+                    f"but wavelength grid has {nwave} bins. They must match."
+                )
+            print(
+                f"build_model: per-wavelength LDCs provided "
+                f"(length {len(u1_arr)}) — using one u1/u2 pair per wavelength bin."
+            )
             u1 = u1_arr
             u2 = u2_arr
-    else:
-        u1 = np.zeros(nwave, dtype=np.float64)
-        u2 = np.zeros(nwave, dtype=np.float64)
 
     grid = build_stellar_grid(stellar_grid_size, ve)
 
@@ -621,7 +634,7 @@ def compute_light_curve(
     phases_rot: np.ndarray,
     stellar_grid_size: int,
     ve: float,
-    ldc_mode: LdcMode = "multi-color",
+    ldc_mode: LdcMode = "quadratic",
     plot_map_wavelength: Optional[float] = None,
 ) -> dict:
     """

@@ -76,7 +76,7 @@ def test_output_shapes_single_phase(flat_spectra, base_params):
         phases_rot         = [0.0],
         stellar_grid_size  = 50,
         ve                 = 2.0,
-        ldc_mode           = "multi-color",
+        ldc_mode="quadratic",
     )
     assert result["lc"].shape == (1,)
     assert result["epsilon"].shape == (1, len(wl))
@@ -124,7 +124,7 @@ def test_no_spot_flux_is_unity(flat_spectra, base_params):
         phases_rot         = [0.0],
         stellar_grid_size  = 50,
         ve                 = 0.0,
-        ldc_mode           = "single",
+        ldc_mode="quadratic",
     )
     assert abs(float(result["lc"][0]) - 1.0) < 0.01
 
@@ -143,7 +143,7 @@ def test_cold_spot_dims_flux(flat_spectra, base_params):
         phases_rot         = [0.0],
         stellar_grid_size  = 50,
         ve                 = 0.0,
-        ldc_mode           = "single",
+        ldc_mode="quadratic",
     )
     assert float(result["lc"][0]) < 1.0
 
@@ -170,7 +170,7 @@ def test_multi_spot(flat_spectra, base_params):
 # LDC modes
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("ldc_mode", ["single", "multi-color"])
+@pytest.mark.parametrize("ldc_mode", ["quadratic", "intensity_profile"])
 def test_ldc_modes(flat_spectra, base_params, ldc_mode):
     wl, flux_hot, flux_cold = flat_spectra
     result = compute_light_curve(
