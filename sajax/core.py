@@ -60,7 +60,23 @@ from jax import jit, vmap
 from .geometry import rotate_active_region
 
 # Type alias
-LdcMode = Literal["quadratic", "intensity_profile"]
+LdcMode = Literal[
+    "linear",          # 1 coeff  : u
+    "quadratic",       # 2 coeffs : u1, u2
+    "power2",          # 2 coeffs : c, alpha
+    "kipping3",        # 3 coeffs : c1, c2, c3
+    "nonlinear4",      # 4 coeffs : c1, c2, c3, c4
+    "intensity_profile",
+]
+
+# Number of LDC coefficients expected per law (used for validation in build_model)
+_N_COEFFS: dict[str, int] = {
+    "linear":     1,
+    "quadratic":  2,
+    "power2":     2,
+    "kipping3":   3,
+    "nonlinear4": 4,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -207,8 +223,7 @@ def _flux_at_wavelength(
     # --- vmapped: one scalar/slice per wavelength ---
     flux_hot_wl: float,
     flux_cold_wl: float,
-    u1_wl: float,
-    u2_wl: float,
+    ldc_coeffs_wl: jnp.ndarray,  # (n_coeffs,)  — one row of ldc_coeffs
     I_prof_wl: jnp.ndarray,      # (n_mu_pts,)
     # --- broadcast: shared across wavelengths ---
     mu_disc: jnp.ndarray,         # (total_pixels,)
@@ -230,13 +245,34 @@ def _flux_at_wavelength(
     flux_disc  : (total_pixels,)  — per-pixel flux values (for map output)
     """
     # ---- Limb darkening -------------------------------------------------
-    # "intensity_profile": interpolate a user-supplied I(mu) profile.
-    # "quadratic" (default): standard quadratic law using u1, u2.
     if ldc_mode == "intensity_profile":
+        # Interpolate a user-supplied I(mu) profile.
         ldc = jnp.interp(mu_disc, mu_profile_pts, I_prof_wl,
                          left=0.0, right=0.0)
-    else:  # "quadratic"
-        ldc = 1.0 - u1_wl * (1.0 - mu_disc) - u2_wl * (1.0 - mu_disc) ** 2
+    elif ldc_mode == "linear":
+        # I(μ) = 1 - u*(1 - μ)
+        ldc = 1.0 - ldc_coeffs_wl[0] * (1.0 - mu_disc)
+    elif ldc_mode == "quadratic":
+        # I(μ) = 1 - u1*(1-μ) - u2*(1-μ)²
+        ldc = (1.0
+               - ldc_coeffs_wl[0] * (1.0 - mu_disc)
+               - ldc_coeffs_wl[1] * (1.0 - mu_disc) ** 2)
+    elif ldc_mode == "power2":
+        # I(μ) = 1 - c*(1 - μ^α)
+        ldc = 1.0 - ldc_coeffs_wl[0] * (1.0 - mu_disc ** ldc_coeffs_wl[1])
+    elif ldc_mode == "kipping3":
+        # I(μ) = 1 - c1*(1-μ^½) - c2*(1-μ) - c3*(1-μ^(3/2))
+        ldc = (1.0
+               - ldc_coeffs_wl[0] * (1.0 - mu_disc ** 0.5)
+               - ldc_coeffs_wl[1] * (1.0 - mu_disc)
+               - ldc_coeffs_wl[2] * (1.0 - mu_disc ** 1.5))
+    else:  # "nonlinear4"  — Claret (2000) four-parameter law
+        # I(μ) = 1 - Σ_{k=1}^{4} c_k*(1 - μ^(k/2))
+        ldc = (1.0
+               - ldc_coeffs_wl[0] * (1.0 - mu_disc ** 0.5)
+               - ldc_coeffs_wl[1] * (1.0 - mu_disc)
+               - ldc_coeffs_wl[2] * (1.0 - mu_disc ** 1.5)
+               - ldc_coeffs_wl[3] * (1.0 - mu_disc ** 2.0))
 
     # ---- Unspotted grid -------------------------------------------------
     hot_flux  = flux_hot_wl  * (1.0 + vel_disc) * ldc   # (total_pixels,)
@@ -266,8 +302,7 @@ def _compute_single_phase(
     wavelength: jnp.ndarray,          # (nwave,)
     flux_hot_interp: jnp.ndarray,     # (nwave,)
     flux_cold_interp: jnp.ndarray,    # (nwave,)
-    u1: jnp.ndarray,                  # (nwave,)
-    u2: jnp.ndarray,                  # (nwave,)
+    ldc_coeffs: jnp.ndarray,          # (nwave, n_coeffs)
     I_profile: jnp.ndarray,           # (nwave, n_mu_pts)
     mu_profile_pts: jnp.ndarray,      # (n_mu_pts,)
     x_disc: jnp.ndarray,              # (total_pixels,)
@@ -310,14 +345,13 @@ def _compute_single_phase(
             mu_profile_pts = mu_profile_pts,
             ldc_mode       = ldc_mode,
         ),
-        in_axes=(0, 0, 0, 0, 0),
+        in_axes=(0, 0, 0, 0),
     )
 
     star_specs, bin_fluxes, flux_discs = _flux_vmap(
         flux_hot_interp,
         flux_cold_interp,
-        u1,
-        u2,
+        ldc_coeffs,
         I_profile,
     )
 
@@ -345,8 +379,7 @@ def _compute_all_phases(
     wavelength: jnp.ndarray,
     flux_hot_interp: jnp.ndarray,
     flux_cold_interp: jnp.ndarray,
-    u1: jnp.ndarray,
-    u2: jnp.ndarray,
+    ldc_coeffs: jnp.ndarray,       # (nwave, n_coeffs)
     I_profile: jnp.ndarray,
     mu_profile_pts: jnp.ndarray,
     x_disc: jnp.ndarray,
@@ -376,8 +409,7 @@ def _compute_all_phases(
             wavelength          = wavelength,
             flux_hot_interp     = flux_hot_interp,
             flux_cold_interp    = flux_cold_interp,
-            u1                  = u1,
-            u2                  = u2,
+            ldc_coeffs          = ldc_coeffs,
             I_profile           = I_profile,
             mu_profile_pts      = mu_profile_pts,
             x_disc              = x_disc,
@@ -457,8 +489,6 @@ def build_model(
     nphase = len(phases_rot)
 
     inc_star       = float(params.get("inc_star", 90.0))
-    u1_in          = params.get("u1", 0.0)
-    u2_in          = params.get("u2", 0.0)
     mu_profile_pts = np.asarray(params.get("mu_profile", [0.0, 1.0]),
                                 dtype=np.float64)
     I_profile = np.asarray(
@@ -468,33 +498,57 @@ def build_model(
     )
 
     if ldc_mode == "intensity_profile":
-        # Intensity-profile mode does not use u1/u2 at all
-        u1 = np.zeros(nwave, dtype=np.float64)
-        u2 = np.zeros(nwave, dtype=np.float64)
+        # Intensity-profile mode does not use analytical LDC coefficients
+        ldc_coeffs = np.zeros((nwave, 1), dtype=np.float64)
     else:
-        # Quadratic limb-darkening: detect scalar float vs per-wavelength array
-        u1_arr = np.asarray(u1_in, dtype=np.float64)
-        u2_arr = np.asarray(u2_in, dtype=np.float64)
-        if u1_arr.ndim == 0:
-            print(
-                f"build_model: scalar LDCs provided "
-                f"(u1={float(u1_arr):.4f}, u2={float(u2_arr):.4f}) — "
-                f"broadcasting across all {nwave} wavelength bins."
+        n_coeffs = _N_COEFFS[ldc_mode]
+
+        # Accept either the unified "ldc_coeffs" key or legacy "u1"/"u2" for quadratic
+        raw = params.get("ldc_coeffs", None)
+        if raw is None and ldc_mode == "quadratic":
+            raw = [params.get("u1", 0.0), params.get("u2", 0.0)]
+        if raw is None:
+            raise ValueError(
+                f"build_model: params must contain 'ldc_coeffs' for "
+                f"ldc_mode='{ldc_mode}'. Expected {n_coeffs} coefficient(s)."
             )
-            u1 = np.full(nwave, float(u1_arr), dtype=np.float64)
-            u2 = np.full(nwave, float(u2_arr), dtype=np.float64)
+
+        raw = list(raw) if not isinstance(raw, (list, tuple)) else list(raw)
+        if len(raw) != n_coeffs:
+            raise ValueError(
+                f"build_model: ldc_mode='{ldc_mode}' expects {n_coeffs} "
+                f"coefficient(s) but {len(raw)} were provided."
+            )
+
+        # Build (nwave, n_coeffs) — each element of raw is scalar or (nwave,)
+        coeff_arrays = []
+        all_scalar   = True
+        for i, coeff in enumerate(raw):
+            c = np.asarray(coeff, dtype=np.float64)
+            if c.ndim == 0:
+                coeff_arrays.append(np.full(nwave, float(c)))
+            else:
+                if len(c) != nwave:
+                    raise ValueError(
+                        f"build_model: ldc_coeffs[{i}] has length {len(c)} "
+                        f"but wavelength grid has {nwave} bins. They must match."
+                    )
+                coeff_arrays.append(c)
+                all_scalar = False
+
+        ldc_coeffs = np.stack(coeff_arrays, axis=1)  # (nwave, n_coeffs)
+
+        if all_scalar:
+            coeff_str = ", ".join(f"{float(c[0]):.4f}" for c in coeff_arrays)
+            print(
+                f"build_model: scalar LDCs provided for '{ldc_mode}' law "
+                f"([{coeff_str}]) — broadcasting across all {nwave} wavelength bins."
+            )
         else:
-            if len(u1_arr) != nwave:
-                raise ValueError(
-                    f"build_model: u1/u2 arrays have length {len(u1_arr)} "
-                    f"but wavelength grid has {nwave} bins. They must match."
-                )
             print(
-                f"build_model: per-wavelength LDCs provided "
-                f"(length {len(u1_arr)}) — using one u1/u2 pair per wavelength bin."
+                f"build_model: per-wavelength LDCs provided for '{ldc_mode}' law "
+                f"({n_coeffs} coefficient(s), {nwave} wavelength bins)."
             )
-            u1 = u1_arr
-            u2 = u2_arr
 
     grid = build_stellar_grid(stellar_grid_size, ve)
 
@@ -505,8 +559,7 @@ def build_model(
         # spectral
         wavelength          = jnp.asarray(wavelength),
         flux_hot            = jnp.asarray(flux_hot),
-        u1                  = jnp.asarray(u1),
-        u2                  = jnp.asarray(u2),
+        ldc_coeffs          = jnp.asarray(ldc_coeffs),
         I_profile           = jnp.asarray(I_profile),
         mu_profile_pts      = jnp.asarray(mu_profile_pts),
         # grid
@@ -599,8 +652,7 @@ def evaluate_light_curve(
         wavelength          = model["wavelength"],
         flux_hot_interp     = model["flux_hot"],
         flux_cold_interp    = flux_cold,
-        u1                  = model["u1"],
-        u2                  = model["u2"],
+        ldc_coeffs          = model["ldc_coeffs"],
         I_profile           = model["I_profile"],
         mu_profile_pts      = model["mu_profile_pts"],
         x_disc              = model["x_disc"],

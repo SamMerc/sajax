@@ -27,9 +27,8 @@ def flat_spectra():
 @pytest.fixture
 def base_params():
     return dict(
-        u1       = 0.3,
-        u2       = 0.1,
-        inc_star = 90.0,
+        ldc_coeffs = [0.3, 0.1],  # quadratic law: [u1, u2]
+        inc_star   = 90.0,
     )
 
 
@@ -170,14 +169,21 @@ def test_multi_spot(flat_spectra, base_params):
 # LDC modes
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("ldc_mode", ["quadratic", "intensity_profile"])
-def test_ldc_modes(flat_spectra, base_params, ldc_mode):
+@pytest.mark.parametrize("ldc_mode,ldc_coeffs", [
+    ("linear",      [0.3]),
+    ("quadratic",   [0.3, 0.1]),
+    ("power2",      [0.4, 0.6]),
+    ("kipping3",    [0.2, 0.3, 0.1]),
+    ("nonlinear4",  [0.1, 0.2, 0.15, 0.05]),
+])
+def test_ldc_modes(flat_spectra, base_params, ldc_mode, ldc_coeffs):
     wl, flux_hot, flux_cold = flat_spectra
+    params = {**base_params, "ldc_coeffs": ldc_coeffs}
     result = compute_light_curve(
         wavelength        = wl,
         flux_hot          = flux_hot,
         flux_cold         = flux_cold,
-        params            = base_params,
+        params            = params,
         spot_lat          = [15.0],
         spot_long         = [0.0],
         spot_size         = [8.0],
