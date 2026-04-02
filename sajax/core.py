@@ -120,9 +120,9 @@ def build_stellar_grid(
     y_disc = yg.ravel()[flat_indices].astype(np.float32)
     r_disc = np.sqrt(r2.ravel()[flat_indices]).astype(np.float32)
 
-    # mu = cos θ  (limb-darkening angle)
-    mu_disc = np.cos(
-        np.arcsin(np.clip(r_disc / star_pixel_rad, 0.0, 1.0))
+    # mu = cos θ = sqrt(1 - (r/R)²), clamped for float32 safety
+    mu_disc = np.sqrt(
+        np.clip(1.0 - (r_disc / star_pixel_rad) ** 2, 0.0, 1.0)
     ).astype(np.float32)
 
     # Doppler velocity factor:  Δv/c = (y / R_star) * (ve / c)
