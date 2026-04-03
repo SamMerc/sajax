@@ -18,6 +18,7 @@ change to the calling code, and fully differentiable — enabling
 gradient-based inference with tools like NumPyro or Optax.
 
 Documentation can be found at [sajax.readthedocs.io](sajax.readthedocs.io)
+
 ---
 
 ## Features
