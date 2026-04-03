@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/logo.png" width="300">
+  <img src="docs/_static/logo.png" width="300">
 </p>
 
 # SAJAX — Stellar Activity Grid for Exoplanets in JAX
