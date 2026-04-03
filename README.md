@@ -17,7 +17,7 @@ loop with `jax.vmap`, making it fast on both CPU and GPU without any
 change to the calling code, and fully differentiable — enabling
 gradient-based inference with tools like NumPyro or Optax.
 
-Documentation can be found at [sajax.readthedocs.io](sajax.readthedocs.io)
+Documentation can be found at sajax.readthedocs.io](http://sajax.readthedocs.io/)
 
 ---
 
