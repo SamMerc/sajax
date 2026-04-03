@@ -45,7 +45,7 @@ myst_url_schemes = ("http", "https")
 plot_html_show_formats = False
 plot_html_show_source_link = False
 
-autoapi_dirs = ["../spotter"]
+autoapi_dirs = ["../sajax"]
 autoapi_ignore = ["*_version*", "*/types*"]
 autoapi_options = [
     "members",

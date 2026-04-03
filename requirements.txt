@@ -1,0 +1,12 @@
+
+sphinx>=7.0
+sphinx-book-theme
+myst-nb
+sphinx-copybutton
+sphinx-autoapi
+matplotlib>=3.7
+pydata-sphinx-theme
+numpy>=1.24
+jax>=0.4
+jaxlib>=0.4
+scipy>=1.10
