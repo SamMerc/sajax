@@ -43,7 +43,3 @@ sage_output/
 # JAX / XLA compilation cache
 jax_cache/
 __jax_cache__/
-
-# Documentation build artefacts
-docs/_build/
-docs/.jupyter_cache/
