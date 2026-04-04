@@ -29,7 +29,7 @@ Key Features
    usage
 
 .. toctree::
-   :maxdepth: 1
+   :maxdepth: 0
    :caption: Tutorials
 
    /examples/sajax_quickstart
