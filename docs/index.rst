@@ -19,30 +19,24 @@ Key Features
 - **JAX-native** — ``jit``, ``vmap``, and ``grad`` work out of the box.
 - **pip-installable** — clean, modern packaging.
 
-Get Started
 ---------------
 
 .. toctree::
    :maxdepth: 1
-   :caption:
+   :caption: Get Started
 
    installation
    usage
 
-Tutorials
----------------
-
 .. toctree::
    :maxdepth: 1
-   :caption:
+   :caption: Tutorials
 
    /examples/sajax_quickstart
 
-Reference
--------------
 
 .. toctree::
    :maxdepth: 1
-   :caption:
+   :caption: Reference
 
    modules
