@@ -1,6 +1,7 @@
 Welcome to SAJAX's documentation!
+=================================
 
-SAJAX is a JAX-accelerated reimplementation of [SAGE](https://github.com/chakrah/sage) ([Chakraborty et al. 2024](https://www.aanda.org/articles/aa/abs/2024/05/aa47727-23/aa47727-23.html))
+SAJAX is a JAX-accelerated reimplementation of `SAGE <https://github.com/chakrah/sage>`_ (`Chakraborty et al. 2024 <https://www.aanda.org/articles/aa/abs/2024/05/aa47727-23/aa47727-23.html>`_)
 , a code that models stellar contamination of exoplanet transmission spectra from active regions (spots, faculae) on the stellar surface.
 
 The key innovation over plain SAGE is that SAJAX vectorises the spectral
