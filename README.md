@@ -19,8 +19,6 @@ gradient-based inference with tools like NumPyro or Optax.
 
 Documentation can be found at [sajax.readthedocs.io](http://sajax.readthedocs.io/)
 
----
-
 ## Installation
 
 ```bash
@@ -34,7 +32,6 @@ git clone https://github.com/SamMerc/sajax.git
 cd sajax
 pip install -e ".[dev]"
 ```
----
 
 ## Repository layout
 
@@ -52,17 +49,3 @@ sajax/
 ├── .gitignore
 └── README.md
 ```
-
----
-
-## Credits
-
-SAJAX is a JAX port of SAGE, originally written by
-Hritam Chakraborty (University of Geneva).
-The physics and grid approach are described in Chakraborty et al. 2024.
-
----
-
-## License
-
-MIT
