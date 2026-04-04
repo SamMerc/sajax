@@ -5,6 +5,7 @@ Welcome to SAJAX
    :maxdepth: 2
    :caption: Contents:
 
+   installation
    modules
 
 Indices and tables
