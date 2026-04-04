@@ -21,20 +21,6 @@ Documentation can be found at [sajax.readthedocs.io](http://sajax.readthedocs.io
 
 ---
 
-## Features
-
-- **Spectroscopic light curves** — provide a spectrum for the quiet star
-  and the active region; SAJAX returns a light curve at every wavelength.
-- **Multiple limb-darkening modes** — provide coefficients for your favorite laws
-  (`linear`,`quadratic`,`power2`,`kipping3`,`nonlinear4`) or a full intensity profile
-  (`intensity_profile`).
-- **Stellar rotation + inclination** — arbitrary rotational phases and
-  stellar-axis inclinations are supported.
-- **JAX-native** — `jit`, `vmap`, and `grad` work out of the box.
-- **pip-installable** — clean, modern packaging.
-
----
-
 ## Installation
 
 ```bash
