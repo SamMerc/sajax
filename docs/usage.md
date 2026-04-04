@@ -55,24 +55,6 @@ SAJAX supports multiple limb-darkening laws:
 - `nonlinear4` — 4-coefficient law
 - `intensity_profile` — full I(μ) profile
 
-## JAX Integration
-
-SAJAX is fully differentiable — use JAX transforms for inference:
-
-```python
-import jax
-from jax import jit, vmap, grad
-
-# Compile for speed
-compute_lc_jit = jit(compute_light_curve)
-
-# Vectorize over active region parameters
-compute_lc_batch = vmap(compute_light_curve, in_axes=(None, None, None, 0, ...))
-
-# Compute gradients for inference
-dlc_du = grad(lambda u: compute_light_curve(..., u1=u)["lc"].sum())
-```
-
 ## Common Use Cases
 
 ### Case 1: Single active region
@@ -103,7 +85,7 @@ result = compute_light_curve(
     ar_long            = [0.0],
     ar_size            = [10.0],           # angular radius [deg]
     phases_rot         = np.linspace(0, 360, 50, endpoint=False),
-    planet_pixel_size  = 20,
+    stellar_grid_size  = 100,             # stellar radius in pixels
     ve                 = 2.0,              # equatorial velocity [km/s]
     ldc_mode           = "Quadratic",      #treatment of limb darkening
     plot_map_wavelength= 1.0,
@@ -132,8 +114,8 @@ in the previous code, with
 
 ## Next Steps
 
-Check Tutorials or the examples/ directory for a full working example with plots
+- 📓 **[View the Interactive Tutorial](tutorials/sajax_quickstart.html)** — See a full working example with plots and live outputs
 
-Read the API Reference for all parameters
+- 💾 **[Explore Examples Directory](https://github.com/SamMerc/sajax/tree/main/examples)** — Check out additional use cases and advanced examples in the GitHub repository
 
-Explore JAX Integration for gradient-based inference
+- 📚 **[Read the API Reference](modules.html)** — Learn about all available functions, classes, and parameters
