@@ -24,17 +24,15 @@ Get Started
 
 .. toctree::
    :maxdepth: 1
-   :caption: Get Started:
 
    installation
    usage
-   ../examples/sajax_quickstart
+   /examples/sajax_quickstart
 
 Reference
 -------------
 
 .. toctree::
    :maxdepth: 1
-   :caption: Reference:
 
    modules
