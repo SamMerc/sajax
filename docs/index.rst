@@ -27,6 +27,7 @@ Key Features
 
    installation
    usage
+   examples/comparison
 
 .. toctree::
    :maxdepth: 1
