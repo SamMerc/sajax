@@ -27,6 +27,13 @@ Get Started
 
    installation
    usage
+
+Tutorials
+---------------
+
+.. toctree::
+   :maxdepth: 1
+
    /examples/sajax_quickstart
 
 Reference
