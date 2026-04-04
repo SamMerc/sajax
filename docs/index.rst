@@ -29,14 +29,13 @@ Key Features
    usage
 
 .. toctree::
-   :maxdepth: 0
+   :maxdepth: 1
    :caption: Tutorials
 
-   /examples/sajax_quickstart
+   examples/quickstart
+   examples/inference
 
 
 .. toctree::
    :maxdepth: 1
    :caption: Reference
-
-   modules
