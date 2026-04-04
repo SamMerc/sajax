@@ -24,6 +24,7 @@ Get Started
 
 .. toctree::
    :maxdepth: 1
+   :caption:
 
    installation
    usage
@@ -33,6 +34,7 @@ Tutorials
 
 .. toctree::
    :maxdepth: 1
+   :caption:
 
    /examples/sajax_quickstart
 
@@ -41,5 +43,6 @@ Reference
 
 .. toctree::
    :maxdepth: 1
+   :caption:
 
    modules

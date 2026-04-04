@@ -116,6 +116,6 @@ in the previous code, with
 
 - 📓 **[View the Interactive Tutorial](tutorials/sajax_quickstart.html)** — See a full working example with plots and live outputs
 
-- 💾 **[Explore Examples Directory](https://github.com/SamMerc/sajax/tree/main/examples)** — Check out additional use cases and advanced examples in the GitHub repository
+- 💾 **[Explore Examples Directory](https://github.com/SamMerc/sajax/tree/main/docs/examples)** — Check out additional use cases and advanced examples in the GitHub repository
 
 - 📚 **[Read the API Reference](modules.html)** — Learn about all available functions, classes, and parameters
