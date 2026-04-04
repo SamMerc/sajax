@@ -10,7 +10,7 @@
 SAJAX is a JAX-accelerated reimplementation of
 [SAGE](https://github.com/chakrah/sage) ([Chakraborty et al. 2024](https://www.aanda.org/articles/aa/abs/2024/05/aa47727-23/aa47727-23.html)), a code
 that models stellar contamination of exoplanet transmission spectra from
-active regions (spots, faculae) on the stellar surface.
+active regions (ars, faculae) on the stellar surface.
 
 The key innovation over plain SAGE is that SAJAX vectorises the spectral
 loop with `jax.vmap`, making it fast on both CPU and GPU without any
@@ -52,8 +52,8 @@ from sajax import compute_light_curve
 wavelength  = np.linspace(0.3, 5.0, 200)
 
 # Flat spectra as a minimal example — replace with model atmospheres
-flux_hot    = np.ones_like(wavelength)
-flux_cold   = np.ones_like(wavelength) * 0.7   # spot is 30% dimmer
+flux_quiet    = np.ones_like(wavelength)
+flux_active   = np.ones_like(wavelength) * 0.7   # active region is 30% dimmer
 
 params = dict(
     u1          = 0.3,      # quadratic LD coefficient
@@ -63,12 +63,12 @@ params = dict(
 
 result = compute_light_curve(
     wavelength         = wavelength,
-    flux_hot           = flux_hot,
-    flux_cold          = flux_cold,
+    flux_quiet           = flux_quiet,
+    flux_active          = flux_active,
     params             = params,
-    spot_lat           = [20.0],           # one spot at 20° latitude
-    spot_long          = [0.0],
-    spot_size          = [10.0],           # angular radius [deg]
+    ar_lat           = [20.0],           # one active region at 20° latitude
+    ar_long          = [0.0],
+    ar_size          = [10.0],           # angular radius [deg]
     phases_rot         = np.linspace(0, 360, 50, endpoint=False),
     planet_pixel_size  = 20,
     ve                 = 2.0,              # equatorial velocity [km/s]

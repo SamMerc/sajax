@@ -19,9 +19,9 @@ from sajax import compute_light_curve, build_stellar_grid
 def flat_spectra():
     """Flat spectra on a small wavelength grid — fast for tests."""
     wl       = np.linspace(0.5, 2.5, 30, dtype=np.float32)
-    flux_hot  = np.ones_like(wl)
-    flux_cold = np.full_like(wl, 0.7)
-    return wl, flux_hot, flux_cold
+    flux_quiet  = np.ones_like(wl)
+    flux_active = np.full_like(wl, 0.7)
+    return wl, flux_quiet, flux_active
 
 
 @pytest.fixture
@@ -63,15 +63,15 @@ def test_build_stellar_grid_mu_range():
 # ---------------------------------------------------------------------------
 
 def test_output_shapes_single_phase(flat_spectra, base_params):
-    wl, flux_hot, flux_cold = flat_spectra
+    wl, flux_quiet, flux_active = flat_spectra
     result = compute_light_curve(
         wavelength         = wl,
-        flux_hot           = flux_hot,
-        flux_cold          = flux_cold,
+        flux_quiet           = flux_quiet,
+        flux_active          = flux_active,
         params             = base_params,
-        spot_lat           = [20.0],
-        spot_long          = [0.0],
-        spot_size          = [10.0],
+        ar_lat           = [20.0],
+        ar_long          = [0.0],
+        ar_size          = [10.0],
         phases_rot         = [0.0],
         stellar_grid_size  = 50,
         ve                 = 2.0,
@@ -87,16 +87,16 @@ def test_output_shapes_single_phase(flat_spectra, base_params):
 # ---------------------------------------------------------------------------
 
 def test_output_shapes_multi_phase(flat_spectra, base_params):
-    wl, flux_hot, flux_cold = flat_spectra
+    wl, flux_quiet, flux_active = flat_spectra
     phases = np.linspace(0, 360, 8, endpoint=False)
     result = compute_light_curve(
         wavelength         = wl,
-        flux_hot           = flux_hot,
-        flux_cold          = flux_cold,
+        flux_quiet           = flux_quiet,
+        flux_active          = flux_active,
         params             = base_params,
-        spot_lat           = [20.0],
-        spot_long          = [0.0],
-        spot_size          = [10.0],
+        ar_lat           = [20.0],
+        ar_long          = [0.0],
+        ar_size          = [10.0],
         phases_rot         = phases,
         stellar_grid_size  = 50,
         ve                 = 2.0,
@@ -109,17 +109,17 @@ def test_output_shapes_multi_phase(flat_spectra, base_params):
 # Physical sanity checks
 # ---------------------------------------------------------------------------
 
-def test_no_spot_flux_is_unity(flat_spectra, base_params):
-    """With a vanishingly small spot the light curve should be ~1."""
-    wl, flux_hot, flux_cold = flat_spectra
+def test_no_ar_flux_is_unity(flat_spectra, base_params):
+    """With a vanishingly small active region the light curve should be ~1."""
+    wl, flux_quiet, flux_active = flat_spectra
     result = compute_light_curve(
         wavelength         = wl,
-        flux_hot           = flux_hot,
-        flux_cold          = flux_cold,
+        flux_quiet           = flux_quiet,
+        flux_active          = flux_active,
         params             = base_params,
-        spot_lat           = [0.0],
-        spot_long          = [0.0],
-        spot_size          = [0.001],   # effectively zero spot
+        ar_lat           = [0.0],
+        ar_long          = [0.0],
+        ar_size          = [0.001],   # effectively zero active region
         phases_rot         = [0.0],
         stellar_grid_size  = 50,
         ve                 = 0.0,
@@ -128,17 +128,17 @@ def test_no_spot_flux_is_unity(flat_spectra, base_params):
     assert abs(float(result["lc"][0]) - 1.0) < 0.01
 
 
-def test_cold_spot_dims_flux(flat_spectra, base_params):
-    """A visible spot with cold spectrum should reduce the total flux."""
-    wl, flux_hot, flux_cold = flat_spectra
+def test_cold_ar_dims_flux(flat_spectra, base_params):
+    """A visible active region with cold spectrum should reduce the total flux."""
+    wl, flux_quiet, flux_active = flat_spectra
     result = compute_light_curve(
         wavelength         = wl,
-        flux_hot           = flux_hot,
-        flux_cold          = flux_cold,
+        flux_quiet           = flux_quiet,
+        flux_active          = flux_active,
         params             = base_params,
-        spot_lat           = [0.0],
-        spot_long          = [0.0],
-        spot_size          = [20.0],    # large visible spot
+        ar_lat           = [0.0],
+        ar_long          = [0.0],
+        ar_size          = [20.0],    # large visible active region
         phases_rot         = [0.0],
         stellar_grid_size  = 50,
         ve                 = 0.0,
@@ -147,17 +147,17 @@ def test_cold_spot_dims_flux(flat_spectra, base_params):
     assert float(result["lc"][0]) < 1.0
 
 
-def test_multi_spot(flat_spectra, base_params):
-    """Two spots should work without error and return sensible shapes."""
-    wl, flux_hot, flux_cold = flat_spectra
+def test_multi_ar(flat_spectra, base_params):
+    """Two active regions should work without error and return sensible shapes."""
+    wl, flux_quiet, flux_active = flat_spectra
     result = compute_light_curve(
         wavelength         = wl,
-        flux_hot           = flux_hot,
-        flux_cold          = flux_cold,
+        flux_quiet           = flux_quiet,
+        flux_active          = flux_active,
         params             = base_params,
-        spot_lat           = [20.0, -20.0],
-        spot_long          = [0.0,  180.0],
-        spot_size          = [10.0,  10.0],
+        ar_lat           = [20.0, -20.0],
+        ar_long          = [0.0,  180.0],
+        ar_size          = [10.0,  10.0],
         phases_rot         = np.linspace(0, 360, 6, endpoint=False),
         stellar_grid_size  = 50,
         ve                 = 2.0,
@@ -177,16 +177,16 @@ def test_multi_spot(flat_spectra, base_params):
     ("nonlinear4",  [0.1, 0.2, 0.15, 0.05]),
 ])
 def test_ldc_modes(flat_spectra, base_params, ldc_mode, ldc_coeffs):
-    wl, flux_hot, flux_cold = flat_spectra
+    wl, flux_quiet, flux_active = flat_spectra
     params = {**base_params, "ldc_coeffs": ldc_coeffs}
     result = compute_light_curve(
         wavelength        = wl,
-        flux_hot          = flux_hot,
-        flux_cold         = flux_cold,
+        flux_quiet          = flux_quiet,
+        flux_active         = flux_active,
         params            = params,
-        spot_lat          = [15.0],
-        spot_long         = [0.0],
-        spot_size         = [8.0],
+        ar_lat          = [15.0],
+        ar_long         = [0.0],
+        ar_size         = [8.0],
         phases_rot        = [0.0, 90.0],
         stellar_grid_size = 50,
         ve                = 1.0,

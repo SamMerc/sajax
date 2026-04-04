@@ -1,5 +1,5 @@
 """
-core.py — JAX-accelerated stellar spot light-curve engine.
+core.py — JAX-accelerated stellar active region light-curve engine.
 
 This module is a complete rewrite of ``SAGE1/sage.py`` in JAX.
 
@@ -15,8 +15,8 @@ Key differences from the original NumPy/SciPy implementation
    Here all phases are computed in a single ``jax.vmap`` call — this is
    the main source of speedup over the original code.
 
-3. **No scatter-index spot placement.**
-   The original code located spot pixels via integer scatter indices
+3. **No scatter-index active region placement.**
+   The original code located active region pixels via integer scatter indices
    (fancy indexing with ``.astype(int)``), which is not differentiable
    and incompatible with ``jit``.  SAJAX instead computes an analytic
    angular-distance mask over the full pixel arrays using ``jnp.where``,
@@ -158,20 +158,20 @@ def build_stellar_grid(
 
 
 # ---------------------------------------------------------------------------
-# 2. Spot mask  (JAX — operates on 1D in-disc arrays)
+# 2. active region mask  (JAX — operates on 1D in-disc arrays)
 # ---------------------------------------------------------------------------
 
-def _compute_spot_mask(
+def _compute_ar_mask(
     x_disc: jnp.ndarray,       # (total_pixels,)
     y_disc: jnp.ndarray,       # (total_pixels,)
     star_pixel_rad: float,
     spx: float,
     spy: float,
     spz: float,
-    spotsize_rad: float,
+    arsize_rad: float,
 ) -> jnp.ndarray:
     """
-    Boolean mask over in-disc pixels: True where the pixel is inside the spot.
+    Boolean mask over in-disc pixels: True where the pixel is inside the active region.
 
     Because ``x_disc`` and ``y_disc`` already contain only stellar-disc
     pixels, there is no need for an in-star check here.
@@ -183,9 +183,9 @@ def _compute_spot_mask(
     star_pixel_rad : float
         Stellar radius in pixels.
     spx, spy, spz : float
-        Spot-centre Cartesian coordinates (after rotation + inclination).
-    spotsize_rad : float
-        Spot angular radius in radians.
+        active region centre Cartesian coordinates (after rotation + inclination).
+    arsize_rad : float
+        active region angular radius in radians.
 
     Returns
     -------
@@ -195,24 +195,24 @@ def _compute_spot_mask(
     r2     = x_disc ** 2 + y_disc ** 2
     z_disc = jnp.sqrt(jnp.maximum(star_pixel_rad ** 2 - r2, 0.0))
 
-    # Spot centre in spherical coords
-    spotlong_rot = jnp.arctan2(spx, spz)
-    spotlat_rot  = jnp.arccos(jnp.clip(spy / star_pixel_rad, -1.0, 1.0))
+    # active region centre in spherical coords
+    arlong_rot = jnp.arctan2(spx, spz)
+    arlat_rot  = jnp.arccos(jnp.clip(spy / star_pixel_rad, -1.0, 1.0))
 
     # Each pixel in spherical coords
     longi = jnp.arctan2(x_disc, z_disc)
     lati  = jnp.arccos(jnp.clip(y_disc / star_pixel_rad, -1.0, 1.0))
 
-    # Great-circle distance between spot centre and each pixel
-    delta_lon = jnp.abs(spotlong_rot - longi)
+    # Great-circle distance between active region centre and each pixel
+    delta_lon = jnp.abs(arlong_rot - longi)
     d_sigma   = jnp.arccos(jnp.clip(
-        jnp.cos(spotlat_rot) * jnp.cos(lati)
-        + jnp.sin(spotlat_rot) * jnp.sin(lati) * jnp.cos(delta_lon),
+        jnp.cos(arlat_rot) * jnp.cos(lati)
+        + jnp.sin(arlat_rot) * jnp.sin(lati) * jnp.cos(delta_lon),
         -1.0, 1.0,
     ))
 
-    # Spots with spz < 0 are on the far side of the star — not visible
-    return (d_sigma <= spotsize_rad) & (spz >= 0.0)
+    # active regions with spz < 0 are on the far side of the star — not visible
+    return (d_sigma <= arsize_rad) & (spz >= 0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -221,15 +221,15 @@ def _compute_spot_mask(
 
 def _flux_at_wavelength(
     # --- vmapped: one scalar/slice per wavelength ---
-    flux_hot_wl: float,
-    flux_cold_wl: float,
+    flux_quiet_wl: float,
+    flux_active_wl: float,
     ldc_coeffs_wl: jnp.ndarray,  # (n_coeffs,)  — one row of ldc_coeffs
     I_prof_wl: jnp.ndarray,      # (n_mu_pts,)
     # --- broadcast: shared across wavelengths ---
     mu_disc: jnp.ndarray,         # (total_pixels,)
     vel_disc: jnp.ndarray,        # (total_pixels,)
     total_pixels: int,
-    spot_masks: jnp.ndarray,      # (nspot, total_pixels)
+    ar_masks: jnp.ndarray,      # (nar, total_pixels)
     mu_profile_pts: jnp.ndarray,  # (n_mu_pts,)
     ldc_mode: LdcMode,
 ) -> tuple[float, float, jnp.ndarray]:
@@ -240,8 +240,8 @@ def _flux_at_wavelength(
 
     Returns
     -------
-    star_spec  : float            — unspotted integrated flux
-    total_flux : float            — spotted  integrated flux
+    star_spec  : float            — unarted integrated flux
+    total_flux : float            — arted  integrated flux
     flux_disc  : (total_pixels,)  — per-pixel flux values (for map output)
     """
     # ---- Limb darkening -------------------------------------------------
@@ -274,22 +274,22 @@ def _flux_at_wavelength(
                - ldc_coeffs_wl[2] * (1.0 - mu_disc ** 1.5)
                - ldc_coeffs_wl[3] * (1.0 - mu_disc ** 2.0))
 
-    # ---- Unspotted grid -------------------------------------------------
-    hot_flux  = flux_hot_wl  * (1.0 + vel_disc) * ldc   # (total_pixels,)
+    # ---- Unarted grid -------------------------------------------------
+    hot_flux  = flux_quiet_wl  * (1.0 + vel_disc) * ldc   # (total_pixels,)
     star_spec = jnp.sum(hot_flux) / total_pixels
 
-    # ---- Cold (spot) grid -----------------------------------------------
-    cold_flux = flux_cold_wl * (1.0 + vel_disc) * ldc   # (total_pixels,)
+    # ---- Cold (active region) grid -----------------------------------------------
+    cold_flux = flux_active_wl * (1.0 + vel_disc) * ldc   # (total_pixels,)
 
-    # Replace hot pixels with cold pixels for each spot
-    def _apply_one_spot(carry: jnp.ndarray,
-                        spot_mask: jnp.ndarray) -> tuple:
-        return jnp.where(spot_mask, cold_flux, carry), None
+    # Replace hot pixels with cold pixels for each active region
+    def _apply_one_ar(carry: jnp.ndarray,
+                        ar_mask: jnp.ndarray) -> tuple:
+        return jnp.where(ar_mask, cold_flux, carry), None
 
-    spotted_flux, _ = jax.lax.scan(_apply_one_spot, hot_flux, spot_masks)
+    arted_flux, _ = jax.lax.scan(_apply_one_ar, hot_flux, ar_masks)
 
-    total_flux = jnp.sum(spotted_flux) / total_pixels
-    return star_spec, total_flux, spotted_flux
+    total_flux = jnp.sum(arted_flux) / total_pixels
+    return star_spec, total_flux, arted_flux
 
 
 # ---------------------------------------------------------------------------
@@ -297,11 +297,11 @@ def _flux_at_wavelength(
 # ---------------------------------------------------------------------------
 
 def _compute_single_phase(
-    spot_cart_all: jnp.ndarray,       # (nspot, 3)
+    ar_cart_all: jnp.ndarray,       # (nar, 3)
     *,
     wavelength: jnp.ndarray,          # (nwave,)
-    flux_hot_interp: jnp.ndarray,     # (nwave,)
-    flux_cold_interp: jnp.ndarray,    # (nwave,)
+    flux_quiet_interp: jnp.ndarray,     # (nwave,)
+    flux_active_interp: jnp.ndarray,    # (nwave,)
     ldc_coeffs: jnp.ndarray,          # (nwave, n_coeffs)
     I_profile: jnp.ndarray,           # (nwave, n_mu_pts)
     mu_profile_pts: jnp.ndarray,      # (n_mu_pts,)
@@ -311,7 +311,7 @@ def _compute_single_phase(
     vel_disc: jnp.ndarray,            # (total_pixels,)
     star_pixel_rad: float,
     total_pixels: int,
-    spotsize_rads: jnp.ndarray,       # (nspot,)
+    arsize_rads: jnp.ndarray,       # (nar,)
     ldc_mode: LdcMode,
     plot_map_wavelength: float,
     n: int,                           # full grid side (for map scatter)
@@ -326,13 +326,13 @@ def _compute_single_phase(
     contamination_factor : (nwave,)
     star_map             : (n, n)  flux map at plot_map_wavelength
     """
-    # ---- Spot masks: (nspot, total_pixels) ------------------------------
-    spot_masks = vmap(
-        lambda cart, sr: _compute_spot_mask(
+    # ---- active region masks: (nar, total_pixels) ------------------------------
+    ar_masks = vmap(
+        lambda cart, sr: _compute_ar_mask(
             x_disc, y_disc, star_pixel_rad,
             cart[0], cart[1], cart[2], sr,
         )
-    )(spot_cart_all, spotsize_rads)
+    )(ar_cart_all, arsize_rads)
 
     # ---- vmap over wavelengths ------------------------------------------
     _flux_vmap = vmap(
@@ -341,7 +341,7 @@ def _compute_single_phase(
             mu_disc        = mu_disc,
             vel_disc       = vel_disc,
             total_pixels   = total_pixels,
-            spot_masks     = spot_masks,
+            ar_masks     = ar_masks,
             mu_profile_pts = mu_profile_pts,
             ldc_mode       = ldc_mode,
         ),
@@ -349,8 +349,8 @@ def _compute_single_phase(
     )
 
     star_specs, bin_fluxes, flux_discs = _flux_vmap(
-        flux_hot_interp,
-        flux_cold_interp,
+        flux_quiet_interp,
+        flux_active_interp,
         ldc_coeffs,
         I_profile,
     )
@@ -374,11 +374,11 @@ def _compute_single_phase(
 # ---------------------------------------------------------------------------
 
 def _compute_all_phases(
-    all_spot_carts: jnp.ndarray,   # (nphase, nspot, 3)
+    all_ar_carts: jnp.ndarray,   # (nphase, nar, 3)
     *,
     wavelength: jnp.ndarray,
-    flux_hot_interp: jnp.ndarray,
-    flux_cold_interp: jnp.ndarray,
+    flux_quiet_interp: jnp.ndarray,
+    flux_active_interp: jnp.ndarray,
     ldc_coeffs: jnp.ndarray,       # (nwave, n_coeffs)
     I_profile: jnp.ndarray,
     mu_profile_pts: jnp.ndarray,
@@ -388,7 +388,7 @@ def _compute_all_phases(
     vel_disc: jnp.ndarray,
     star_pixel_rad: float,
     total_pixels: int,
-    spotsize_rads: jnp.ndarray,
+    arsize_rads: jnp.ndarray,
     ldc_mode: LdcMode,
     plot_map_wavelength: float,
     n: int,
@@ -407,8 +407,8 @@ def _compute_all_phases(
         functools.partial(
             _compute_single_phase,
             wavelength          = wavelength,
-            flux_hot_interp     = flux_hot_interp,
-            flux_cold_interp    = flux_cold_interp,
+            flux_quiet_interp     = flux_quiet_interp,
+            flux_active_interp    = flux_active_interp,
             ldc_coeffs          = ldc_coeffs,
             I_profile           = I_profile,
             mu_profile_pts      = mu_profile_pts,
@@ -418,7 +418,7 @@ def _compute_all_phases(
             vel_disc            = vel_disc,
             star_pixel_rad      = star_pixel_rad,
             total_pixels        = total_pixels,
-            spotsize_rads       = spotsize_rads,
+            arsize_rads       = arsize_rads,
             ldc_mode            = ldc_mode,
             plot_map_wavelength = plot_map_wavelength,
             n                   = n,
@@ -426,7 +426,7 @@ def _compute_all_phases(
         ),
         in_axes=0,
     )
-    return _phase_vmap(all_spot_carts)
+    return _phase_vmap(all_ar_carts)
 
 
 # ---------------------------------------------------------------------------
@@ -448,7 +448,7 @@ def _compute_all_phases(
 
 def build_model(
     wavelength: np.ndarray,
-    flux_hot: np.ndarray,
+    flux_quiet: np.ndarray,
     params: dict,
     phases_rot: np.ndarray,
     stellar_grid_size: int,
@@ -461,14 +461,14 @@ def build_model(
 
     Everything that does not change between MCMC steps is computed here in
     NumPy and stored in the returned model dict.  The only quantities that
-    vary per step — ``flux_cold``, ``spot_lat``, ``spot_long``,
-    ``spot_size`` — are intentionally excluded and passed to
+    vary per step — ``flux_active``, ``ar_lat``, ``ar_long``,
+    ``ar_size`` — are intentionally excluded and passed to
     ``evaluate_light_curve`` instead.
 
     Parameters
     ----------
     wavelength : array_like, shape (nwave,)
-    flux_hot : array_like, shape (nwave,)
+    flux_quiet : array_like, shape (nwave,)
     params : dict
         ``u1``, ``u2``, ``inc_star``, ``mu_profile``, ``I_profile``
     phases_rot : array_like, shape (nphase,)
@@ -482,7 +482,7 @@ def build_model(
     dict  — pass directly to ``evaluate_light_curve``
     """
     wavelength = np.asarray(wavelength, dtype=np.float64)
-    flux_hot   = np.asarray(flux_hot,   dtype=np.float64)
+    flux_quiet   = np.asarray(flux_quiet,   dtype=np.float64)
     phases_rot = np.atleast_1d(np.asarray(phases_rot, dtype=np.float64))
 
     nwave  = len(wavelength)
@@ -558,7 +558,7 @@ def build_model(
     return dict(
         # spectral
         wavelength          = jnp.asarray(wavelength),
-        flux_hot            = jnp.asarray(flux_hot),
+        flux_quiet            = jnp.asarray(flux_quiet),
         ldc_coeffs          = jnp.asarray(ldc_coeffs),
         I_profile           = jnp.asarray(I_profile),
         mu_profile_pts      = jnp.asarray(mu_profile_pts),
@@ -584,13 +584,13 @@ def build_model(
 
 def evaluate_light_curve(
     model: dict,
-    flux_cold: jnp.ndarray,
-    spot_lat: jnp.ndarray,
-    spot_long: jnp.ndarray,
-    spot_size: jnp.ndarray,
+    flux_active: jnp.ndarray,
+    ar_lat: jnp.ndarray,
+    ar_long: jnp.ndarray,
+    ar_size: jnp.ndarray,
 ) -> dict:
     """
-    Evaluate the light curve for a given set of spot parameters.
+    Evaluate the light curve for a given set of active region parameters.
 
     This function is **pure JAX** — all inputs may be JAX arrays or tracers,
     making it fully compatible with ``jit``, ``vmap``, and gradient-based
@@ -600,15 +600,15 @@ def evaluate_light_curve(
     ----------
     model : dict
         Pre-built model dict returned by ``build_model``.
-    flux_cold : jnp.ndarray, shape (nwave,)
-        Active-region (spot) flux spectrum.  This is the only spectral
+    flux_active : jnp.ndarray, shape (nwave,)
+        Active-region (active region) flux spectrum.  This is the only spectral
         quantity that varies between MCMC steps (via the contrast parameter).
-    spot_lat : jnp.ndarray, shape (nspot,)
-        Spot latitudes in degrees.
-    spot_long : jnp.ndarray, shape (nspot,)
-        Spot longitudes in degrees.
-    spot_size : jnp.ndarray, shape (nspot,)
-        Spot angular radii in degrees.
+    ar_lat : jnp.ndarray, shape (nar,)
+        active region latitudes in degrees.
+    ar_long : jnp.ndarray, shape (nar,)
+        active region longitudes in degrees.
+    ar_size : jnp.ndarray, shape (nar,)
+        active region angular radii in degrees.
 
     Returns
     -------
@@ -618,40 +618,40 @@ def evaluate_light_curve(
     ``epsilon``   — (nphase, nwave) contamination factor ε(λ)
     ``star_maps`` — (nphase, n, n)  stellar flux map per phase
     """
-    flux_cold  = jnp.atleast_1d(jnp.asarray(flux_cold))
-    spot_lat   = jnp.atleast_1d(jnp.asarray(spot_lat))
-    spot_long  = jnp.atleast_1d(jnp.asarray(spot_long))
-    spot_size  = jnp.atleast_1d(jnp.asarray(spot_size))
+    flux_active  = jnp.atleast_1d(jnp.asarray(flux_active))
+    ar_lat   = jnp.atleast_1d(jnp.asarray(ar_lat))
+    ar_long  = jnp.atleast_1d(jnp.asarray(ar_long))
+    ar_size  = jnp.atleast_1d(jnp.asarray(ar_size))
 
     spr        = model["star_pixel_rad"]
     inc_star   = model["inc_star"]
 
-    # ---- Spot Cartesian coordinates (JAX) --------------------------------
-    spot_lat_rad  = jnp.deg2rad(spot_lat)
-    spot_long_rad = jnp.deg2rad(spot_long)
+    # ---- active region Cartesian coordinates (JAX) --------------------------------
+    ar_lat_rad  = jnp.deg2rad(ar_lat)
+    ar_long_rad = jnp.deg2rad(ar_long)
 
-    spot_cart = jnp.stack([
-        spr * jnp.sin(spot_long_rad) * jnp.cos(spot_lat_rad),
-        spr * jnp.sin(spot_lat_rad),
-        spr * jnp.cos(spot_long_rad) * jnp.cos(spot_lat_rad),
-    ], axis=-1)   # (nspot, 3)
+    ar_cart = jnp.stack([
+        spr * jnp.sin(ar_long_rad) * jnp.cos(ar_lat_rad),
+        spr * jnp.sin(ar_lat_rad),
+        spr * jnp.cos(ar_long_rad) * jnp.cos(ar_lat_rad),
+    ], axis=-1)   # (nar, 3)
 
-    # ---- Rotate all spots for all phases (JAX) ---------------------------
-    def _rotate_spots_at_phase(phase_deg):
+    # ---- Rotate all active regions for all phases (JAX) ---------------------------
+    def _rotate_ars_at_phase(phase_deg):
         return vmap(
             lambda cart: rotate_active_region(cart, phase_deg, inc_star)
-        )(spot_cart)
+        )(ar_cart)
 
-    all_spot_carts = vmap(_rotate_spots_at_phase)(
+    all_ar_carts = vmap(_rotate_ars_at_phase)(
         model["phases_rot"]
-    )   # (nphase, nspot, 3)
+    )   # (nphase, nar, 3)
 
     # ---- All-phases computation ------------------------------------------
     lc_raw, epsilon, star_maps = _compute_all_phases(
-        all_spot_carts,
+        all_ar_carts,
         wavelength          = model["wavelength"],
-        flux_hot_interp     = model["flux_hot"],
-        flux_cold_interp    = flux_cold,
+        flux_quiet_interp     = model["flux_quiet"],
+        flux_active_interp    = flux_active,
         ldc_coeffs          = model["ldc_coeffs"],
         I_profile           = model["I_profile"],
         mu_profile_pts      = model["mu_profile_pts"],
@@ -661,7 +661,7 @@ def evaluate_light_curve(
         vel_disc            = model["vel_disc"],
         star_pixel_rad      = spr,
         total_pixels        = model["total_pixels"],
-        spotsize_rads       = jnp.deg2rad(spot_size),
+        arsize_rads       = jnp.deg2rad(ar_size),
         ldc_mode            = model["ldc_mode"],
         plot_map_wavelength = model["plot_map_wavelength"],
         n                   = model["n"],
@@ -677,12 +677,12 @@ def evaluate_light_curve(
 
 def compute_light_curve(
     wavelength: np.ndarray,
-    flux_hot: np.ndarray,
-    flux_cold: np.ndarray,
+    flux_quiet: np.ndarray,
+    flux_active: np.ndarray,
     params: dict,
-    spot_lat: np.ndarray,
-    spot_long: np.ndarray,
-    spot_size: np.ndarray,
+    ar_lat: np.ndarray,
+    ar_long: np.ndarray,
+    ar_size: np.ndarray,
     phases_rot: np.ndarray,
     stellar_grid_size: int,
     ve: float,
@@ -694,11 +694,11 @@ def compute_light_curve(
 
     Equivalent to::
 
-        model  = build_model(wavelength, flux_hot, params, phases_rot,
+        model  = build_model(wavelength, flux_quiet, params, phases_rot,
                              stellar_grid_size, ve, ldc_mode,
                              plot_map_wavelength)
-        result = evaluate_light_curve(model, flux_cold,
-                                      spot_lat, spot_long, spot_size)
+        result = evaluate_light_curve(model, flux_active,
+                                      ar_lat, ar_long, ar_size)
 
     Use ``build_model`` + ``evaluate_light_curve`` directly when running
     MCMC so the grid is built only once.
@@ -708,15 +708,15 @@ def compute_light_curve(
     dict with keys ``lc``, ``epsilon``, ``star_maps`` as NumPy arrays.
     """
     model  = build_model(
-        wavelength, flux_hot, params, phases_rot,
+        wavelength, flux_quiet, params, phases_rot,
         stellar_grid_size, ve, ldc_mode, plot_map_wavelength,
     )
     result = evaluate_light_curve(
         model,
-        jnp.asarray(np.asarray(flux_cold,  dtype=np.float64)),
-        jnp.asarray(np.atleast_1d(np.asarray(spot_lat,  dtype=np.float64))),
-        jnp.asarray(np.atleast_1d(np.asarray(spot_long, dtype=np.float64))),
-        jnp.asarray(np.atleast_1d(np.asarray(spot_size, dtype=np.float64))),
+        jnp.asarray(np.asarray(flux_active,  dtype=np.float64)),
+        jnp.asarray(np.atleast_1d(np.asarray(ar_lat,  dtype=np.float64))),
+        jnp.asarray(np.atleast_1d(np.asarray(ar_long, dtype=np.float64))),
+        jnp.asarray(np.atleast_1d(np.asarray(ar_size, dtype=np.float64))),
     )
     return {
         "lc"        : np.array(result["lc"]),

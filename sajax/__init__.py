@@ -18,7 +18,7 @@ build_stellar_grid
     Pre-compute the static stellar pixel grid.
 
 rotate_active_region
-    Apply stellar rotation and inclination to a Cartesian spot position.
+    Apply stellar rotation and inclination to a Cartesian active region position.
 """
 
 from .core import (
