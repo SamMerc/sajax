@@ -34,55 +34,6 @@ git clone https://github.com/SamMerc/sajax.git
 cd sajax
 pip install -e ".[dev]"
 ```
-
-**Dependencies:** `numpy`, `jax`, `jaxlib`, `matplotlib`, `scipy`
-
-For GPU support install the appropriate `jaxlib` wheel as described in
-the [JAX installation guide](https://github.com/google/jax#installation).
-
----
-
-## Quick start
-
-```python
-import numpy as np
-from sajax import compute_light_curve
-
-# Wavelength grid (e.g. in microns)
-wavelength  = np.linspace(0.3, 5.0, 200)
-
-# Flat spectra as a minimal example — replace with model atmospheres
-flux_quiet    = np.ones_like(wavelength)
-flux_active   = np.ones_like(wavelength) * 0.7   # active region is 30% dimmer
-
-params = dict(
-    u1          = 0.3,      # quadratic LD coefficient
-    u2          = 0.1,
-    inc_star    = 90.0,     # stellar inclination [deg]  (equator-on)
-)
-
-result = compute_light_curve(
-    wavelength         = wavelength,
-    flux_quiet           = flux_quiet,
-    flux_active          = flux_active,
-    params             = params,
-    ar_lat           = [20.0],           # one active region at 20° latitude
-    ar_long          = [0.0],
-    ar_size          = [10.0],           # angular radius [deg]
-    phases_rot         = np.linspace(0, 360, 50, endpoint=False),
-    planet_pixel_size  = 20,
-    ve                 = 2.0,              # equatorial velocity [km/s]
-    ldc_mode           = "Quadratic",      #treatment of limb darkening
-    plot_map_wavelength= 1.0,
-)
-
-print(result["lc"])          # (50,)  broadband light curve
-print(result["epsilon"])     # (50, 200)  contamination factor per phase/wavelength
-print(result["star_maps"])   # (50, n, n) stellar flux maps
-```
-
-For fuller examples see the `examples/` directory.
-
 ---
 
 ## Repository layout

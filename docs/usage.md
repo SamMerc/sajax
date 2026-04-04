@@ -18,12 +18,12 @@ It takes stellar spectra, active region properties, and rotation parameters to p
 |-----------|-------------|---------|
 | `wavelength` | Wavelength grid [μm] | `np.linspace(0.3, 5.0, 200)` |
 | `flux_quiet` | Quiet star spectrum | Model atmosphere or measured spectrum |
-| `flux_active` | Active region spectrum | Cooler (dimmer) or Hotter (brighter) than quiet star |
+| `flux_active` | Active region spectrum | Cooler (dimmer) or hotter (brighter) than quiet star |
 | `ar_lat`, `ar_long` | Active region latitude/longitude [deg] | `[20.0]`, `[0.0]` |
 | `ar_size` | Angular radius of active region [deg] | `[10.0]` |
 | `phases_rot` | Rotation phases [deg] | `np.linspace(0, 360, 50)` |
 | `inc_star` | Stellar inclination [deg] | `90.0` (equator-on) |
-| `ldc_mode` | Limb-darkening law or Intensity Profile| `"quadratic"`, `"nonlinear4"`, etc. or `"intensity_profile"`|
+| `ldc_mode` | Limb-darkening law or intensity Profile| `"quadratic"`, `"nonlinear4"`, etc. or `"intensity_profile"`|
 
 ## Key Outputs
 
