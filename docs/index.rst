@@ -28,7 +28,7 @@ Get Started
 
    installation
    usage
-   tutorials/sajax_quickstart
+   ../examples/sajax_quickstart
 
 Reference
 -------------
