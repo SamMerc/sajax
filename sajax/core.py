@@ -46,6 +46,15 @@ Key differences from the original NumPy/SciPy implementation
    All operations are JAX-native, so ``jax.grad`` / ``jax.jacobian``
    work on the full pipeline — useful for gradient-based retrieval.
 
+9. **Phase oversampling.**
+   Real observations integrate photons over a finite exposure time.
+   When an active region crosses the stellar limb, the discrete pixel
+   grid can produce sharp discontinuities in the light curve.
+   The ``oversample`` parameter (default 1, i.e. off) spreads each
+   requested phase into multiple sub-exposures and averages the result,
+   mimicking finite-exposure integration and smoothing limb-crossing
+   artefacts.
+
 JIT compilation
 ---------------
 Do NOT jit(evaluate_light_curve) directly — it contains Python-level
@@ -172,6 +181,60 @@ def build_stellar_grid(
 
 
 # ---------------------------------------------------------------------------
+# 1b. Phase oversampling  (NumPy — runs once in build_model)
+# ---------------------------------------------------------------------------
+
+def _make_oversampled_phases(
+    phases_rot: np.ndarray,
+    oversample: int,
+) -> np.ndarray:
+    """
+    Spread each phase into ``oversample`` sub-phases spanning one exposure
+    window, centred on the original phase.
+
+    The exposure window for each phase is defined as the interval between
+    the midpoints to its neighbours (i.e. one phase step for uniform grids).
+    Sub-phases are uniformly spaced within this window.
+
+    Parameters
+    ----------
+    phases_rot : (nphase,) array
+        Original rotational phases in degrees.
+    oversample : int
+        Number of sub-exposures per phase point.  Must be >= 1.
+
+    Returns
+    -------
+    oversampled : (nphase * oversample,) array
+        Sub-phases in degrees, wrapped to [0, 360).
+        Ordered as [p0_sub0, p0_sub1, ..., p0_subN, p1_sub0, ...].
+    """
+    if oversample <= 1:
+        return phases_rot
+
+    n = len(phases_rot)
+
+    # Phase step — assumes approximately uniform spacing
+    if n > 1:
+        dp = phases_rot[1] - phases_rot[0]
+    else:
+        dp = 360.0 / n
+
+    # Sub-phase offsets centred on zero
+    # For oversample=3: [-dp/3, 0, +dp/3]
+    offsets = np.linspace(-dp / 2, dp / 2, oversample, endpoint=False)
+    offsets += dp / (2 * oversample)  # centre within each sub-bin
+
+    # Broadcast: (nphase, 1) + (1, oversample) → (nphase, oversample)
+    oversampled = phases_rot[:, None] + offsets[None, :]
+
+    # Wrap to [0, 360)
+    oversampled = oversampled % 360.0
+
+    return oversampled.ravel()
+
+
+# ---------------------------------------------------------------------------
 # 2. active region mask  (JAX — operates on 1D in-disc arrays)
 # ---------------------------------------------------------------------------
 
@@ -293,7 +356,7 @@ def _flux_at_wavelength(
     quiet_flux  = flux_quiet_wl  * (1.0 + vel_disc) * ldc   # (total_pixels,)
     star_spec = jnp.sum(quiet_flux) / total_pixels
 
-# ---- Resolve AR overlaps with user-selected rule -------------------
+    # ---- Resolve AR overlaps with user-selected rule -------------------
     # ar_masks:      (nar, total_pixels) — boolean mask for each AR
     # flux_active_wl: (nar,) — flux value for each AR at this wavelength
     
@@ -520,6 +583,7 @@ def build_model(
     ldc_mode: LdcMode = "quadratic",
     ar_overlap_mode: ArOverlapMode = "hottest_wins",
     plot_map_wavelength: Optional[float] = None,
+    oversample: int = 3,
 ) -> dict:
     """
     Pre-build all static model arrays.  Call this **once** before MCMC.
@@ -547,7 +611,7 @@ def build_model(
             - ``"quadratic"``:  [u1, u2]
             - ``"power2"``:     [c, alpha]
             - ``"kipping3"``:   [c1, c2, c3]
-            - ``"nonlinear4"``: [c1, c2, c3, c4]
+- ``"nonlinear4"``: [c1, c2, c3, c4]
             Each element may be a scalar (broadcast to all wavelengths)
             or an array of length ``nwave``.
             For ``"quadratic"`` mode only, ``u1`` and ``u2`` are also
@@ -570,6 +634,12 @@ def build_model(
         - "coldest_wins": overlap pixel uses flux from coldest (lowest flux) AR
         Default: "hottest_wins"
     plot_map_wavelength : float, optional
+    oversample : int, optional
+        Number of sub-exposures per phase point.  Each requested phase is
+        spread into ``oversample`` uniformly spaced sub-phases spanning one
+        phase step, and the resulting fluxes are averaged.  This mimics
+        finite-exposure integration and smooths limb-crossing artefacts.
+        Default: 3 (no oversampling).
 
     Returns
     -------
@@ -582,13 +652,31 @@ def build_model(
             f"ar_overlap_mode must be one of {valid_modes}, "
             f"got '{ar_overlap_mode}'."
         )
+
+    # Validate oversample
+    if not isinstance(oversample, int) or oversample < 1:
+        raise ValueError(
+            f"oversample must be an integer >= 1, got {oversample}."
+        )
     
     wavelength = np.asarray(wavelength, dtype=np.float32)
     flux_quiet   = np.asarray(flux_quiet,   dtype=np.float32)
     phases_rot = np.atleast_1d(np.asarray(phases_rot, dtype=np.float32))
 
     nwave  = len(wavelength)
-    nphase = len(phases_rot)
+    nphase = len(phases_rot)  # original number of phases (before oversampling)
+
+    # ---- Phase oversampling -------------------------------------------------
+    if oversample > 1:
+        phases_oversampled = _make_oversampled_phases(phases_rot, oversample)
+        nphase_compute = len(phases_oversampled)
+        print(
+            f"build_model: oversampling enabled — {oversample} sub-exposures "
+            f"per phase ({nphase} phases → {nphase_compute} sub-phases)."
+        )
+    else:
+        phases_oversampled = phases_rot
+        nphase_compute = nphase
 
     inc_star       = float(params.get("inc_star", 90.0))
     mu_profile_pts = np.asarray(params.get("mu_profile", [0.0, 1.0]),
@@ -689,15 +777,15 @@ def build_model(
         total_pixels        = grid["total_pixels"],
         n                   = grid["n"],
         flat_indices        = jnp.asarray(grid["flat_indices"]),
-        # phases
-        phases_rot          = jnp.asarray(phases_rot),
-        # metadata
+        phases_rot          = jnp.asarray(phases_oversampled),
+        oversample          = oversample,
+        nphase_original     = nphase,
         inc_star            = inc_star,
         ldc_mode            = ldc_mode,
         ar_overlap_mode     = ar_overlap_mode,
         plot_map_wavelength = float(plot_map_wavelength),
         nwave               = nwave,
-        nphase              = nphase,
+        nphase              = nphase_compute,
     )
 
 
@@ -714,6 +802,10 @@ def evaluate_light_curve(
     This function is **pure JAX** — all inputs may be JAX arrays or tracers,
     making it fully compatible with ``jit``, ``vmap``, and gradient-based
     samplers such as ``emcee_jax`` or ``blackjax``.
+
+    When the model was built with ``oversample > 1``, the computation runs
+    on the oversampled phase grid and the results are averaged back to the
+    original phase grid before returning.
 
     Parameters
     ----------
@@ -734,9 +826,11 @@ def evaluate_light_curve(
     -------
     dict with keys
     ~~~~~~~~~~~~~~
-    ``lc``        — (nphase,)       normalised broadband light curve
-    ``epsilon``   — (nphase, nwave) contamination factor ε(λ)
-    ``star_maps`` — (nphase, n, n)  stellar flux map per phase
+    ``lc``        — (nphase_original,) normalised broadband light curve
+    ``epsilon``   — (nphase_original, nwave) contamination factor ε(λ)
+    ``star_maps`` — (nphase_original, n, n) stellar flux map per phase
+                    (maps are from the *first* sub-exposure of each phase
+                    when oversampling is active)
     """
     flux_active  = jnp.atleast_1d(jnp.asarray(flux_active))
     ar_lat       = jnp.atleast_1d(jnp.asarray(ar_lat))
@@ -769,6 +863,8 @@ def evaluate_light_curve(
 
     spr        = model["star_pixel_rad"]
     inc_star   = model["inc_star"]
+    oversample = model["oversample"]
+    nphase_original = model["nphase_original"]
 
     # ---- active region Cartesian coordinates (JAX) --------------------------------
     ar_lat_rad  = jnp.deg2rad(ar_lat)
@@ -781,6 +877,7 @@ def evaluate_light_curve(
     ], axis=-1)   # (nar, 3)
 
     # ---- Rotate all active regions for all phases (JAX) ---------------------------
+    # phases_rot in the model is already oversampled if oversample > 1
     def _rotate_ars_at_phase(phase_deg):
         return vmap(
             lambda cart: rotate_active_region(cart, phase_deg, inc_star)
@@ -788,7 +885,7 @@ def evaluate_light_curve(
 
     all_ar_carts = vmap(_rotate_ars_at_phase)(
         model["phases_rot"]
-    )   # (nphase, nar, 3)
+    )   # (nphase_compute, nar, 3)
 
     # ---- All-phases computation ------------------------------------------
     lc_raw, epsilon, star_maps = _compute_all_phases(
@@ -813,6 +910,18 @@ def evaluate_light_curve(
         flat_indices        = model["flat_indices"],
     )
 
+    # ---- Oversample averaging --------------------------------------------
+    if oversample > 1:
+        # lc_raw: (nphase_compute,) → (nphase_original, oversample) → mean
+        lc_raw = lc_raw.reshape(nphase_original, oversample).mean(axis=1)
+
+        # epsilon: (nphase_compute, nwave) → (nphase_original, oversample, nwave) → mean
+        epsilon = epsilon.reshape(nphase_original, oversample, nwave).mean(axis=1)
+
+        # star_maps: take only the first sub-exposure per original phase
+        # (averaging 2D maps is expensive and rarely useful)
+        star_maps = star_maps[::oversample]
+
     return {
         "lc"        : lc_raw,
         "epsilon"   : epsilon,
@@ -834,6 +943,7 @@ def compute_light_curve(
     ldc_mode: LdcMode = "quadratic",
     ar_overlap_mode: ArOverlapMode = "hottest_wins",
     plot_map_wavelength: Optional[float] = None,
+    oversample: int = 1,
 ) -> dict:
     """
     Convenience wrapper: build model and evaluate in one call.
@@ -842,12 +952,30 @@ def compute_light_curve(
 
         model  = build_model(wavelength, flux_quiet, params, phases_rot,
                              stellar_grid_size, ve, ldc_mode, ar_overlap_mode,
-                             plot_map_wavelength)
+                             plot_map_wavelength, oversample)
         result = evaluate_light_curve(model, flux_active,
                                       ar_lat, ar_long, ar_size)
 
     Use ``build_model`` + ``evaluate_light_curve`` directly when running
     MCMC so the grid is built only once.
+
+    Parameters
+    ----------
+    wavelength : array_like, shape (nwave,)
+    flux_quiet : array_like, shape (nwave,)
+    flux_active : array_like, shape (nar, nwave) or (nwave,)
+    params : dict
+    ar_lat : array_like, shape (nar,)
+    ar_long : array_like, shape (nar,)
+    ar_size : array_like, shape (nar,)
+    phases_rot : array_like, shape (nphase,)
+    stellar_grid_size : int
+    ve : float
+    ldc_mode : str
+    ar_overlap_mode : str
+    plot_map_wavelength : float, optional
+    oversample : int, optional
+        Number of sub-exposures per phase point (default: 3).
 
     Returns
     -------
@@ -855,7 +983,7 @@ def compute_light_curve(
     """
     model  = build_model(
         wavelength, flux_quiet, params, phases_rot, stellar_grid_size,
-        ve, ldc_mode, ar_overlap_mode, plot_map_wavelength,
+        ve, ldc_mode, ar_overlap_mode, plot_map_wavelength, oversample,
     )
     
     flux_active_arr = np.atleast_1d(np.asarray(flux_active, dtype=np.float32))

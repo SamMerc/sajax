@@ -765,6 +765,100 @@ class TestTwoStageAPI:
             np.array(result_b["lc"]),
         ), "Different AR parameters should produce different light curves"
 
+# ===================================================================
+# Oversampling cases
+# ===================================================================
+
+def test_oversample_smooths_light_curve():
+    """
+    Oversampled light curve should have smaller point-to-point
+    differences (fewer sharp jumps) than the non-oversampled version.
+    """
+    import numpy as np
+    from sajax import compute_light_curve
+
+    wavelength = np.array([550.0])
+    flux_quiet = np.array([1.0])
+    flux_active = np.array([[0.7]])
+    params = dict(ldc_coeffs=[0.4, 0.2], inc_star=90.0)
+    phases = np.linspace(0, 360, 500, endpoint=False)
+
+    common = dict(
+        wavelength=wavelength,
+        flux_quiet=flux_quiet,
+        flux_active=flux_active,
+        params=params,
+        ar_lat=[20.0],
+        ar_long=[5.0],
+        ar_size=[11.0],
+        phases_rot=phases,
+        stellar_grid_size=100,
+        ve=2.0,
+        ldc_mode="quadratic",
+    )
+
+    lc_no_os = compute_light_curve(**common, oversample=1)["lc"]
+    lc_os3   = compute_light_curve(**common, oversample=3)["lc"]
+
+    # Same shape
+    assert lc_no_os.shape == lc_os3.shape
+
+    # Oversampled should be smoother: smaller max absolute diff
+    roughness_no_os = np.max(np.abs(np.diff(lc_no_os)))
+    roughness_os3   = np.max(np.abs(np.diff(lc_os3)))
+
+    assert roughness_os3 <= roughness_no_os, (
+        f"Oversampled roughness ({roughness_os3:.6f}) should be <= "
+        f"non-oversampled ({roughness_no_os:.6f})"
+    )
+
+
+def test_oversample_3_is_identity():
+    """oversample=3 should produce identical results to no argument."""
+    import numpy as np
+    from sajax import compute_light_curve
+
+    wavelength = np.array([550.0])
+    flux_quiet = np.array([1.0])
+    flux_active = np.array([[0.7]])
+    params = dict(ldc_coeffs=[0.4, 0.2], inc_star=90.0)
+    phases = np.linspace(0, 360, 100, endpoint=False)
+
+    common = dict(
+        wavelength=wavelength,
+        flux_quiet=flux_quiet,
+        flux_active=flux_active,
+        params=params,
+        ar_lat=[20.0],
+        ar_long=[5.0],
+        ar_size=[11.0],
+        phases_rot=phases,
+        stellar_grid_size=80,
+        ve=2.0,
+    )
+
+    lc_default = compute_light_curve(**common)["lc"]
+    lc_os3     = compute_light_curve(**common, oversample=3)["lc"]
+
+    np.testing.assert_array_equal(lc_default, lc_os3)
+
+
+def test_oversample_invalid_value():
+    """oversample < 1 should raise ValueError."""
+    import pytest
+    import numpy as np
+    from sajax import build_model
+
+    with pytest.raises(ValueError, match="oversample"):
+        build_model(
+            wavelength=np.array([550.0]),
+            flux_quiet=np.array([1.0]),
+            params=dict(ldc_coeffs=[0.4, 0.2]),
+            phases_rot=np.linspace(0, 360, 10),
+            stellar_grid_size=50,
+            ve=2.0,
+            oversample=0,
+        )
 
 # ===================================================================
 # Numerical edge cases
