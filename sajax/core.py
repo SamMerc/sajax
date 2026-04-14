@@ -45,6 +45,18 @@ Key differences from the original NumPy/SciPy implementation
 8. **Differentiable end-to-end.**
    All operations are JAX-native, so ``jax.grad`` / ``jax.jacobian``
    work on the full pipeline — useful for gradient-based retrieval.
+
+JIT compilation
+---------------
+Do NOT jit(evaluate_light_curve) directly — it contains Python-level
+control flow on model metadata.  Instead, the inner _compute_all_phases
+is the hot path and is safe to JIT via:
+
+    from jax import jit
+    _compute_all_phases_jit = jit(_compute_all_phases, static_argnames=[
+        "star_pixel_rad", "total_pixels", "ldc_mode",
+        "ar_overlap_mode", "plot_map_wavelength", "n",
+    ])
 """
 
 from __future__ import annotations
@@ -68,6 +80,8 @@ LdcMode = Literal[
     "nonlinear4",      # 4 coeffs : c1, c2, c3, c4
     "intensity_profile",
 ]
+
+ArOverlapMode = Literal["hottest_wins", "coldest_wins"]
 
 # Number of LDC coefficients expected per law (used for validation in build_model)
 _N_COEFFS: dict[str, int] = {
@@ -189,7 +203,7 @@ def _compute_ar_mask(
 
     Returns
     -------
-    jnp.ndarray, shape (total_pixels,), dtype bool
+    jnp.ndarray, shape (total_pixels,), dtype jnp.bool_
     """
     # z-coordinate of each pixel on the stellar sphere
     r2     = x_disc ** 2 + y_disc ** 2
@@ -222,16 +236,17 @@ def _compute_ar_mask(
 def _flux_at_wavelength(
     # --- vmapped: one scalar/slice per wavelength ---
     flux_quiet_wl: float,
-    flux_active_wl: float,
+    flux_active_wl: jnp.ndarray, # (nar,)  — one row of flux_active_interp
     ldc_coeffs_wl: jnp.ndarray,  # (n_coeffs,)  — one row of ldc_coeffs
     I_prof_wl: jnp.ndarray,      # (n_mu_pts,)
     # --- broadcast: shared across wavelengths ---
-    mu_disc: jnp.ndarray,         # (total_pixels,)
-    vel_disc: jnp.ndarray,        # (total_pixels,)
+    mu_disc: jnp.ndarray,        # (total_pixels,)
+    vel_disc: jnp.ndarray,       # (total_pixels,)
     total_pixels: int,
-    ar_masks: jnp.ndarray,      # (nar, total_pixels)
-    mu_profile_pts: jnp.ndarray,  # (n_mu_pts,)
+    ar_masks: jnp.ndarray,       # (nar, total_pixels)
+    mu_profile_pts: jnp.ndarray, # (n_mu_pts,)
     ldc_mode: LdcMode,
+    ar_overlap_mode: ArOverlapMode,
 ) -> tuple[float, float, jnp.ndarray]:
     """
     Compute disc-integrated flux for a single wavelength channel.
@@ -240,9 +255,9 @@ def _flux_at_wavelength(
 
     Returns
     -------
-    star_spec  : float            — unarted integrated flux
-    total_flux : float            — arted  integrated flux
-    flux_disc  : (total_pixels,)  — per-pixel flux values (for map output)
+    star_spec  : float            — un-active-region'ed integrated flux
+    total_flux : float            — active-region'ed integrated flux
+    arted_flux : (total_pixels,)  — per-pixel flux values (for map output)
     """
     # ---- Limb darkening -------------------------------------------------
     if ldc_mode == "intensity_profile":
@@ -274,21 +289,64 @@ def _flux_at_wavelength(
                - ldc_coeffs_wl[2] * (1.0 - mu_disc ** 1.5)
                - ldc_coeffs_wl[3] * (1.0 - mu_disc ** 2.0))
 
-    # ---- Unarted grid -------------------------------------------------
-    hot_flux  = flux_quiet_wl  * (1.0 + vel_disc) * ldc   # (total_pixels,)
-    star_spec = jnp.sum(hot_flux) / total_pixels
+    # ---- Un-active-region'ed grid -------------------------------------------------
+    quiet_flux  = flux_quiet_wl  * (1.0 + vel_disc) * ldc   # (total_pixels,)
+    star_spec = jnp.sum(quiet_flux) / total_pixels
 
-    # ---- Cold (active region) grid -----------------------------------------------
-    cold_flux = flux_active_wl * (1.0 + vel_disc) * ldc   # (total_pixels,)
+# ---- Resolve AR overlaps with user-selected rule -------------------
+    # ar_masks:      (nar, total_pixels) — boolean mask for each AR
+    # flux_active_wl: (nar,) — flux value for each AR at this wavelength
+    
+    # Compute active flux for each AR at each pixel
+    # Shape: (nar, total_pixels)
+    ar_active_fluxes = (
+        flux_active_wl[:, None]          # (nar, 1)
+        * (1.0 + vel_disc[None, :])      # (1, total_pixels)
+        * ldc[None, :]                   # (1, total_pixels)
+    )  # → (nar, total_pixels)
 
-    # Replace hot pixels with cold pixels for each active region
-    def _apply_one_ar(carry: jnp.ndarray,
-                        ar_mask: jnp.ndarray) -> tuple:
-        return jnp.where(ar_mask, cold_flux, carry), None
+    # Sentinel values for pixels where AR is absent:
+    # For "hottest_wins": use -inf (will lose argmax)
+    # For "coldest_wins": use +inf (will lose argmin)
+    sentinel = -jnp.inf if ar_overlap_mode == "hottest_wins" else jnp.inf
 
-    arted_flux, _ = jax.lax.scan(_apply_one_ar, hot_flux, ar_masks)
+    # Mask out absent ARs
+    ar_active_fluxes_masked = jnp.where(
+        ar_masks,
+        ar_active_fluxes,
+        sentinel,
+    )  # (nar, total_pixels)
 
-    total_flux = jnp.sum(arted_flux) / total_pixels
+    # Find the winning AR at each pixel based on the selected mode
+    if ar_overlap_mode == "hottest_wins":
+        best_ar_idx = jnp.argmax(ar_active_fluxes_masked, axis=0)  # (total_pixels,)
+    elif ar_overlap_mode == "coldest_wins":
+        best_ar_idx = jnp.argmin(ar_active_fluxes_masked, axis=0)  # (total_pixels,)
+    else:
+        raise ValueError(
+            f"Unknown ar_overlap_mode: {ar_overlap_mode}. "
+            f"Must be 'hottest_wins' or 'coldest_wins'."
+        )
+
+    # Check if each pixel is covered by any AR
+    any_ar_present = jnp.any(ar_masks, axis=0)  # (total_pixels,)
+
+    # Gather the winning AR's flux for each pixel
+    best_ar_flux = jnp.take_along_axis(
+        ar_active_fluxes,
+        best_ar_idx[None, :],
+        axis=0,
+    ).squeeze(0)  # (total_pixels,)
+
+    # For pixels covered by an AR, use the winning AR flux
+    # For pixels not covered by any AR, use hot flux
+    arted_flux = jnp.where(
+        any_ar_present,
+        best_ar_flux,
+        quiet_flux,
+    )  # (total_pixels,)
+
+    total_flux = jnp.sum(arted_flux) / jnp.float32(total_pixels)
     return star_spec, total_flux, arted_flux
 
 
@@ -297,11 +355,11 @@ def _flux_at_wavelength(
 # ---------------------------------------------------------------------------
 
 def _compute_single_phase(
-    ar_cart_all: jnp.ndarray,       # (nar, 3)
+    ar_cart_all: jnp.ndarray,         # (nar, 3)
     *,
     wavelength: jnp.ndarray,          # (nwave,)
-    flux_quiet_interp: jnp.ndarray,     # (nwave,)
-    flux_active_interp: jnp.ndarray,    # (nwave,)
+    flux_quiet_interp: jnp.ndarray,   # (nwave,)
+    flux_active_interp: jnp.ndarray,  # (nar, nwave)
     ldc_coeffs: jnp.ndarray,          # (nwave, n_coeffs)
     I_profile: jnp.ndarray,           # (nwave, n_mu_pts)
     mu_profile_pts: jnp.ndarray,      # (n_mu_pts,)
@@ -311,8 +369,9 @@ def _compute_single_phase(
     vel_disc: jnp.ndarray,            # (total_pixels,)
     star_pixel_rad: float,
     total_pixels: int,
-    arsize_rads: jnp.ndarray,       # (nar,)
+    arsize_rads: jnp.ndarray,         # (nar,)
     ldc_mode: LdcMode,
+    ar_overlap_mode: ArOverlapMode,
     plot_map_wavelength: float,
     n: int,                           # full grid side (for map scatter)
     flat_indices: jnp.ndarray,        # (total_pixels,) scatter indices
@@ -334,18 +393,21 @@ def _compute_single_phase(
         )
     )(ar_cart_all, arsize_rads)
 
-    # ---- vmap over wavelengths ------------------------------------------
+    # ---- vmap over wavelengths ----
+    # Transpose flux_active from (nar, nwave) to vmap over nwave axis
+    # Each wavelength gets flux_active[:, wl] shape (nar,)
     _flux_vmap = vmap(
         functools.partial(
             _flux_at_wavelength,
             mu_disc        = mu_disc,
             vel_disc       = vel_disc,
             total_pixels   = total_pixels,
-            ar_masks     = ar_masks,
+            ar_masks       = ar_masks,
             mu_profile_pts = mu_profile_pts,
             ldc_mode       = ldc_mode,
+            ar_overlap_mode = ar_overlap_mode,
         ),
-        in_axes=(0, 0, 0, 0),
+        in_axes=(0, 1, 0, 0),  # ← flux_active_interp now vmapped on axis 1
     )
 
     star_specs, bin_fluxes, flux_discs = _flux_vmap(
@@ -358,7 +420,7 @@ def _compute_single_phase(
     # ---- Broadband flux and contamination factor ------------------------
     flux_norm            = jnp.sum(bin_fluxes) / jnp.sum(star_specs)
     contamination_factor = star_specs / jnp.where(
-        bin_fluxes == 0.0, 1.0, bin_fluxes
+        bin_fluxes == 0.0, jnp.nan, bin_fluxes
     )
 
     # ---- Reconstruct 2D map at plot_map_wavelength ----------------------
@@ -390,6 +452,7 @@ def _compute_all_phases(
     total_pixels: int,
     arsize_rads: jnp.ndarray,
     ldc_mode: LdcMode,
+    ar_overlap_mode: ArOverlapMode,
     plot_map_wavelength: float,
     n: int,
     flat_indices: jnp.ndarray,
@@ -420,6 +483,7 @@ def _compute_all_phases(
             total_pixels        = total_pixels,
             arsize_rads       = arsize_rads,
             ldc_mode            = ldc_mode,
+            ar_overlap_mode     = ar_overlap_mode,
             plot_map_wavelength = plot_map_wavelength,
             n                   = n,
             flat_indices        = flat_indices,
@@ -454,6 +518,7 @@ def build_model(
     stellar_grid_size: int,
     ve: float,
     ldc_mode: LdcMode = "quadratic",
+    ar_overlap_mode: ArOverlapMode = "hottest_wins",
     plot_map_wavelength: Optional[float] = None,
 ) -> dict:
     """
@@ -470,37 +535,85 @@ def build_model(
     wavelength : array_like, shape (nwave,)
     flux_quiet : array_like, shape (nwave,)
     params : dict
-        ``u1``, ``u2``, ``inc_star``, ``mu_profile``, ``I_profile``
+        Model parameters. Recognised keys:
+
+        ``inc_star`` : float, optional
+            Stellar inclination in degrees (default: 90.0).
+            90° = equator-on, 0° = pole-on.
+
+        ``ldc_coeffs`` : list of float or list of array(nwave,)
+            Limb-darkening coefficients for the chosen ``ldc_mode``:
+            - ``"linear"``:     [u]
+            - ``"quadratic"``:  [u1, u2]
+            - ``"power2"``:     [c, alpha]
+            - ``"kipping3"``:   [c1, c2, c3]
+            - ``"nonlinear4"``: [c1, c2, c3, c4]
+            Each element may be a scalar (broadcast to all wavelengths)
+            or an array of length ``nwave``.
+            For ``"quadratic"`` mode only, ``u1`` and ``u2`` are also
+            accepted as separate keys (legacy interface).
+
+        ``mu_profile`` : array-like, optional
+            Monotonically increasing μ grid points for
+            ``ldc_mode="intensity_profile"`` (default: [0, 1]).
+
+        ``I_profile`` : array-like, shape (nwave, n_mu_pts), optional
+            Specific intensity at each (wavelength, μ) grid point.
+            Required when ``ldc_mode="intensity_profile"``.
     phases_rot : array_like, shape (nphase,)
     stellar_grid_size : int
     ve : float
     ldc_mode : str
+    ar_overlap_mode : {"hottest_wins", "coldest_wins"}, optional
+        Rule for resolving overlapping active regions:
+        - "hottest_wins": overlap pixel uses flux from hottest (highest flux) AR
+        - "coldest_wins": overlap pixel uses flux from coldest (lowest flux) AR
+        Default: "hottest_wins"
     plot_map_wavelength : float, optional
 
     Returns
     -------
     dict  — pass directly to ``evaluate_light_curve``
     """
-    wavelength = np.asarray(wavelength, dtype=np.float64)
-    flux_quiet   = np.asarray(flux_quiet,   dtype=np.float64)
-    phases_rot = np.atleast_1d(np.asarray(phases_rot, dtype=np.float64))
+    # Validate ar_overlap_mode
+    valid_modes = ("hottest_wins", "coldest_wins")
+    if ar_overlap_mode not in valid_modes:
+        raise ValueError(
+            f"ar_overlap_mode must be one of {valid_modes}, "
+            f"got '{ar_overlap_mode}'."
+        )
+    
+    wavelength = np.asarray(wavelength, dtype=np.float32)
+    flux_quiet   = np.asarray(flux_quiet,   dtype=np.float32)
+    phases_rot = np.atleast_1d(np.asarray(phases_rot, dtype=np.float32))
 
     nwave  = len(wavelength)
     nphase = len(phases_rot)
 
     inc_star       = float(params.get("inc_star", 90.0))
     mu_profile_pts = np.asarray(params.get("mu_profile", [0.0, 1.0]),
-                                dtype=np.float64)
+                                dtype=np.float32)
+    if not np.all(np.diff(mu_profile_pts) > 0):
+        raise ValueError(
+            "build_model: 'mu_profile' must be strictly increasing. "
+            f"Got: {mu_profile_pts}"
+        )
     I_profile = np.asarray(
         params.get("I_profile",
-                   np.ones((nwave, len(mu_profile_pts)), dtype=np.float64)),
-        dtype=np.float64,
+                   np.ones((nwave, len(mu_profile_pts)), dtype=np.float32)),
+        dtype=np.float32,
     )
 
     if ldc_mode == "intensity_profile":
         # Intensity-profile mode does not use analytical LDC coefficients
-        ldc_coeffs = np.zeros((nwave, 1), dtype=np.float64)
+        ldc_coeffs = np.zeros((nwave, 1), dtype=np.float32)
     else:
+        if ldc_mode not in _N_COEFFS:
+            raise ValueError(
+                f"build_model: unknown ldc_mode '{ldc_mode}'. "
+                f"Must be one of {list(_N_COEFFS.keys()) + ['intensity_profile']}."
+            )
+    
         n_coeffs = _N_COEFFS[ldc_mode]
 
         # Accept either the unified "ldc_coeffs" key or legacy "u1"/"u2" for quadratic
@@ -524,7 +637,7 @@ def build_model(
         coeff_arrays = []
         all_scalar   = True
         for i, coeff in enumerate(raw):
-            c = np.asarray(coeff, dtype=np.float64)
+            c = np.asarray(coeff, dtype=np.float32)
             if c.ndim == 0:
                 coeff_arrays.append(np.full(nwave, float(c)))
             else:
@@ -549,6 +662,11 @@ def build_model(
                 f"build_model: per-wavelength LDCs provided for '{ldc_mode}' law "
                 f"({n_coeffs} coefficient(s), {nwave} wavelength bins)."
             )
+
+    if ar_overlap_mode == "hottest_wins":
+        print("build_model: active region overlap mode: 'hottest_wins' (overlaps take flux from hottest AR)")
+    else:
+        print("build_model: active region overlap mode: 'coldest_wins' (overlaps take flux from coldest AR)")
 
     grid = build_stellar_grid(stellar_grid_size, ve)
 
@@ -576,6 +694,7 @@ def build_model(
         # metadata
         inc_star            = inc_star,
         ldc_mode            = ldc_mode,
+        ar_overlap_mode     = ar_overlap_mode,
         plot_map_wavelength = float(plot_map_wavelength),
         nwave               = nwave,
         nphase              = nphase,
@@ -600,13 +719,14 @@ def evaluate_light_curve(
     ----------
     model : dict
         Pre-built model dict returned by ``build_model``.
-    flux_active : jnp.ndarray, shape (nwave,)
-        Active-region (active region) flux spectrum.  This is the only spectral
-        quantity that varies between MCMC steps (via the contrast parameter).
+    flux_active : jnp.ndarray, shape (nar, nwave) or (nwave,)
+        Active-region (active region) flux spectrum.  
+        - If (nar, nwave): each active region gets its own spectrum.
+        - If (nwave,):     broadcasts to all active regions (legacy mode).
     ar_lat : jnp.ndarray, shape (nar,)
-        active region latitudes in degrees.
+        active region latitudes in degrees. Must be in [-90, 90].
     ar_long : jnp.ndarray, shape (nar,)
-        active region longitudes in degrees.
+        active region longitudes in degrees. Must be in [0, 360).
     ar_size : jnp.ndarray, shape (nar,)
         active region angular radii in degrees.
 
@@ -619,9 +739,33 @@ def evaluate_light_curve(
     ``star_maps`` — (nphase, n, n)  stellar flux map per phase
     """
     flux_active  = jnp.atleast_1d(jnp.asarray(flux_active))
-    ar_lat   = jnp.atleast_1d(jnp.asarray(ar_lat))
-    ar_long  = jnp.atleast_1d(jnp.asarray(ar_long))
-    ar_size  = jnp.atleast_1d(jnp.asarray(ar_size))
+    ar_lat       = jnp.atleast_1d(jnp.asarray(ar_lat))
+    ar_long      = jnp.atleast_1d(jnp.asarray(ar_long))
+    ar_size      = jnp.atleast_1d(jnp.asarray(ar_size))
+
+    # Determine number of active regions
+    nar = ar_lat.size
+
+    # Handle broadcasting: if flux_active is (nwave,), broadcast to (nar, nwave)
+    nwave = model["nwave"]
+    if flux_active.ndim == 1:
+        if flux_active.size != nwave:
+            raise ValueError(
+                f"flux_active shape mismatch: got size {flux_active.size} "
+                f"but wavelength grid has {nwave} bins."
+            )
+        # Broadcast (nwave,) → (nar, nwave)
+        flux_active = jnp.broadcast_to(flux_active[None, :], (nar, nwave))
+    elif flux_active.ndim == 2:
+        if flux_active.shape != (nar, nwave):
+            raise ValueError(
+                f"flux_active shape mismatch: got {flux_active.shape} "
+                f"but expected ({nar}, {nwave})."
+            )
+    else:
+        raise ValueError(
+            f"flux_active must be 1D or 2D, got shape {flux_active.shape}."
+        )
 
     spr        = model["star_pixel_rad"]
     inc_star   = model["inc_star"]
@@ -650,8 +794,8 @@ def evaluate_light_curve(
     lc_raw, epsilon, star_maps = _compute_all_phases(
         all_ar_carts,
         wavelength          = model["wavelength"],
-        flux_quiet_interp     = model["flux_quiet"],
-        flux_active_interp    = flux_active,
+        flux_quiet_interp   = model["flux_quiet"],
+        flux_active_interp  = flux_active,
         ldc_coeffs          = model["ldc_coeffs"],
         I_profile           = model["I_profile"],
         mu_profile_pts      = model["mu_profile_pts"],
@@ -661,8 +805,9 @@ def evaluate_light_curve(
         vel_disc            = model["vel_disc"],
         star_pixel_rad      = spr,
         total_pixels        = model["total_pixels"],
-        arsize_rads       = jnp.deg2rad(ar_size),
+        arsize_rads         = jnp.deg2rad(ar_size),
         ldc_mode            = model["ldc_mode"],
+        ar_overlap_mode     = model["ar_overlap_mode"],
         plot_map_wavelength = model["plot_map_wavelength"],
         n                   = model["n"],
         flat_indices        = model["flat_indices"],
@@ -687,6 +832,7 @@ def compute_light_curve(
     stellar_grid_size: int,
     ve: float,
     ldc_mode: LdcMode = "quadratic",
+    ar_overlap_mode: ArOverlapMode = "hottest_wins",
     plot_map_wavelength: Optional[float] = None,
 ) -> dict:
     """
@@ -695,7 +841,7 @@ def compute_light_curve(
     Equivalent to::
 
         model  = build_model(wavelength, flux_quiet, params, phases_rot,
-                             stellar_grid_size, ve, ldc_mode,
+                             stellar_grid_size, ve, ldc_mode, ar_overlap_mode,
                              plot_map_wavelength)
         result = evaluate_light_curve(model, flux_active,
                                       ar_lat, ar_long, ar_size)
@@ -708,15 +854,17 @@ def compute_light_curve(
     dict with keys ``lc``, ``epsilon``, ``star_maps`` as NumPy arrays.
     """
     model  = build_model(
-        wavelength, flux_quiet, params, phases_rot,
-        stellar_grid_size, ve, ldc_mode, plot_map_wavelength,
+        wavelength, flux_quiet, params, phases_rot, stellar_grid_size,
+        ve, ldc_mode, ar_overlap_mode, plot_map_wavelength,
     )
+    
+    flux_active_arr = np.atleast_1d(np.asarray(flux_active, dtype=np.float32))
     result = evaluate_light_curve(
         model,
-        jnp.asarray(np.asarray(flux_active,  dtype=np.float64)),
-        jnp.asarray(np.atleast_1d(np.asarray(ar_lat,  dtype=np.float64))),
-        jnp.asarray(np.atleast_1d(np.asarray(ar_long, dtype=np.float64))),
-        jnp.asarray(np.atleast_1d(np.asarray(ar_size, dtype=np.float64))),
+        jnp.asarray(flux_active_arr),
+        jnp.asarray(np.atleast_1d(np.asarray(ar_lat,  dtype=np.float32))),
+        jnp.asarray(np.atleast_1d(np.asarray(ar_long, dtype=np.float32))),
+        jnp.asarray(np.atleast_1d(np.asarray(ar_size, dtype=np.float32))),
     )
     return {
         "lc"        : np.array(result["lc"]),

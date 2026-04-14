@@ -18,7 +18,14 @@ build_stellar_grid
     Pre-compute the static stellar pixel grid.
 
 rotate_active_region
-    Apply stellar rotation and inclination to a Cartesian active region position.
+    Apply stellar rotation and inclination to a Cartesian active region
+    position.
+
+LdcMode
+    Type alias for supported limb-darkening laws.
+
+ArOverlapMode
+    Type alias for active-region overlap resolution rules.
 """
 
 from .core import (
@@ -26,14 +33,18 @@ from .core import (
     build_model,
     evaluate_light_curve,
     build_stellar_grid,
+    LdcMode,
+    ArOverlapMode,
 )
 from .geometry import rotate_active_region
 
 __version__ = "0.1.0"
 __all__ = [
-    "compute_light_curve",
+    "build_stellar_grid",
     "build_model",
     "evaluate_light_curve",
-    "build_stellar_grid",
+    "compute_light_curve",
     "rotate_active_region",
+    "LdcMode",
+    "ArOverlapMode",
 ]
