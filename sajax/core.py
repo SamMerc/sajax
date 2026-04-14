@@ -228,9 +228,6 @@ def _make_oversampled_phases(
     # Broadcast: (nphase, 1) + (1, oversample) → (nphase, oversample)
     oversampled = phases_rot[:, None] + offsets[None, :]
 
-    # Wrap to [0, 360)
-    oversampled = oversampled % 360.0
-
     return oversampled.ravel()
 
 
@@ -289,7 +286,7 @@ def _compute_ar_mask(
     ))
 
     # active regions with spz < 0 are on the far side of the star — not visible
-    return (d_sigma <= arsize_rad) & (spz >= 0.0)
+    return (d_sigma <= arsize_rad)
 
 
 # ---------------------------------------------------------------------------

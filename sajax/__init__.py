@@ -38,7 +38,8 @@ from .core import (
 )
 from .geometry import rotate_active_region
 
-__version__ = "0.2.2"
+from importlib.metadata import version
+__version__ = version("sajax")
 __all__ = [
     "build_stellar_grid",
     "build_model",
