@@ -38,7 +38,7 @@ from .core import (
 )
 from .geometry import rotate_active_region
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 __all__ = [
     "build_stellar_grid",
     "build_model",
