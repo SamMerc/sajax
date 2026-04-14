@@ -943,7 +943,7 @@ def compute_light_curve(
     ldc_mode: LdcMode = "quadratic",
     ar_overlap_mode: ArOverlapMode = "hottest_wins",
     plot_map_wavelength: Optional[float] = None,
-    oversample: int = 1,
+    oversample: int = 3,
 ) -> dict:
     """
     Convenience wrapper: build model and evaluate in one call.

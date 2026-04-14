@@ -860,6 +860,39 @@ def test_oversample_invalid_value():
             oversample=0,
         )
 
+def test_oversample_preserves_shape():
+    """Output shape should always be (nphase,) regardless of oversample."""
+    import numpy as np
+    from sajax import compute_light_curve
+
+    wavelength = np.array([550.0])
+    flux_quiet = np.array([1.0])
+    flux_active = np.array([[0.7]])
+    params = dict(ldc_coeffs=[0.4, 0.2], inc_star=90.0)
+    phases = np.linspace(0, 360, 50, endpoint=False)
+
+    common = dict(
+        wavelength=wavelength,
+        flux_quiet=flux_quiet,
+        flux_active=flux_active,
+        params=params,
+        ar_lat=[20.0],
+        ar_long=[5.0],
+        ar_size=[11.0],
+        phases_rot=phases,
+        stellar_grid_size=80,
+        ve=2.0,
+    )
+
+    for os_factor in [1, 3, 5]:
+        result = compute_light_curve(**common, oversample=os_factor)
+        assert result["lc"].shape == (50,), (
+            f"oversample={os_factor}: expected shape (50,), "
+            f"got {result['lc'].shape}"
+        )
+        assert result["epsilon"].shape[0] == 50
+        assert result["star_maps"].shape[0] == 50
+
 # ===================================================================
 # Numerical edge cases
 # ===================================================================
