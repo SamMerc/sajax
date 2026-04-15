@@ -74,11 +74,11 @@ import functools
 from typing import Literal, Optional
 
 import numpy as np
-import jax
 import jax.numpy as jnp
-from jax import jit, vmap
+from jax import vmap
 
 from .geometry import rotate_active_region
+from .planet import _compute_planet_mask
 
 # Type alias
 LdcMode = Literal[
@@ -295,23 +295,25 @@ def _compute_ar_mask(
 
 def _flux_at_wavelength(
     # --- vmapped: one scalar/slice per wavelength ---
-    flux_quiet_wl: float,
+    flux_quiet_wl:  float,
     flux_active_wl: jnp.ndarray, # (nar,)  — one row of flux_active_interp
-    ldc_coeffs_wl: jnp.ndarray,  # (n_coeffs,)  — one row of ldc_coeffs
-    I_prof_wl: jnp.ndarray,      # (n_mu_pts,)
+    ldc_coeffs_wl:  jnp.ndarray, # (n_coeffs,)  — one row of ldc_coeffs
+    I_prof_wl:      jnp.ndarray, # (n_mu_pts,)
     # --- broadcast: shared across wavelengths ---
-    mu_disc: jnp.ndarray,        # (total_pixels,)
-    vel_disc: jnp.ndarray,       # (total_pixels,)
-    total_pixels: int,
-    ar_masks: jnp.ndarray,       # (nar, total_pixels)
+    mu_disc:        jnp.ndarray, # (total_pixels,)
+    vel_disc:       jnp.ndarray, # (total_pixels,)
+    total_pixels:   int,
+    ar_masks:       jnp.ndarray, # (nar, total_pixels)
+    planet_mask:    jnp.ndarray, # (total_pixels,)
     mu_profile_pts: jnp.ndarray, # (n_mu_pts,)
-    ldc_mode: LdcMode,
-    ar_overlap_mode: ArOverlapMode,
+    ldc_mode:       LdcMode,
+    ar_overlap_mode:ArOverlapMode,
 ) -> tuple[float, float, jnp.ndarray]:
     """
     Compute disc-integrated flux for a single wavelength channel.
-
     All arrays are 1D (in-disc pixels only) — no starmask needed.
+    ``planet_mask`` is True for pixels occulted by the planet; those pixels
+    contribute zero flux regardless of active-region status.
 
     Returns
     -------
@@ -328,7 +330,7 @@ def _flux_at_wavelength(
         # I(μ) = 1 - u*(1 - μ)
         ldc = 1.0 - ldc_coeffs_wl[0] * (1.0 - mu_disc)
     elif ldc_mode == "quadratic":
-        # I(μ) = 1 - u1*(1-μ) - u2*(1-μ)²
+        # I(μ) = 1 - u1*(1-μ) - u2*(1-μ)^2
         ldc = (1.0
                - ldc_coeffs_wl[0] * (1.0 - mu_disc)
                - ldc_coeffs_wl[1] * (1.0 - mu_disc) ** 2)
@@ -336,7 +338,7 @@ def _flux_at_wavelength(
         # I(μ) = 1 - c*(1 - μ^α)
         ldc = 1.0 - ldc_coeffs_wl[0] * (1.0 - mu_disc ** ldc_coeffs_wl[1])
     elif ldc_mode == "kipping3":
-        # I(μ) = 1 - c1*(1-μ^½) - c2*(1-μ) - c3*(1-μ^(3/2))
+        # I(μ) = 1 - c1*(1-μ^0.5) - c2*(1-μ) - c3*(1-μ^(3/2))
         ldc = (1.0
                - ldc_coeffs_wl[0] * (1.0 - mu_disc ** 0.5)
                - ldc_coeffs_wl[1] * (1.0 - mu_disc)
@@ -349,21 +351,18 @@ def _flux_at_wavelength(
                - ldc_coeffs_wl[2] * (1.0 - mu_disc ** 1.5)
                - ldc_coeffs_wl[3] * (1.0 - mu_disc ** 2.0))
 
-    # ---- Un-active-region'ed grid -------------------------------------------------
+    # ---- Un-occulted grid -------------------------------------------------
     quiet_flux  = flux_quiet_wl  * (1.0 + vel_disc) * ldc   # (total_pixels,)
     star_spec = jnp.sum(quiet_flux) / total_pixels
 
     # ---- Resolve AR overlaps with user-selected rule -------------------
-    # ar_masks:      (nar, total_pixels) — boolean mask for each AR
-    # flux_active_wl: (nar,) — flux value for each AR at this wavelength
-    
     # Compute active flux for each AR at each pixel
     # Shape: (nar, total_pixels)
     ar_active_fluxes = (
         flux_active_wl[:, None]          # (nar, 1)
         * (1.0 + vel_disc[None, :])      # (1, total_pixels)
         * ldc[None, :]                   # (1, total_pixels)
-    )  # → (nar, total_pixels)
+    )  # (nar, total_pixels)
 
     # Sentinel values for pixels where AR is absent:
     # For "hottest_wins": use -inf (will lose argmax)
@@ -406,6 +405,12 @@ def _flux_at_wavelength(
         quiet_flux,
     )  # (total_pixels,)
 
+    # ---- Planet occultation ---------------------------------------
+    # Pixels behind the planet disc contribute zero flux.  If those pixels
+    # happen to be spots or faculae, the spot-crossing anomaly is captured
+    # automatically.
+    arted_flux = jnp.where(planet_mask, 0.0, arted_flux)
+
     total_flux = jnp.sum(arted_flux) / jnp.float32(total_pixels)
     return star_spec, total_flux, arted_flux
 
@@ -415,29 +420,35 @@ def _flux_at_wavelength(
 # ---------------------------------------------------------------------------
 
 def _compute_single_phase(
-    ar_cart_all: jnp.ndarray,         # (nar, 3)
+    ar_cart_all:         jnp.ndarray,  # (nar, 3)
+    planet_xyz:          jnp.ndarray,  # (3,)
     *,
-    wavelength: jnp.ndarray,          # (nwave,)
-    flux_quiet_interp: jnp.ndarray,   # (nwave,)
-    flux_active_interp: jnp.ndarray,  # (nar, nwave)
-    ldc_coeffs: jnp.ndarray,          # (nwave, n_coeffs)
-    I_profile: jnp.ndarray,           # (nwave, n_mu_pts)
-    mu_profile_pts: jnp.ndarray,      # (n_mu_pts,)
-    x_disc: jnp.ndarray,              # (total_pixels,)
-    y_disc: jnp.ndarray,              # (total_pixels,)
-    mu_disc: jnp.ndarray,             # (total_pixels,)
-    vel_disc: jnp.ndarray,            # (total_pixels,)
-    star_pixel_rad: float,
-    total_pixels: int,
-    arsize_rads: jnp.ndarray,         # (nar,)
-    ldc_mode: LdcMode,
-    ar_overlap_mode: ArOverlapMode,
+    wavelength:          jnp.ndarray,  # (nwave,)
+    flux_quiet_interp:   jnp.ndarray,  # (nwave,)
+    flux_active_interp:  jnp.ndarray,  # (nar, nwave)
+    ldc_coeffs:          jnp.ndarray,  # (nwave, n_coeffs)
+    I_profile:           jnp.ndarray,  # (nwave, n_mu_pts)
+    mu_profile_pts:      jnp.ndarray,  # (n_mu_pts,)
+    x_disc:              jnp.ndarray,  # (total_pixels,)
+    y_disc:              jnp.ndarray,  # (total_pixels,)
+    mu_disc:             jnp.ndarray,  # (total_pixels,)
+    vel_disc:            jnp.ndarray,  # (total_pixels,)
+    star_pixel_rad:      float,
+    total_pixels:        int,
+    arsize_rads:         jnp.ndarray,  # (nar,)
+    k:                   float,        # Rp / R*
+    ldc_mode:            LdcMode,
+    ar_overlap_mode:     ArOverlapMode,
     plot_map_wavelength: float,
-    n: int,                           # full grid side (for map scatter)
-    flat_indices: jnp.ndarray,        # (total_pixels,) scatter indices
+    n:                   int,         # full grid side (for map scatter)
+    flat_indices:        jnp.ndarray, # (total_pixels,) scatter indices
 ) -> tuple[float, jnp.ndarray, jnp.ndarray]:
     """
-    Full spectral computation for one rotational phase.
+    Full spectral computation for one rotational phase, including optional
+    pixel-level planet occultation.
+    ``planet_xyz`` is the planet's sky-plane position (X, Y, Z) in stellar
+    radii.  Pass ``jnp.array([0., 0., -1e10])`` and ``k=0.0`` to disable
+    the transit mask (no performance cost — the mask is all-False).
 
     Returns
     -------
@@ -453,6 +464,12 @@ def _compute_single_phase(
         )
     )(ar_cart_all, arsize_rads)
 
+    # ---- Planet mask: (total_pixels,)  ----------------------------------
+    planet_mask = _compute_planet_mask(
+        x_disc, y_disc, star_pixel_rad,
+        planet_xyz[0], planet_xyz[1], planet_xyz[2], k,
+    )
+
     # ---- vmap over wavelengths ----
     # Transpose flux_active from (nar, nwave) to vmap over nwave axis
     # Each wavelength gets flux_active[:, wl] shape (nar,)
@@ -463,11 +480,12 @@ def _compute_single_phase(
             vel_disc       = vel_disc,
             total_pixels   = total_pixels,
             ar_masks       = ar_masks,
+            planet_mask    = planet_mask,
             mu_profile_pts = mu_profile_pts,
             ldc_mode       = ldc_mode,
             ar_overlap_mode = ar_overlap_mode,
         ),
-        in_axes=(0, 1, 0, 0),  # ← flux_active_interp now vmapped on axis 1
+        in_axes=(0, 1, 0, 0),
     )
 
     star_specs, bin_fluxes, flux_discs = _flux_vmap(
@@ -485,7 +503,7 @@ def _compute_single_phase(
 
     # ---- Reconstruct 2D map at plot_map_wavelength ----------------------
     map_idx   = jnp.argmin(jnp.abs(wavelength - plot_map_wavelength))
-    flux_1d   = flux_discs[map_idx]                         # (total_pixels,)
+    flux_1d   = flux_discs[map_idx]   # (total_pixels,)
     star_map  = jnp.zeros(n * n).at[flat_indices].set(flux_1d).reshape(n, n)
 
     return flux_norm, contamination_factor, star_map
@@ -496,29 +514,35 @@ def _compute_single_phase(
 # ---------------------------------------------------------------------------
 
 def _compute_all_phases(
-    all_ar_carts: jnp.ndarray,   # (nphase, nar, 3)
+    all_ar_carts:    jnp.ndarray,   # (nphase, nar, 3)
+    planet_xyz_all:  jnp.ndarray,   # (nphase, 3)       
     *,
-    wavelength: jnp.ndarray,
-    flux_quiet_interp: jnp.ndarray,
-    flux_active_interp: jnp.ndarray,
-    ldc_coeffs: jnp.ndarray,       # (nwave, n_coeffs)
-    I_profile: jnp.ndarray,
-    mu_profile_pts: jnp.ndarray,
-    x_disc: jnp.ndarray,
-    y_disc: jnp.ndarray,
-    mu_disc: jnp.ndarray,
-    vel_disc: jnp.ndarray,
-    star_pixel_rad: float,
-    total_pixels: int,
-    arsize_rads: jnp.ndarray,
-    ldc_mode: LdcMode,
-    ar_overlap_mode: ArOverlapMode,
+    wavelength:          jnp.ndarray,
+    flux_quiet_interp:   jnp.ndarray,
+    flux_active_interp:  jnp.ndarray,
+    ldc_coeffs:          jnp.ndarray, # (nwave, n_coeffs)
+    I_profile:           jnp.ndarray,
+    mu_profile_pts:      jnp.ndarray,
+    x_disc:              jnp.ndarray,
+    y_disc:              jnp.ndarray,
+    mu_disc:             jnp.ndarray,
+    vel_disc:            jnp.ndarray,
+    star_pixel_rad:      float,
+    total_pixels:        int,
+    arsize_rads:         jnp.ndarray,
+    k:                   float,       # Rp / R★
+    ldc_mode:            LdcMode,
+    ar_overlap_mode:     ArOverlapMode,
     plot_map_wavelength: float,
-    n: int,
-    flat_indices: jnp.ndarray,
+    n:                   int,
+    flat_indices:        jnp.ndarray,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
     vmap ``_compute_single_phase`` over the phase axis.
+
+    ``planet_xyz_all`` contains the planet (X, Y, Z) position at each
+    (oversampled) phase.  Pass ``jnp.full((nphase, 3), [0, 0, -1e10])``
+    and ``k=0.0`` to disable transit (no performance overhead).
 
     Returns
     -------
@@ -530,8 +554,8 @@ def _compute_all_phases(
         functools.partial(
             _compute_single_phase,
             wavelength          = wavelength,
-            flux_quiet_interp     = flux_quiet_interp,
-            flux_active_interp    = flux_active_interp,
+            flux_quiet_interp   = flux_quiet_interp,
+            flux_active_interp  = flux_active_interp,
             ldc_coeffs          = ldc_coeffs,
             I_profile           = I_profile,
             mu_profile_pts      = mu_profile_pts,
@@ -541,16 +565,17 @@ def _compute_all_phases(
             vel_disc            = vel_disc,
             star_pixel_rad      = star_pixel_rad,
             total_pixels        = total_pixels,
-            arsize_rads       = arsize_rads,
+            arsize_rads         = arsize_rads,
+            k                   = k,
             ldc_mode            = ldc_mode,
             ar_overlap_mode     = ar_overlap_mode,
             plot_map_wavelength = plot_map_wavelength,
             n                   = n,
             flat_indices        = flat_indices,
         ),
-        in_axes=0,
+        in_axes=(0,0), # vmap over both ar_carts and planet_xyz
     )
-    return _phase_vmap(all_ar_carts)
+    return _phase_vmap(all_ar_carts, planet_xyz_all)
 
 
 # ---------------------------------------------------------------------------
@@ -884,9 +909,20 @@ def evaluate_light_curve(
         model["phases_rot"]
     )   # (nphase_compute, nar, 3)
 
+   # ---- Planet positions (if a transit model is present) ---------------
+    if model.get("has_transit", False):
+       planet_xyz_all = model["planet_xyz"]    # (nphase_compute, 3)
+       k_val          = float(model["k"])
+    else:
+       # Dummy: planet permanently behind the star, zero-radius disc.
+       nphase_compute = model["phases_rot"].shape[0]
+       planet_xyz_all = jnp.zeros((nphase_compute, 3)).at[:, 2].set(-1e10)
+       k_val          = 0.0
+
     # ---- All-phases computation ------------------------------------------
     lc_raw, epsilon, star_maps = _compute_all_phases(
         all_ar_carts,
+        planet_xyz_all,
         wavelength          = model["wavelength"],
         flux_quiet_interp   = model["flux_quiet"],
         flux_active_interp  = flux_active,
@@ -900,6 +936,7 @@ def evaluate_light_curve(
         star_pixel_rad      = spr,
         total_pixels        = model["total_pixels"],
         arsize_rads         = jnp.deg2rad(ar_size),
+        k                   = k_val,
         ldc_mode            = model["ldc_mode"],
         ar_overlap_mode     = model["ar_overlap_mode"],
         plot_map_wavelength = model["plot_map_wavelength"],
@@ -983,6 +1020,186 @@ def compute_light_curve(
         ve, ldc_mode, ar_overlap_mode, plot_map_wavelength, oversample,
     )
     
+    flux_active_arr = np.atleast_1d(np.asarray(flux_active, dtype=np.float32))
+    result = evaluate_light_curve(
+        model,
+        jnp.asarray(flux_active_arr),
+        jnp.asarray(np.atleast_1d(np.asarray(ar_lat,  dtype=np.float32))),
+        jnp.asarray(np.atleast_1d(np.asarray(ar_long, dtype=np.float32))),
+        jnp.asarray(np.atleast_1d(np.asarray(ar_size, dtype=np.float32))),
+    )
+    return {
+        "lc"        : np.array(result["lc"]),
+        "epsilon"   : np.array(result["epsilon"]),
+        "star_maps" : np.array(result["star_maps"]),
+    }
+
+def build_combined_model(
+    wavelength:         np.ndarray,
+    flux_quiet:         np.ndarray,
+    params:             dict,
+    times:              np.ndarray,
+    P_rot:              float,
+    transit_params:     dict,
+    stellar_grid_size:  int,
+    ve:                 float,
+    ldc_mode:           LdcMode            = "quadratic",
+    ar_overlap_mode:    ArOverlapMode      = "hottest_wins",
+    plot_map_wavelength: Optional[float]   = None,
+    oversample:         int                = 3,
+) -> dict:
+    """
+    Build a combined stellar-activity + planetary-transit sajax model.
+
+    This is the entry point for modelling **active-region crossing events**:
+    the planet mask is applied at the individual pixel level, so if the planet
+    occults a starspot or facula the resulting anomaly in the light curve is
+    computed correctly.
+
+    Compared to multiplying independent stellar and transit light curves, this
+    function correctly handles:
+      • Planet occulting a spot (spot-crossing anomaly).
+      • Planet occulting a facula (facula-crossing anomaly).
+      • The varying limb-darkening depth of the transit as a function of
+        the stellar surface brightness profile.
+
+    Parameters
+    ----------
+    wavelength         : (nwave,)  wavelength array  [nm]
+    flux_quiet         : (nwave,)  quiet-star flux spectrum
+    params             : stellar model params dict (same as ``build_model``)
+    times              : (ntime,)  absolute observation times  [days]
+    P_rot              : stellar rotation period  [days]
+    transit_params     : dict with keys (all required unless noted):
+        ``t0``            — mid-transit epoch  [days]
+        ``period``        — orbital period  [days]
+        ``a_over_rstar``  — semimajor axis / R★  (dimensionless)
+        ``inclination``   — orbital inclination  [rad]
+        ``k``             — planet-to-star radius ratio  Rp / R★
+        ``ecc``           — eccentricity  (default 0.0)
+        ``omega_peri``    — argument of periastron  [rad]  (default 0.0)
+    stellar_grid_size  : stellar radius in pixels
+    ve                 : equatorial velocity  [km/s]
+    ldc_mode           : limb-darkening law  (same options as ``build_model``)
+    ar_overlap_mode    : active-region overlap rule
+    plot_map_wavelength: wavelength for 2D map output  [nm]
+    oversample         : sub-exposure count per phase point  (default 3)
+
+    Returns
+    -------
+    model dict — pass directly to ``evaluate_light_curve``
+
+    Notes
+    -----
+    The oversampling is applied *consistently* to both the stellar rotation
+    phase grid and the orbital time grid.  For each original time t_i with
+    phase step dt, ``oversample`` sub-times are generated spanning
+    [t_i - dt/2, t_i + dt/2), exactly mirroring ``_make_oversampled_phases``.
+    """
+    from .planet import build_transit_model   # local import avoids circular dep.
+
+    times_arr  = np.asarray(times, dtype=np.float64)
+    phases_rot = (times_arr / P_rot * 360.0) % 360.0
+
+    # ---- Build the base stellar model (handles phase oversampling) ----------
+    model = build_model(
+        wavelength, flux_quiet, params, phases_rot, stellar_grid_size,
+        ve, ldc_mode, ar_overlap_mode, plot_map_wavelength, oversample,
+    )
+
+    # ---- Compute oversampled TIMES to match the oversampled phases ----------
+    # We work in absolute time (not phases) so the planet's orbital position
+    # is computed correctly regardless of phase wrapping.
+    if oversample > 1:
+        n_t = len(times_arr)
+        dt  = (times_arr[1] - times_arr[0]) if n_t > 1 else P_rot
+        # Same offset scheme used in _make_oversampled_phases — results align.
+        offsets = np.linspace(-dt / 2.0, dt / 2.0, oversample, endpoint=False)
+        offsets += dt / (2.0 * oversample)                          # centre sub-bins
+        times_oversampled = (
+            times_arr[:, None] + offsets[None, :]
+        ).ravel().astype(np.float32)
+    else:
+        times_oversampled = times_arr.astype(np.float32)
+
+    # ---- Build transit model (planet positions at oversampled times) ---------
+    tp = transit_params
+    transit = build_transit_model(
+        times      = times_oversampled,
+        t0         = float(tp["t0"]),
+        period     = float(tp["period"]),
+        a_over_rstar = float(tp["a_over_rstar"]),
+        inclination  = float(tp["inclination"]),
+        ecc          = float(tp.get("ecc",        0.0)),
+        omega_peri   = float(tp.get("omega_peri", 0.0)),
+        k            = float(tp["k"]),
+    )
+
+    # ---- Attach transit data to the model dict ------------------------------
+    model["planet_xyz"]  = transit["planet_xyz"]   # (nphase_compute, 3)
+    model["k"]           = transit["k"]
+    model["has_transit"] = True
+    model["P_rot"]       = P_rot
+    model["times"]       = times_arr
+
+    return model
+
+def compute_combined_light_curve(
+    wavelength:         np.ndarray,
+    flux_quiet:         np.ndarray,
+    flux_active:        np.ndarray,
+    params:             dict,
+    ar_lat:             np.ndarray,
+    ar_long:            np.ndarray,
+    ar_size:            np.ndarray,
+    times:              np.ndarray,
+    P_rot:              float,
+    transit_params:     dict,
+    stellar_grid_size:  int,
+    ve:                 float,
+    ldc_mode:           LdcMode            = "quadratic",
+    ar_overlap_mode:    ArOverlapMode      = "hottest_wins",
+    plot_map_wavelength: Optional[float]   = None,
+    oversample:         int                = 3,
+) -> dict:
+    """
+    Convenience wrapper: build a combined stellar + transit model and
+    evaluate it in one call.
+
+    Equivalent to::
+
+        model  = build_combined_model(wavelength, flux_quiet, params, times, P_rot,
+                             transit_params, stellar_grid_size, ve, ldc_mode, ar_overlap_mode,
+                             plot_map_wavelength, oversample)
+
+        result = evaluate_light_curve(model, flux_active,
+                                      ar_lat, ar_long, ar_size)
+
+    Use ``build_model`` + ``evaluate_light_curve`` directly when running
+    MCMC so the grid is built only once.
+
+    Parameters
+    ----------
+    (All parameters match ``build_combined_model`` and
+    ``evaluate_light_curve``.  See their docstrings for details.)
+
+    transit_params : dict
+        ``t0``, ``period``, ``a_over_rstar``, ``inclination``, ``k``,
+        and optionally ``ecc``, ``omega_peri``.
+
+    Returns
+    -------
+    dict with keys ``lc``, ``epsilon``, ``star_maps``  (same as
+    ``compute_light_curve``).
+
+    """
+
+    model = build_combined_model(
+        wavelength, flux_quiet, params, times, P_rot, transit_params,
+        stellar_grid_size, ve, ldc_mode, ar_overlap_mode,
+        plot_map_wavelength, oversample,
+    )
+
     flux_active_arr = np.atleast_1d(np.asarray(flux_active, dtype=np.float32))
     result = evaluate_light_curve(
         model,

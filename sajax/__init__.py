@@ -21,6 +21,10 @@ rotate_active_region
     Apply stellar rotation and inclination to a Cartesian active region
     position.
 
+_compute_planet_mask
+    Compute the mask over stellar disc pixels: ``True`` where the pixel is occulted
+    by the planet at this epoch.
+
 LdcMode
     Type alias for supported limb-darkening laws.
 
@@ -30,7 +34,9 @@ ArOverlapMode
 
 from .core import (
     compute_light_curve,
+    compute_combined_light_curve,
     build_model,
+    build_combined_model,
     evaluate_light_curve,
     build_stellar_grid,
     LdcMode,
@@ -38,14 +44,19 @@ from .core import (
 )
 from .geometry import rotate_active_region
 
+from .planet import _compute_planet_mask
+
 from importlib.metadata import version
 __version__ = version("sajax")
 __all__ = [
     "build_stellar_grid",
     "build_model",
+    "build_combined_model",
     "evaluate_light_curve",
     "compute_light_curve",
+    "compute_combined_light_curve",
     "rotate_active_region",
+    "_compute_planet_mask",
     "LdcMode",
     "ArOverlapMode",
 ]
