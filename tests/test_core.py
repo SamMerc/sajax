@@ -777,8 +777,6 @@ def test_oversample_smooths_light_curve():
     Oversampled light curve should have smaller point-to-point
     differences (fewer sharp jumps) than the non-oversampled version.
     """
-    import numpy as np
-    from sajax import compute_light_curve
 
     wavelength = np.array([550.0])
     flux_quiet = np.array([1.0])
@@ -816,10 +814,8 @@ def test_oversample_smooths_light_curve():
     )
 
 
-def test_oversample_3_is_identity():
-    """oversample=3 should produce identical results to no argument."""
-    import numpy as np
-    from sajax import compute_light_curve
+def test_oversample_1_is_identity():
+    """oversample=1 should produce identical results to no argument."""
 
     wavelength = np.array([550.0])
     flux_quiet = np.array([1.0])
@@ -841,7 +837,7 @@ def test_oversample_3_is_identity():
     )
 
     lc_default = compute_light_curve(**common)["lc"]
-    lc_os3     = compute_light_curve(**common, oversample=3)["lc"]
+    lc_os3     = compute_light_curve(**common, oversample=1)["lc"]
 
     np.testing.assert_array_equal(lc_default, lc_os3)
 
@@ -1302,7 +1298,7 @@ class TestBuildCombinedModel:
             assert key in combined_model, f"Stellar key missing: '{key}'"
 
     def test_oversample_inflates_nphase(self):
-        """nphase_compute should equal nphase_original × oversample."""
+        """nphase_compute should equal nphase_original x oversample."""
         oversample = 3
         model = build_combined_model(
             wavelength=WAVELENGTH, flux_quiet=FLUX_QUIET, params=BASE_PARAMS,
@@ -1400,8 +1396,13 @@ class TestTransitPhysics:
             ar_lat=[0.0], ar_long=[180.0], ar_size=[10.0], flux_active=FLUX_SPOT,
         )["lc"]
 
+        oot = np.abs(TIMES) > 0.12
+        lc_spot_norm = lc_spot / np.median(lc_spot[oot])
+        lc_clean_norm = lc_clean / np.median(lc_clean[oot])
+
         in_transit = np.abs(TIMES) < 0.04
-        bump = float(np.max(lc_spot[in_transit])) - float(np.max(lc_clean[in_transit]))
+        # A spot crossing makes the transit shallower, meaning the minimum flux is HIGHER
+        bump = float(np.min(lc_spot_norm[in_transit])) - float(np.min(lc_clean_norm[in_transit]))
         assert bump > 0, (
             f"Cold-spot crossing should produce a positive bump; got Δ={bump:.6f}"
         )
@@ -1419,8 +1420,13 @@ class TestTransitPhysics:
             ar_lat=[0.0], ar_long=[180.0], ar_size=[10.0], flux_active=FLUX_FACULA,
         )["lc"]
 
+        oot = np.abs(TIMES) > 0.12
+        lc_fac_norm = lc_fac / np.median(lc_fac[oot])
+        lc_clean_norm = lc_clean / np.median(lc_clean[oot])
+
         in_transit = np.abs(TIMES) < 0.04
-        dip_delta = float(np.min(lc_fac[in_transit])) - float(np.min(lc_clean[in_transit]))
+        # A facula crossing makes the transit deeper, meaning the minimum flux is LOWER
+        dip_delta = float(np.min(lc_fac_norm[in_transit])) - float(np.min(lc_clean_norm[in_transit]))
         assert dip_delta < 0, (
             f"Facula crossing should deepen the transit dip; got Δ={dip_delta:.6f}"
         )

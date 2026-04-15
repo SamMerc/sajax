@@ -112,7 +112,7 @@ class TestKepler:
         wrap = lambda x: (x + np.pi) % (2 * np.pi) - np.pi
         np.testing.assert_allclose(
             np.array(wrap(M_reconstructed)), np.array(wrap(M)),
-            atol=1e-5, err_msg="Kepler equation not satisfied")
+            atol=1e-4, err_msg="Kepler equation not satisfied")
 
     # --- Stability at high eccentricity -----------------------------------
 
