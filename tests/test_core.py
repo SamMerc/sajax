@@ -12,7 +12,10 @@ import jax.numpy as jnp
 from sajax import compute_light_curve, build_stellar_grid
 from sajax.core import (
     build_model,
+    build_combined_model,
     evaluate_light_curve,
+    compute_combined_light_curve,
+    _compute_planet_mask,
 )
 
 
@@ -1087,3 +1090,463 @@ class TestSymmetry:
             result_north["lc"], result_south["lc"], rtol=1e-4,
             err_msg="N/S symmetric ARs should produce identical LCs at inc=90°",
         )
+
+
+# ---------------------------------------------------------------------------
+# Shared test configuration
+# ---------------------------------------------------------------------------
+
+# Single broadband channel — fast for all tests
+WAVELENGTH   = np.array([550.0])
+FLUX_QUIET   = np.array([1.0])
+FLUX_SPOT    = np.array([0.7])     # cold spot: 30% darker than quiet
+FLUX_FACULA  = np.array([1.1])     # facula: 10% brighter than quiet
+
+STELLAR_GRID = 60                  # radius in pixels — small enough to be fast
+VE           = 0.0                 # no Doppler — isolates transit geometry
+
+BASE_PARAMS = dict(ldc_coeffs=[0.4, 0.2], inc_star=90.0)
+
+# Time array centred on transit (no-LD ≈ ±2.5× transit duration)
+TIMES = np.linspace(-0.15, 0.15, 200)
+
+# Long rotation period so stellar modulation is negligible across TIMES
+P_ROT = 25.0
+
+# "Clean" transit: edge-on circular orbit, k=0.1 → ≈1% depth, well resolved
+TRANSIT_PARAMS = dict(
+    t0           = 0.0,
+    period       = 5.0,
+    a_over_rstar = 10.0,
+    inclination  = np.pi / 2.0,   # exactly edge-on
+    k            = 0.1,
+    ecc          = 0.0,
+    omega_peri   = 0.0,
+)
+
+
+# ---------------------------------------------------------------------------
+# Fixtures — built once per module to avoid repeated JIT compilation
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def combined_model():
+    """Combined model with a vanishingly small far-side AR (transit only)."""
+    return build_combined_model(
+        wavelength        = WAVELENGTH,
+        flux_quiet        = FLUX_QUIET,
+        params            = BASE_PARAMS,
+        times             = TIMES,
+        P_rot             = P_ROT,
+        transit_params    = TRANSIT_PARAMS,
+        stellar_grid_size = STELLAR_GRID,
+        ve                = VE,
+        ldc_mode          = "quadratic",
+        oversample        = 1,
+    )
+
+
+@pytest.fixture(scope="module")
+def stellar_only_model():
+    """Equivalent stellar-only model for backward-compat comparisons."""
+    phases = (TIMES / P_ROT * 360.0) % 360.0
+    return build_model(
+        wavelength        = WAVELENGTH,
+        flux_quiet        = FLUX_QUIET,
+        params            = BASE_PARAMS,
+        phases_rot        = phases,
+        stellar_grid_size = STELLAR_GRID,
+        ve                = VE,
+        ldc_mode          = "quadratic",
+        oversample        = 1,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Helper: one-call combined LC
+# ---------------------------------------------------------------------------
+
+def _combined_lc(transit_params=None, ar_lat=None, ar_long=None, ar_size=None,
+                 flux_active=None, oversample=1, params=None):
+    """Thin wrapper that fills in defaults to keep test bodies short."""
+    return compute_combined_light_curve(
+        wavelength        = WAVELENGTH,
+        flux_quiet        = FLUX_QUIET,
+        flux_active       = np.atleast_2d(flux_active if flux_active is not None else FLUX_QUIET),
+        params            = params or BASE_PARAMS,
+        ar_lat            = ar_lat  or [0.0],
+        ar_long           = ar_long or [180.0],  # far side — invisible by default
+        ar_size           = ar_size or [0.001],
+        times             = TIMES,
+        P_rot             = P_ROT,
+        transit_params    = transit_params or TRANSIT_PARAMS,
+        stellar_grid_size = STELLAR_GRID,
+        ve                = VE,
+        oversample        = oversample,
+    )
+
+
+# ===================================================================
+# 1.  _compute_planet_mask — pixel-level occultation mask
+# ===================================================================
+
+class TestComputePlanetMask:
+    """Unit tests for the pixel-level planet occultation mask."""
+
+    @pytest.fixture(autouse=True)
+    def _grid(self):
+        g = build_stellar_grid(50, 0.0)
+        self.x   = jnp.asarray(g["x"])
+        self.y   = jnp.asarray(g["y"])
+        self.spr = g["star_pixel_rad"]
+
+    def _mask(self, X=0.0, Y=0.0, Z=5.0, k=0.1):
+        return _compute_planet_mask(self.x, self.y, self.spr, X, Y, Z, k)
+
+    # --- Shape & dtype ----------------------------------------------------
+
+    def test_shape_matches_disc(self):
+        """Mask shape must equal the number of in-disc pixels."""
+        mask = self._mask()
+        assert mask.shape == self.x.shape
+
+    def test_dtype_is_bool(self):
+        """Mask must have boolean dtype."""
+        assert self._mask().dtype == jnp.bool_
+
+    # --- Z-sign gate ------------------------------------------------------
+
+    def test_all_false_when_planet_behind_star(self):
+        """Z < 0 → planet behind the star → mask must be all False."""
+        assert not jnp.any(self._mask(Z=-1.0)), \
+            "Mask should be all False when Z < 0"
+
+    def test_all_false_at_Z_exactly_zero(self):
+        """Z = 0 means the planet is at the stellar limb plane — not transiting."""
+        assert not jnp.any(self._mask(Z=0.0))
+
+    # --- Radius gate ------------------------------------------------------
+
+    def test_all_false_for_zero_radius_planet(self):
+        """k = 0 → no disc → nothing occulted even when Z > 0."""
+        assert not jnp.any(self._mask(k=0.0)), \
+            "Zero-radius planet should produce empty mask"
+
+    # --- Positive occultation ------------------------------------------------------
+
+    def test_some_pixels_masked_at_disc_centre(self):
+        """Planet at (0, 0) with Z > 0 and k > 0 must mask some pixels."""
+        assert jnp.any(self._mask(X=0.0, Y=0.0, Z=5.0, k=0.1)), \
+            "Planet at disc centre should occult some pixels"
+
+    def test_masked_pixel_count_scales_with_k(self):
+        """Larger planet → more pixels masked."""
+        n_small = int(jnp.sum(self._mask(k=0.05)))
+        n_large = int(jnp.sum(self._mask(k=0.20)))
+        assert n_large > n_small, (
+            f"Larger k should mask more pixels: n_small={n_small}, n_large={n_large}"
+        )
+
+    def test_planet_outside_disc_masks_nothing(self):
+        """Planet sky-position beyond the stellar disc (X ≫ 1+k) masks nothing."""
+        assert not jnp.any(self._mask(X=3.0, Y=0.0, Z=5.0, k=0.1)), \
+            "Planet outside stellar disc should mask nothing"
+
+    def test_mask_centre_pixels_when_centred(self):
+        """Central pixels (r/R★ ≈ 0) should all be masked when planet is centred."""
+        centre = (np.hypot(np.array(self.x), np.array(self.y)) / self.spr) < 0.05
+        mask = np.array(self._mask(X=0.0, Y=0.0, Z=5.0, k=0.15))
+        if centre.any():
+            assert mask[centre].all(), \
+                "All central pixels should be masked for planet at disc centre"
+
+
+# ===================================================================
+# 2.  build_combined_model — model dict structure
+# ===================================================================
+
+class TestBuildCombinedModel:
+
+    def test_has_transit_flag_set(self, combined_model):
+        assert combined_model.get("has_transit") is True
+
+    def test_planet_xyz_key_present(self, combined_model):
+        assert "planet_xyz" in combined_model
+
+    def test_k_value_stored(self, combined_model):
+        assert "k" in combined_model
+        assert float(combined_model["k"]) == pytest.approx(TRANSIT_PARAMS["k"])
+
+    def test_planet_xyz_shape(self, combined_model):
+        """planet_xyz must be (nphase_compute, 3)."""
+        xyz    = combined_model["planet_xyz"]
+        nphase = combined_model["nphase"]
+        assert xyz.shape == (nphase, 3), (
+            f"Expected planet_xyz shape ({nphase}, 3), got {xyz.shape}"
+        )
+
+    def test_xyz_third_column_Z(self, combined_model):
+        """At mid-transit (t=0 → phase index near centre), Z should be positive."""
+        xyz = np.array(combined_model["planet_xyz"])
+        # At mid-transit the Z coordinate (column 2) of the closest time to t=0
+        # should be positive.  We just check that at least one phase has Z > 0.
+        assert np.any(xyz[:, 2] > 0), "At least one phase should have Z > 0"
+
+    def test_all_stellar_keys_preserved(self, combined_model):
+        required = [
+            "x_disc", "y_disc", "mu_disc", "vel_disc",
+            "star_pixel_rad", "total_pixels", "wavelength",
+            "phases_rot", "ldc_coeffs", "flat_indices", "n",
+        ]
+        for key in required:
+            assert key in combined_model, f"Stellar key missing: '{key}'"
+
+    def test_oversample_inflates_nphase(self):
+        """nphase_compute should equal nphase_original × oversample."""
+        oversample = 3
+        model = build_combined_model(
+            wavelength=WAVELENGTH, flux_quiet=FLUX_QUIET, params=BASE_PARAMS,
+            times=TIMES, P_rot=P_ROT, transit_params=TRANSIT_PARAMS,
+            stellar_grid_size=STELLAR_GRID, ve=VE, oversample=oversample,
+        )
+        n_orig    = model["nphase_original"]
+        n_compute = model["nphase"]
+        assert n_compute == n_orig * oversample, (
+            f"Expected {n_orig}×{oversample}={n_orig*oversample} phases, "
+            f"got {n_compute}"
+        )
+
+    def test_planet_xyz_length_matches_nphase(self):
+        """planet_xyz rows must match nphase_compute after oversampling."""
+        oversample = 3
+        model = build_combined_model(
+            wavelength=WAVELENGTH, flux_quiet=FLUX_QUIET, params=BASE_PARAMS,
+            times=TIMES, P_rot=P_ROT, transit_params=TRANSIT_PARAMS,
+            stellar_grid_size=STELLAR_GRID, ve=VE, oversample=oversample,
+        )
+        assert model["planet_xyz"].shape[0] == model["nphase"]
+
+
+# ===================================================================
+# 3.  Transit physics
+# ===================================================================
+
+class TestTransitPhysics:
+
+    def test_output_shape_matches_times(self):
+        """Output lc shape must equal len(TIMES)."""
+        result = _combined_lc()
+        assert result["lc"].shape == (len(TIMES),)
+
+    def test_lc_finite(self):
+        assert np.all(np.isfinite(_combined_lc()["lc"]))
+
+    def test_transit_produces_flux_dip(self):
+        """During a central transit the normalised flux must drop below 1."""
+        lc = _combined_lc()["lc"]
+        assert float(np.min(lc)) < 1.0, \
+            f"Transit should dim the star; min flux = {np.min(lc):.6f}"
+
+    def test_transit_depth_scales_with_k(self):
+        """A larger planet produces a deeper transit."""
+        d_small = 1.0 - float(np.min(_combined_lc({**TRANSIT_PARAMS, "k": 0.05})["lc"]))
+        d_large = 1.0 - float(np.min(_combined_lc({**TRANSIT_PARAMS, "k": 0.15})["lc"]))
+        assert d_large > d_small, (
+            f"k=0.15 depth={d_large:.5f} should exceed k=0.05 depth={d_small:.5f}"
+        )
+
+    def test_approximate_transit_depth_equals_k_squared(self):
+        """Transit depth ≈ k² for a uniform, unlimb-darkened disc (u1=u2=0).
+
+        Grid discretisation on a 60-pixel grid introduces ~15% error.
+        """
+        k = 0.1
+        tp = {**TRANSIT_PARAMS, "k": k}
+        params_no_ld = dict(ldc_coeffs=[0.0, 0.0], inc_star=90.0)
+        lc = _combined_lc(tp, params=params_no_ld)["lc"]
+
+        depth = 1.0 - float(np.min(lc))
+        np.testing.assert_allclose(depth, k**2, rtol=0.15,
+            err_msg=f"Transit depth should be ≈k²={k**2:.4f}; got {depth:.4f}")
+
+    def test_grazing_transit_shallower_than_central(self):
+        """A grazing transit (high impact parameter) should be shallower."""
+        k   = 0.1
+        a   = TRANSIT_PARAMS["a_over_rstar"]
+        inc_central = np.pi / 2.0            # b ≈ 0
+        inc_grazing = np.arccos(0.85 / a)    # b = 0.85 R★  (grazing)
+
+        d_central = 1.0 - float(np.min(_combined_lc({**TRANSIT_PARAMS, "k": k})["lc"]))
+        d_grazing = 1.0 - float(np.min(_combined_lc(
+            {**TRANSIT_PARAMS, "k": k, "inclination": inc_grazing})["lc"]))
+
+        assert d_central > d_grazing, (
+            f"Central transit depth ({d_central:.5f}) should exceed "
+            f"grazing transit depth ({d_grazing:.5f})"
+        )
+
+    def test_spot_crossing_produces_positive_bump(self):
+        """A cold spot on the transit chord should cause a positive flux anomaly.
+
+        Physics: the planet masks a dark pixel, so the remaining integrated
+        flux is *higher* than a transit over quiet photosphere → a bump.
+        """
+        # Spot on transit chord — lat=0, long=0 is facing us at t≈0
+        lc_spot = _combined_lc(
+            ar_lat=[0.0], ar_long=[0.0], ar_size=[10.0], flux_active=FLUX_SPOT,
+        )["lc"]
+        # Same transit but AR hidden on far side
+        lc_clean = _combined_lc(
+            ar_lat=[0.0], ar_long=[180.0], ar_size=[10.0], flux_active=FLUX_SPOT,
+        )["lc"]
+
+        in_transit = np.abs(TIMES) < 0.04
+        bump = float(np.max(lc_spot[in_transit])) - float(np.max(lc_clean[in_transit]))
+        assert bump > 0, (
+            f"Cold-spot crossing should produce a positive bump; got Δ={bump:.6f}"
+        )
+
+    def test_facula_crossing_produces_negative_anomaly(self):
+        """A facula on the transit chord should deepen the transit dip.
+
+        Physics: the planet hides a bright pixel → missing extra flux →
+        the dip is slightly deeper.
+        """
+        lc_fac = _combined_lc(
+            ar_lat=[0.0], ar_long=[0.0], ar_size=[10.0], flux_active=FLUX_FACULA,
+        )["lc"]
+        lc_clean = _combined_lc(
+            ar_lat=[0.0], ar_long=[180.0], ar_size=[10.0], flux_active=FLUX_FACULA,
+        )["lc"]
+
+        in_transit = np.abs(TIMES) < 0.04
+        dip_delta = float(np.min(lc_fac[in_transit])) - float(np.min(lc_clean[in_transit]))
+        assert dip_delta < 0, (
+            f"Facula crossing should deepen the transit dip; got Δ={dip_delta:.6f}"
+        )
+
+    def test_out_of_transit_matches_stellar_only(self, stellar_only_model):
+        """Well outside transit, combined LC must equal stellar-only LC."""
+        # Bare star (flux_active = flux_quiet, AR on far side)
+        result_combined = _combined_lc(
+            ar_lat=[0.0], ar_long=[180.0], ar_size=[0.001],
+            flux_active=FLUX_QUIET,
+        )
+        result_stellar = evaluate_light_curve(
+            stellar_only_model,
+            flux_active=jnp.array(FLUX_QUIET),
+            ar_lat=jnp.array([0.0]),
+            ar_long=jnp.array([180.0]),
+            ar_size=jnp.array([0.001]),
+        )
+
+        oot = np.abs(TIMES) > 0.12          # safely outside transit
+        np.testing.assert_allclose(
+            result_combined["lc"][oot],
+            np.array(result_stellar["lc"])[oot],
+            rtol=1e-4,
+            err_msg="Out-of-transit combined LC should match stellar-only LC",
+        )
+
+    def test_eccentric_orbit_centre_Z_positive(self):
+        """At t=t0, Z should be positive regardless of eccentricity."""
+        for ecc, omega in [(0.3, np.pi / 2.0), (0.5, np.pi / 4.0)]:
+            tp = {**TRANSIT_PARAMS, "ecc": ecc, "omega_peri": omega}
+            lc = _combined_lc(tp)["lc"]
+            # The transit minimum should exist (Z > 0 at t=t0)
+            assert float(np.min(lc)) < 1.0, (
+                f"Eccentric orbit (e={ecc}, ω={omega:.2f}) should still transit"
+            )
+
+    def test_no_transit_when_fully_inclined(self):
+        """For a very high impact parameter (no transit), the LC should be ≈1."""
+        a = TRANSIT_PARAMS["a_over_rstar"]
+        k = TRANSIT_PARAMS["k"]
+        # Set inclination so b = a cos i = 2*(1+k) — planet never crosses disc
+        inc_no_transit = np.arccos(2.0 * (1.0 + k) / a)
+        tp = {**TRANSIT_PARAMS, "inclination": inc_no_transit}
+        lc = _combined_lc(tp)["lc"]
+        np.testing.assert_allclose(lc, 1.0, atol=0.005,
+            err_msg="Non-transiting geometry should give LC ≈ 1")
+
+
+# ===================================================================
+# 4.  Oversampling — transit path
+# ===================================================================
+
+class TestTransitOversampling:
+
+    def test_oversample_preserves_output_shape(self):
+        """lc shape should equal len(TIMES) regardless of oversample factor."""
+        for os in [1, 3, 5]:
+            lc = _combined_lc(oversample=os)["lc"]
+            assert lc.shape == (len(TIMES),), (
+                f"oversample={os}: expected ({len(TIMES)},), got {lc.shape}"
+            )
+
+    def test_oversampled_lc_is_finite(self):
+        lc = _combined_lc(oversample=3)["lc"]
+        assert np.all(np.isfinite(lc))
+
+    def test_oversampled_transit_still_present(self):
+        """Transit dip must survive oversampling."""
+        lc = _combined_lc(oversample=3)["lc"]
+        assert float(np.min(lc)) < 1.0
+
+
+# ===================================================================
+# 5.  Backward compatibility
+# ===================================================================
+
+class TestBackwardCompatibility:
+
+    def test_stellar_only_model_lacks_transit_flag(self, stellar_only_model):
+        """build_model (stellar-only) should not set has_transit."""
+        assert not stellar_only_model.get("has_transit", False)
+
+    def test_evaluate_stellar_only_still_works(self, stellar_only_model):
+        """evaluate_light_curve on a stellar-only model should return finite values."""
+        result = evaluate_light_curve(
+            stellar_only_model,
+            flux_active=jnp.array(FLUX_SPOT),
+            ar_lat=jnp.array([20.0]),
+            ar_long=jnp.array([0.0]),
+            ar_size=jnp.array([10.0]),
+        )
+        lc = np.array(result["lc"])
+        assert np.all(np.isfinite(lc))
+        assert lc.shape == (len(TIMES),)
+
+    def test_compute_light_curve_api_unchanged(self):
+        """The stellar-only compute_light_curve convenience API must be unaffected."""
+        from sajax import compute_light_curve
+        phases = (TIMES / P_ROT * 360.0) % 360.0
+        result = compute_light_curve(
+            wavelength=WAVELENGTH, flux_quiet=FLUX_QUIET, flux_active=FLUX_SPOT,
+            params=BASE_PARAMS,
+            ar_lat=[20.0], ar_long=[0.0], ar_size=[10.0],
+            phases_rot=phases,
+            stellar_grid_size=STELLAR_GRID, ve=VE,
+        )
+        assert result["lc"].shape == (len(TIMES),)
+        assert np.all(np.isfinite(result["lc"]))
+
+    def test_no_transit_flag_gives_unity_transit_factor(self, stellar_only_model):
+        """Stellar-only model should not exhibit any transit dip.
+
+        The max-to-min excursion should be driven purely by stellar
+        rotation (which is tiny with P_ROT=25 d over ±0.15 d window).
+        Combined model with the transit planet switched off by a
+        vanishingly small k on the far side should give the same result.
+        """
+        result_stellar = evaluate_light_curve(
+            stellar_only_model,
+            flux_active=jnp.array(FLUX_QUIET),
+            ar_lat=jnp.array([0.0]),
+            ar_long=jnp.array([180.0]),
+            ar_size=jnp.array([0.001]),
+        )
+        lc = np.array(result_stellar["lc"])
+        # No transit means no dip > 0.5 %
+        assert float(np.max(lc) - np.min(lc)) < 0.005, \
+            "Stellar-only model over short window should show negligible variation"

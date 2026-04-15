@@ -605,7 +605,7 @@ def build_model(
     ldc_mode: LdcMode = "quadratic",
     ar_overlap_mode: ArOverlapMode = "hottest_wins",
     plot_map_wavelength: Optional[float] = None,
-    oversample: int = 3,
+    oversample: int = 1,
 ) -> dict:
     """
     Pre-build all static model arrays.  Call this **once** before MCMC.
@@ -977,7 +977,7 @@ def compute_light_curve(
     ldc_mode: LdcMode = "quadratic",
     ar_overlap_mode: ArOverlapMode = "hottest_wins",
     plot_map_wavelength: Optional[float] = None,
-    oversample: int = 3,
+    oversample: int = 1,
 ) -> dict:
     """
     Convenience wrapper: build model and evaluate in one call.
@@ -1046,7 +1046,7 @@ def build_combined_model(
     ldc_mode:           LdcMode            = "quadratic",
     ar_overlap_mode:    ArOverlapMode      = "hottest_wins",
     plot_map_wavelength: Optional[float]   = None,
-    oversample:         int                = 3,
+    oversample:         int                = 1,
 ) -> dict:
     """
     Build a combined stellar-activity + planetary-transit sajax model.
@@ -1160,7 +1160,7 @@ def compute_combined_light_curve(
     ldc_mode:           LdcMode            = "quadratic",
     ar_overlap_mode:    ArOverlapMode      = "hottest_wins",
     plot_map_wavelength: Optional[float]   = None,
-    oversample:         int                = 3,
+    oversample:         int                = 1,
 ) -> dict:
     """
     Convenience wrapper: build a combined stellar + transit model and
