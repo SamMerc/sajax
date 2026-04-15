@@ -40,11 +40,15 @@ sajax/
 ├── sajax/
 │   ├── __init__.py          # public API
 │   ├── core.py              # JAX light-curve engine
+│   ├── planet.py            # planet orbital dynamics
 │   ├── geometry.py          # rotation matrices, coordinate transforms
-├── examples/
-│   └── sajax_quickstart.ipynb
+├── docs/
+│   ├── quickstart.ipynb
+│   ├── comparison.ipynb
+│   ├── inference.ipynb
 ├── tests/
-│   └── test_core.py
+│   ├── test_core.py
+│   ├── test_planet.py
 ├── pyproject.toml
 ├── .gitignore
 └── README.md
