@@ -1206,9 +1206,9 @@ class TestComputePlanetMask:
         mask = self._mask()
         assert mask.shape == self.x.shape
 
-    def test_dtype_is_bool(self):
-        """Mask must have boolean dtype."""
-        assert self._mask().dtype == jnp.bool_
+    def test_dtype_is_float(self):
+        """Mask must be float (soft sigmoid output, not hard boolean)."""
+        assert self._mask().dtype == jnp.float32
 
     # --- Z-sign gate ------------------------------------------------------
 
@@ -1556,3 +1556,96 @@ class TestBackwardCompatibility:
         # No transit means no dip > 0.5 %
         assert float(np.max(lc) - np.min(lc)) < 0.005, \
             "Stellar-only model over short window should show negligible variation"
+
+
+# ===================================================================
+# Autodiff propagation
+# ===================================================================
+
+class TestAutodiff:
+    """
+    Verify that jax.grad produces non-zero gradients through the full pipeline.
+
+    All physically meaningful parameters — AR size, lat, long, and spectral
+    contrast — should return finite, non-zero gradients.  These tests FAIL
+    if the implementation uses hard boolean masks (grad of a boolean comparison
+    is zero in JAX).
+    """
+
+    @pytest.fixture(scope="class")
+    def grad_model(self):
+        """Single-phase, single-wavelength model for fast gradient checks."""
+        return build_model(
+            wavelength=np.array([550.0]),
+            flux_quiet=np.array([1.0]),
+            params=dict(ldc_coeffs=[0.4, 0.2], inc_star=90.0),
+            phases_rot=np.array([0.0]),
+            stellar_grid_size=50,
+            ve=0.0,
+        )
+
+    @staticmethod
+    def _lc_scalar(model, flux_active, ar_lat, ar_long, ar_size):
+        """Sum the LC output to produce a differentiable scalar."""
+        return jnp.sum(evaluate_light_curve(
+            model,
+            flux_active=flux_active,
+            ar_lat=ar_lat,
+            ar_long=ar_long,
+            ar_size=ar_size,
+        )["lc"])
+
+    def test_grad_wrt_flux_active(self, grad_model):
+        """Gradient of LC w.r.t. flux_active must be non-zero when AR is on disc."""
+        import jax
+        fa = jnp.array([0.7])
+        grad = jax.grad(
+            lambda fa: self._lc_scalar(
+                grad_model, fa,
+                jnp.array([0.0]), jnp.array([0.0]), jnp.array([20.0]),
+            )
+        )(fa)
+        assert jnp.all(jnp.isfinite(grad)), "gradient w.r.t. flux_active is non-finite"
+        assert jnp.any(jnp.abs(grad) > 0), "gradient w.r.t. flux_active is zero"
+
+    def test_grad_wrt_ar_size(self, grad_model):
+        """Gradient of LC w.r.t. ar_size must be non-zero.
+        FAILS with hard boolean mask: grad(d_sigma < arsize_rad) = 0."""
+        import jax
+        fa = jnp.array([0.7])
+        grad = jax.grad(
+            lambda sz: self._lc_scalar(
+                grad_model, fa,
+                jnp.array([0.0]), jnp.array([0.0]), sz,
+            )
+        )(jnp.array([20.0]))
+        assert jnp.all(jnp.isfinite(grad)), "gradient w.r.t. ar_size is non-finite"
+        assert jnp.any(jnp.abs(grad) > 0), "gradient w.r.t. ar_size is zero"
+
+    def test_grad_wrt_ar_lat(self, grad_model):
+        """Gradient of LC w.r.t. ar_lat must be non-zero (AR off equator avoids symmetry).
+        FAILS with hard boolean mask."""
+        import jax
+        fa = jnp.array([0.7])
+        grad = jax.grad(
+            lambda lat: self._lc_scalar(
+                grad_model, fa,
+                lat, jnp.array([0.0]), jnp.array([20.0]),
+            )
+        )(jnp.array([30.0]))
+        assert jnp.all(jnp.isfinite(grad)), "gradient w.r.t. ar_lat is non-finite"
+        assert jnp.any(jnp.abs(grad) > 0), "gradient w.r.t. ar_lat is zero"
+
+    def test_grad_wrt_ar_long(self, grad_model):
+        """Gradient of LC w.r.t. ar_long must be non-zero (AR off central meridian).
+        FAILS with hard boolean mask."""
+        import jax
+        fa = jnp.array([0.7])
+        grad = jax.grad(
+            lambda lng: self._lc_scalar(
+                grad_model, fa,
+                jnp.array([0.0]), lng, jnp.array([20.0]),
+            )
+        )(jnp.array([45.0]))
+        assert jnp.all(jnp.isfinite(grad)), "gradient w.r.t. ar_long is non-finite"
+        assert jnp.any(jnp.abs(grad) > 0), "gradient w.r.t. ar_long is zero"

@@ -58,7 +58,7 @@ from __future__ import annotations
 
 import numpy as np
 import jax.numpy as jnp
-from jax import vmap
+from jax import vmap, nn as jax_nn
 
 
 # ---------------------------------------------------------------------------
@@ -278,8 +278,18 @@ def _compute_planet_mask(
     # Squared sky-plane distance from planet centre to each pixel
     d2 = (xn - X) ** 2 + (yn - Y) ** 2
 
-    # Occulted: inside planet disc AND planet is in front of the star
-    return (d2 < k ** 2) & (Z > 0.0)
+    if k == 0.0:
+        return jnp.zeros(x_disc.shape, dtype=jnp.float32)
+
+    # Soft disc mask: sigmoid boundary so gradients flow w.r.t. k and planet position.
+    # Transition width ~10% of planet radius, floored at 1/10 pixel.
+    d = jnp.sqrt(d2 + 1e-8)
+    softness = max(0.1 * k, 1.0 / (10.0 * star_pixel_rad))
+    disc_mask = jax_nn.sigmoid((k - d) / softness)
+
+    # Hard Z gate: planet in front of the star is topologically binary.
+    z_gate = jnp.where(Z > 0.0, 1.0, 0.0)
+    return disc_mask * z_gate
 
 
 # ---------------------------------------------------------------------------
