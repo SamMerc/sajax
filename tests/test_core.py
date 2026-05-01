@@ -7,6 +7,7 @@ Run with:
 
 import numpy as np
 import pytest
+import jax
 import jax.numpy as jnp
 
 from sajax import compute_light_curve, build_stellar_grid
@@ -16,6 +17,8 @@ from sajax.core import (
     evaluate_light_curve,
     compute_combined_light_curve,
     _compute_planet_mask,
+    _compute_ar_mask,
+    _compute_single_phase,
 )
 
 
@@ -1649,3 +1652,197 @@ class TestAutodiff:
         )(jnp.array([45.0]))
         assert jnp.all(jnp.isfinite(grad)), "gradient w.r.t. ar_long is non-finite"
         assert jnp.any(jnp.abs(grad) > 0), "gradient w.r.t. ar_long is zero"
+
+
+# ===================================================================
+# Gradient sign and FD-agreement tests for _compute_ar_mask
+# ===================================================================
+
+class TestARMaskGradients:
+    """
+    Verify that _compute_ar_mask gradients have the physically correct sign
+    and agree with central finite differences when the step size is properly
+    calibrated to the sigmoid transition width.
+
+    Background — why h=0.1 gives wrong sign/value in external test suites
+    -----------------------------------------------------------------------
+    The AR-mask sigmoid transition width is
+
+        softness = 0.1 * sin(arsize_rad) / star_pixel_rad
+
+    in cosine-distance units.  In arc-angle units this is roughly
+    0.1 / (spr * sin(arsize)) ≈ 0.001–0.003 rad ≈ 0.06–0.17° for typical
+    parameters.  A finite-difference step of h=0.1 in unconstrained parameter
+    space maps to ~4–10° of arc — 30–100× the transition width.  At that
+    scale the sigmoid is piecewise-constant, the chord approximation crosses
+    multiple transition regions, and the resulting FD estimate bears no
+    relation to the local derivative.  The JAX autodiff (infinitesimal limit)
+    is correct; the FD estimate is not.
+
+    The tests below use h = 0.01 * softness, which stays firmly inside the
+    linear regime of the sigmoid.
+    """
+
+    _spr       = 50.0
+    _arsize_deg = 20.0
+
+    @property
+    def _arsize_rad(self):
+        return float(jnp.deg2rad(self._arsize_deg))
+
+    @property
+    def _softness(self):
+        return 0.1 * float(jnp.sin(jnp.float32(self._arsize_rad))) / self._spr
+
+    def _boundary_pixel(self):
+        """Pixel at the AR boundary along the x-axis; AR centre at front face."""
+        s = float(jnp.sin(jnp.float32(self._arsize_rad)))
+        return self._spr * s, 0.0
+
+    def _mask_sum(self, arsize, spx=0.0, spy=0.0, spz=None, px=None, py=None):
+        spz = spz if spz is not None else self._spr
+        if px is None:
+            px, py = self._boundary_pixel()
+        return jnp.sum(_compute_ar_mask(
+            jnp.array([px], dtype=jnp.float32),
+            jnp.array([py], dtype=jnp.float32),
+            self._spr, spx, spy, spz, arsize,
+        ))
+
+    def test_arsize_gradient_positive_at_boundary(self):
+        """Enlarging the AR must increase the mask of its boundary pixel."""
+        arsize = jnp.float32(self._arsize_rad)
+        grad = float(jax.grad(self._mask_sum)(arsize))
+        assert grad > 0, (
+            f"d(mask)/d(arsize) = {grad:.4g}; "
+            "expected > 0 (enlarging AR covers boundary pixel)"
+        )
+
+    def test_arsize_gradient_fd_agreement_with_small_h(self):
+        """
+        JAX autodiff agrees with FD at h = 1 % of the sigmoid transition width.
+
+        This test documents the correct step size required for FD to be valid.
+        The transition width is ~0.003 rad for arsize=20°, spr=50; h is set
+        to 0.01 × that value.
+        """
+        arsize = jnp.float32(self._arsize_rad)
+        h = jnp.float32(0.01 * self._softness)
+
+        grad_jax = float(jax.grad(self._mask_sum)(arsize))
+        fd = float((self._mask_sum(arsize + h) - self._mask_sum(arsize - h)) / (2.0 * h))
+
+        assert abs(fd) > 0.1 * abs(grad_jax), (
+            f"FD is numerically degenerate (fd={fd:.3g}, jax={grad_jax:.3g}). "
+            f"h={float(h):.2e} may be too small for float32; increase spr or arsize."
+        )
+        ratio = grad_jax / fd
+        assert 0.5 <= ratio <= 2.0, (
+            f"JAX ({grad_jax:.4g}) disagrees with FD ({fd:.4g}), ratio={ratio:.3f}. "
+            f"Transition width ≈ {self._softness:.4g} rad, h = {float(h):.4g} rad."
+        )
+
+    def test_arsize_large_h_gives_wrong_result(self):
+        """
+        Documents that h=0.1 rad — ~30× the transition width — yields a FD
+        estimate that disagrees with JAX by more than an order of magnitude,
+        explaining failures seen in external test suites that use h=0.1.
+        """
+        arsize = jnp.float32(self._arsize_rad)
+        h_large = jnp.float32(0.1)
+
+        assert float(h_large) > 5.0 * self._softness, (
+            "Precondition: h_large must exceed 5× the transition width."
+        )
+
+        grad_jax = float(jax.grad(self._mask_sum)(arsize))
+        fd_large = float((self._mask_sum(arsize + h_large) - self._mask_sum(arsize - h_large))
+                         / (2.0 * h_large))
+
+        if abs(fd_large) < 1e-30:
+            return  # FD is zero; trivially wrong
+
+        ratio = abs(grad_jax / fd_large)
+        sign_flip = float(np.sign(grad_jax)) != float(np.sign(fd_large))
+        assert ratio < 0.1 or ratio > 10.0 or sign_flip, (
+            f"h=0.1 FD unexpectedly agrees with JAX (ratio={ratio:.3f}). "
+            "Either the transition is wider than expected or the test setup changed."
+        )
+
+    def test_spz_gradient_positive_at_boundary_pixel(self):
+        """
+        Place the AR centre on the z-axis at spz = cos(arsize) * spr so that
+        the disc-centre pixel (px=0, py=0) sits exactly on the AR boundary.
+        Increasing spz moves the AR toward the observer, raising cos_d_sigma
+        at the disc-centre pixel → mask increases → d(mask)/d(spz) > 0.
+        """
+        cos_a = float(jnp.cos(jnp.float32(self._arsize_rad)))
+        spz0  = jnp.float32(cos_a * self._spr)
+        spx, spy, px, py = 0.0, 0.0, 0.0, 0.0
+
+        grad = float(jax.grad(lambda sz: self._mask_sum(
+            jnp.float32(self._arsize_rad),
+            spx=spx, spy=spy, spz=sz, px=px, py=py,
+        ))(spz0))
+
+        assert grad > 0, (
+            f"d(mask)/d(spz) = {grad:.4g}; expected > 0 "
+            "(moving AR toward observer increases disc-centre pixel visibility)"
+        )
+
+    def test_dark_spot_flux_decreases_as_spot_grows(self, flat_spectra, base_params):
+        """
+        For a dark spot (flux_active < 1.0) centred on the disc, enlarging the
+        spot must reduce the total normalised broadband flux.
+        d(flux_norm)/d(arsize_rad) < 0.
+        """
+        wl, flux_quiet, flux_active = flat_spectra
+        assert float(flux_active[0]) < float(flux_quiet[0]), (
+            "Test precondition: flux_active must be < flux_quiet (dark spot)"
+        )
+
+        model = build_model(
+            wavelength=wl,
+            flux_quiet=flux_quiet,
+            params=base_params,
+            phases_rot=np.array([0.0]),
+            stellar_grid_size=int(self._spr),
+            ve=0.0,
+            ldc_mode="quadratic",
+        )
+        spr = float(model["star_pixel_rad"])
+        ar_cart     = jnp.array([[0.0, 0.0, spr]], dtype=jnp.float32)
+        planet_xyz  = jnp.array([0.0, 0.0, -1e10], dtype=jnp.float32)
+        flux_act    = jnp.array(flux_active[np.newaxis, :], dtype=jnp.float32)  # (1, nwave)
+
+        def flux_fn(arsize):
+            fval, _, _ = _compute_single_phase(
+                ar_cart, planet_xyz,
+                wavelength          = model["wavelength"],
+                flux_quiet_interp   = model["flux_quiet"],
+                flux_active_interp  = flux_act,
+                ldc_coeffs          = model["ldc_coeffs"],
+                I_profile           = model["I_profile"],
+                mu_profile_pts      = model["mu_profile_pts"],
+                x_disc              = model["x_disc"],
+                y_disc              = model["y_disc"],
+                mu_disc             = model["mu_disc"],
+                vel_disc            = model["vel_disc"],
+                star_pixel_rad      = spr,
+                total_pixels        = model["total_pixels"],
+                arsize_rads         = jnp.array([arsize]),
+                k                   = jnp.float32(0.0),
+                ldc_mode            = model["ldc_mode"],
+                ar_overlap_mode     = model["ar_overlap_mode"],
+                plot_map_wavelength = model["plot_map_wavelength"],
+                n                   = model["n"],
+                flat_indices        = model["flat_indices"],
+            )
+            return fval
+
+        arsize_val = jnp.float32(jnp.deg2rad(15.0))
+        grad = float(jax.grad(flux_fn)(arsize_val))
+        assert grad < 0, (
+            f"d(flux_norm)/d(arsize) = {grad:.4g}; expected < 0 for dark spot "
+            f"(flux_active={float(flux_active[0]):.2f} < flux_quiet={float(flux_quiet[0]):.2f})"
+        )

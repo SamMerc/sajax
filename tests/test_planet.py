@@ -14,6 +14,7 @@ from sajax.planet import (
     build_transit_model,
     stellar_density_to_a_over_rstar,
     a_over_rstar_to_stellar_density,
+    _compute_planet_mask,
 )
 
 
@@ -455,3 +456,191 @@ class TestDensityConversions:
         """a/R★ must always be positive for positive ρ and P."""
         a = stellar_density_to_a_over_rstar(rho, P)
         assert a > 0, f"a/R★ should be positive (rho={rho}, P={P})"
+
+
+# ===================================================================
+# Gradient sign and FD-agreement tests for planet_sky_position
+# and _compute_planet_mask
+# ===================================================================
+
+class TestPlanetGradients:
+    """
+    Two complementary gradient verification strategies:
+
+    1. Analytical comparison (planet_sky_position):
+       For a circular edge-on orbit at mid-transit the sky coordinates are
+       exact trig functions of inclination:
+           Y = a·cos(i)   →   dY/di = −a·sin(i)
+           Z = a·sin(i)   →   dZ/di =  a·cos(i)
+       JAX autodiff is checked against these closed-form expressions.
+
+    2. Physical sign + calibrated FD (_compute_planet_mask):
+       The transit-edge sigmoid has transition width
+           softness_transit = 1 / (10 · star_pixel_rad)  [R★ units]
+       For spr=50 this is 0.002 R★.  A finite-difference step of h=0.1 in
+       planet position (or inclination converted to planet shift) is ~50×
+       this width, making FD completely unreliable.  The FD tests here use
+       h = 1 % of the transition width where the chord approximation is valid.
+    """
+
+    _spr = 50.0
+
+    @property
+    def _softness_transit(self):
+        return 1.0 / (10.0 * self._spr)
+
+    # ---- Analytical gradient tests for planet_sky_position ----------------
+
+    def test_dY_di_matches_analytical_at_mid_transit(self):
+        """
+        At mid-transit with circular orbit:  Y = a·cos(i)  →  dY/di = −a·sin(i).
+        """
+        a   = jnp.float32(15.0)
+        inc = jnp.float32(np.deg2rad(87.0))
+
+        dY_jax = float(jax.grad(
+            lambda i: planet_sky_position(
+                jnp.float32(0.0), 0.0, 10.0, a,
+                i, jnp.float32(0.0), jnp.float32(0.0),
+            )[1]
+        )(inc))
+
+        dY_analytical = -float(a) * float(jnp.sin(inc))
+        np.testing.assert_allclose(
+            dY_jax, dY_analytical, rtol=5e-3,
+            err_msg=f"dY/di: JAX={dY_jax:.5g}, analytical={dY_analytical:.5g}",
+        )
+
+    def test_dZ_di_matches_analytical_at_mid_transit(self):
+        """
+        At mid-transit with circular orbit:  Z = a·sin(i)  →  dZ/di = a·cos(i).
+        """
+        a   = jnp.float32(15.0)
+        inc = jnp.float32(np.deg2rad(87.0))
+
+        dZ_jax = float(jax.grad(
+            lambda i: planet_sky_position(
+                jnp.float32(0.0), 0.0, 10.0, a,
+                i, jnp.float32(0.0), jnp.float32(0.0),
+            )[2]
+        )(inc))
+
+        dZ_analytical = float(a) * float(jnp.cos(inc))
+        np.testing.assert_allclose(
+            dZ_jax, dZ_analytical, rtol=5e-3,
+            err_msg=f"dZ/di: JAX={dZ_jax:.5g}, analytical={dZ_analytical:.5g}",
+        )
+
+    def test_dY_da_matches_analytical_at_mid_transit(self):
+        """
+        At mid-transit with circular orbit:  Y = a·cos(i)  →  dY/da = cos(i).
+        Tests differentiability through the orbital radius calculation.
+        """
+        a   = jnp.float32(15.0)
+        inc = jnp.float32(np.deg2rad(87.0))
+
+        dY_jax = float(jax.grad(
+            lambda a_val: planet_sky_position(
+                jnp.float32(0.0), 0.0, 10.0, a_val,
+                inc, jnp.float32(0.0), jnp.float32(0.0),
+            )[1]
+        )(a))
+
+        dY_analytical = float(jnp.cos(inc))
+        np.testing.assert_allclose(
+            dY_jax, dY_analytical, rtol=5e-3,
+            err_msg=f"dY/da: JAX={dY_jax:.5g}, analytical={dY_analytical:.5g}",
+        )
+
+    # ---- Planet mask gradient sign test -----------------------------------
+
+    def test_planet_mask_grad_k_positive_at_boundary(self):
+        """
+        A pixel at the transit edge (distance from planet = k) should have a
+        positive gradient w.r.t. k: enlarging the planet captures that pixel.
+        d(mask_sum)/dk > 0.
+        """
+        k_val = jnp.float32(0.1)
+        # Pixel at the boundary: xn = k (in R★), so pixel coordinate = k * spr
+        px = jnp.array([float(k_val) * self._spr], dtype=jnp.float32)
+        py = jnp.array([0.0], dtype=jnp.float32)
+
+        def f(k):
+            return jnp.sum(_compute_planet_mask(
+                px, py, self._spr,
+                jnp.float32(0.0), jnp.float32(0.0), jnp.float32(1.0), k,
+            ))
+
+        grad = float(jax.grad(f)(k_val))
+        assert grad > 0, (
+            f"d(mask)/dk = {grad:.4g} at transit boundary; "
+            "expected > 0 (larger planet covers boundary pixel)"
+        )
+
+    def test_planet_mask_grad_k_fd_agreement_with_small_h(self):
+        """
+        JAX autodiff agrees with central FD at h = 1 % of the transit-edge
+        transition width (softness_transit = 1 / (10 · spr) ≈ 0.002 R★).
+
+        Using h=0.1 would be ~50× the transition width — the same regime that
+        produces sign-flipped FD estimates in external test suites.
+        """
+        k_val = jnp.float32(0.1)
+        h = jnp.float32(0.01 * self._softness_transit)
+
+        px = jnp.array([float(k_val) * self._spr], dtype=jnp.float32)
+        py = jnp.array([0.0], dtype=jnp.float32)
+
+        def f(k):
+            return jnp.sum(_compute_planet_mask(
+                px, py, self._spr,
+                jnp.float32(0.0), jnp.float32(0.0), jnp.float32(1.0), k,
+            ))
+
+        grad_jax = float(jax.grad(f)(k_val))
+        fd = float((f(k_val + h) - f(k_val - h)) / (2.0 * h))
+
+        assert abs(fd) > 0.1 * abs(grad_jax), (
+            f"FD is numerically degenerate (fd={fd:.3g}, jax={grad_jax:.3g}). "
+            f"h={float(h):.2e} may be too small for float32 at spr={self._spr}."
+        )
+        ratio = grad_jax / fd
+        assert 0.5 <= ratio <= 2.0, (
+            f"JAX ({grad_jax:.4g}) disagrees with FD ({fd:.4g}), ratio={ratio:.3f}. "
+            f"softness_transit={self._softness_transit:.4g}, h={float(h):.4g}."
+        )
+
+    def test_planet_mask_large_h_gives_wrong_result(self):
+        """
+        Documents that h=0.1 R★ — ~50× the transit transition width — yields a
+        FD estimate that is unreliable, explaining sign/value mismatches in
+        external test suites that use h=0.1 in unconstrained parameter space.
+        """
+        k_val = jnp.float32(0.1)
+        h_large = jnp.float32(0.1)
+
+        assert float(h_large) > 5.0 * self._softness_transit, (
+            "Precondition: h_large must exceed 5× softness_transit."
+        )
+
+        px = jnp.array([float(k_val) * self._spr], dtype=jnp.float32)
+        py = jnp.array([0.0], dtype=jnp.float32)
+
+        def f(k):
+            return jnp.sum(_compute_planet_mask(
+                px, py, self._spr,
+                jnp.float32(0.0), jnp.float32(0.0), jnp.float32(1.0), k,
+            ))
+
+        grad_jax = float(jax.grad(f)(k_val))
+        fd_large = float((f(k_val + h_large) - f(k_val - h_large)) / (2.0 * h_large))
+
+        if abs(fd_large) < 1e-30:
+            return  # FD is zero; trivially unreliable
+
+        ratio = abs(grad_jax / fd_large)
+        sign_flip = float(np.sign(grad_jax)) != float(np.sign(fd_large))
+        assert ratio < 0.1 or ratio > 10.0 or sign_flip, (
+            f"h=0.1 FD unexpectedly agrees with JAX (ratio={ratio:.3f}). "
+            "Transition may be wider than expected — check spr."
+        )
