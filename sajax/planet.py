@@ -278,9 +278,6 @@ def _compute_planet_mask(
     # Squared sky-plane distance from planet centre to each pixel
     d2 = (xn - X) ** 2 + (yn - Y) ** 2
 
-    if k == 0.0:
-        return jnp.zeros(x_disc.shape, dtype=jnp.float32)
-
     # Soft disc mask: sigmoid boundary so gradients flow w.r.t. k and planet position.
     # Transition width fixed at 1/10 pixel (matching _compute_ar_mask convention).
     # Using 0.1*k instead caused a +~330 ppm systematic bias in transit depth for k~0.1
@@ -291,7 +288,9 @@ def _compute_planet_mask(
 
     # Hard Z gate: planet in front of the star is topologically binary.
     z_gate = jnp.where(Z > 0.0, 1.0, 0.0)
-    return disc_mask * z_gate
+    # Use jnp.where instead of `if k == 0.0` so this stays JAX-traceable when k
+    # is a sampled parameter (tracer) inside a numpyro / JAX-jit context.
+    return jnp.where(k > 0.0, disc_mask * z_gate, jnp.zeros_like(disc_mask))
 
 
 # ---------------------------------------------------------------------------
