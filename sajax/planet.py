@@ -282,9 +282,11 @@ def _compute_planet_mask(
         return jnp.zeros(x_disc.shape, dtype=jnp.float32)
 
     # Soft disc mask: sigmoid boundary so gradients flow w.r.t. k and planet position.
-    # Transition width ~10% of planet radius, floored at 1/10 pixel.
+    # Transition width fixed at 1/10 pixel (matching _compute_ar_mask convention).
+    # Using 0.1*k instead caused a +~330 ppm systematic bias in transit depth for k~0.1
+    # because the ε²/r curvature correction is non-negligible when ε/r ~ 10%.
     d = jnp.sqrt(d2 + 1e-8)
-    softness = max(0.1 * k, 1.0 / (10.0 * star_pixel_rad))
+    softness = 1.0 / (10.0 * star_pixel_rad)
     disc_mask = jax_nn.sigmoid((k - d) / softness)
 
     # Hard Z gate: planet in front of the star is topologically binary.
