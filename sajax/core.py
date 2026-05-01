@@ -75,7 +75,7 @@ from typing import Literal, Optional
 
 import numpy as np
 import jax.numpy as jnp
-from jax import vmap
+from jax import vmap, nn as jax_nn
 
 from .geometry import rotate_active_region
 from .planet import _compute_planet_mask
@@ -263,30 +263,23 @@ def _compute_ar_mask(
 
     Returns
     -------
-    jnp.ndarray, shape (total_pixels,), dtype jnp.bool_
+    jnp.ndarray, shape (total_pixels,), dtype float32, values in (0, 1)
+        Soft sigmoid weight; pixels near the AR boundary interpolate smoothly.
     """
-    # z-coordinate of each pixel on the stellar sphere
+    # Pixel z-coordinates on the stellar sphere.
+    # Floor at 1e-4 prevents sqrt'(0) = inf at the disc edge from polluting gradients.
     r2     = x_disc ** 2 + y_disc ** 2
-    z_disc = jnp.sqrt(jnp.maximum(star_pixel_rad ** 2 - r2, 0.0))
+    z_disc = jnp.sqrt(jnp.maximum(star_pixel_rad ** 2 - r2, 1e-4))
 
-    # active region centre in spherical coords
-    arlong_rot = jnp.arctan2(spx, spz)
-    arlat_rot  = jnp.arccos(jnp.clip(spy / star_pixel_rad, -1.0, 1.0))
+    # Cosine of great-circle distance via dot product on the unit sphere.
+    # Avoids arccos and its gradient singularity at d_sigma = 0 (pixel at AR centre).
+    cos_d_sigma = (spx * x_disc + spy * y_disc + spz * z_disc) / (star_pixel_rad ** 2)
+    cos_arsize  = jnp.cos(arsize_rad)
 
-    # Each pixel in spherical coords
-    longi = jnp.arctan2(x_disc, z_disc)
-    lati  = jnp.arccos(jnp.clip(y_disc / star_pixel_rad, -1.0, 1.0))
-
-    # Great-circle distance between active region centre and each pixel
-    delta_lon = jnp.abs(arlong_rot - longi)
-    d_sigma   = jnp.arccos(jnp.clip(
-        jnp.cos(arlat_rot) * jnp.cos(lati)
-        + jnp.sin(arlat_rot) * jnp.sin(lati) * jnp.cos(delta_lon),
-        -1.0, 1.0,
-    ))
-
-    # active regions with spz < 0 are on the far side of the star — not visible
-    return (d_sigma <= arsize_rad)
+    # Soft sigmoid boundary: d_sigma < arsize_rad  iff  cos_d_sigma > cos_arsize.
+    # Transition width ~1/10 pixel in arc-length, expressed in cosine units.
+    softness = jnp.maximum(0.1 * jnp.sin(arsize_rad) / star_pixel_rad, 1e-6)
+    return jax_nn.sigmoid((cos_d_sigma - cos_arsize) / softness)
 
 
 # ---------------------------------------------------------------------------
@@ -369,9 +362,10 @@ def _flux_at_wavelength(
     # For "coldest_wins": use +inf (will lose argmin)
     sentinel = -jnp.inf if ar_overlap_mode == "hottest_wins" else jnp.inf
 
-    # Mask out absent ARs
+    # Use hard 0.5 threshold to decide which AR wins (overlap semantics preserved),
+    # but carry a soft weight for the final blend so gradients flow through the boundary.
     ar_active_fluxes_masked = jnp.where(
-        ar_masks,
+        ar_masks > 0.5,
         ar_active_fluxes,
         sentinel,
     )  # (nar, total_pixels)
@@ -387,8 +381,9 @@ def _flux_at_wavelength(
             f"Must be 'hottest_wins' or 'coldest_wins'."
         )
 
-    # Check if each pixel is covered by any AR
-    any_ar_present = jnp.any(ar_masks, axis=0)  # (total_pixels,)
+    # Soft weight: max sigmoid value over all ARs — carries gradient of lc w.r.t.
+    # ar_size / ar_lat / ar_long through the mask boundary.
+    any_ar_weight = jnp.max(ar_masks, axis=0)  # (total_pixels,) float in (0, 1)
 
     # Gather the winning AR's flux for each pixel
     best_ar_flux = jnp.take_along_axis(
@@ -397,19 +392,12 @@ def _flux_at_wavelength(
         axis=0,
     ).squeeze(0)  # (total_pixels,)
 
-    # For pixels covered by an AR, use the winning AR flux
-    # For pixels not covered by any AR, use hot flux
-    arted_flux = jnp.where(
-        any_ar_present,
-        best_ar_flux,
-        quiet_flux,
-    )  # (total_pixels,)
+    # Soft blend: gradient flows through any_ar_weight → ar_masks → ar_size/lat/long.
+    arted_flux = (1.0 - any_ar_weight) * quiet_flux + any_ar_weight * best_ar_flux
 
     # ---- Planet occultation ---------------------------------------
-    # Pixels behind the planet disc contribute zero flux.  If those pixels
-    # happen to be spots or faculae, the spot-crossing anomaly is captured
-    # automatically.
-    arted_flux = jnp.where(planet_mask, 0.0, arted_flux)
+    # Multiplication (not jnp.where) so gradients flow through the soft planet mask.
+    arted_flux = arted_flux * (1.0 - planet_mask)
 
     total_flux = jnp.sum(arted_flux) / jnp.float32(total_pixels)
     return star_spec, total_flux, arted_flux
