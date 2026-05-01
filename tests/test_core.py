@@ -1846,3 +1846,182 @@ class TestARMaskGradients:
             f"d(flux_norm)/d(arsize) = {grad:.4g}; expected < 0 for dark spot "
             f"(flux_active={float(flux_active[0]):.2f} < flux_quiet={float(flux_quiet[0]):.2f})"
         )
+
+
+# ===================================================================
+# FD-agreement tests for spot lat, long, and flux through the full
+# evaluate_light_curve pipeline
+# ===================================================================
+
+class TestARParamGradientsFD:
+    """
+    Compare JAX autodiff to central finite differences for active-region
+    latitude, longitude, and flux contrast, using the public
+    ``evaluate_light_curve`` API.
+
+    Step-size rationale
+    -------------------
+    The AR-mask sigmoid transition width in *degree* space is
+
+        Δθ_deg ≈ softness / ((π/180) · sin(arsize))
+                = (0.1 · sin(arsize) / spr) / ((π/180) · sin(arsize))
+                = 0.1 · (180/π) / spr
+                ≈ 5.73° / spr
+
+    For spr = 50 this gives Δθ_deg ≈ 0.11°.  The FD step is set to
+    h = 0.01 · Δθ_deg ≈ 0.001° which keeps the chord well inside the
+    sigmoid's linear regime (error < 0.1 %).
+
+    Flux contrast enters the total flux linearly, so any reasonable h works.
+    """
+
+    # Transition width estimate for spr=50 and a 20-deg spot (degrees)
+    _SPR       = 50
+    _ARSIZE    = 20.0   # degrees
+    _H_LATLONG = 0.01 * (0.1 * 180.0 / np.pi / _SPR)   # ≈ 0.00115°
+    _H_FLUX    = 0.01
+
+    @pytest.fixture(scope="class")
+    def grad_model(self):
+        """Single-phase, single-wavelength model at phase=0° (AR on disc centre)."""
+        return build_model(
+            wavelength   = np.array([550.0]),
+            flux_quiet   = np.array([1.0]),
+            params       = dict(ldc_coeffs=[0.4, 0.2], inc_star=90.0),
+            phases_rot   = np.array([0.0]),
+            stellar_grid_size = self._SPR,
+            ve           = 0.0,
+        )
+
+    def _lc_sum(self, model, lat, long, flux, arsize=None):
+        """Scalar LC sum, all four AR parameters as JAX scalars."""
+        if arsize is None:
+            arsize = jnp.float32(self._ARSIZE)
+        return jnp.sum(evaluate_light_curve(
+            model,
+            flux_active = jnp.array([flux]),
+            ar_lat      = jnp.array([lat]),
+            ar_long     = jnp.array([long]),
+            ar_size     = jnp.array([arsize]),
+        )["lc"])
+
+    def _fd(self, f, x, h):
+        """Central finite difference of scalar function f at scalar x."""
+        return float((f(x + h) - f(x - h)) / (2.0 * h))
+
+    def _check_fd_agreement(self, name, grad_jax, fd, h, transition_width=None):
+        """Assert JAX and FD agree within a factor of 2."""
+        assert abs(fd) > 0.1 * abs(grad_jax), (
+            f"'{name}': FD ({fd:.3g}) is numerically degenerate vs JAX ({grad_jax:.3g}). "
+            f"h={h:.3g} may be too small for float32; consider larger spr."
+        )
+        ratio = grad_jax / fd
+        info = f"transition_width≈{transition_width:.4g}" if transition_width else ""
+        assert 0.5 <= ratio <= 2.0, (
+            f"'{name}': JAX ({grad_jax:.4g}) disagrees with FD ({fd:.4g}), "
+            f"ratio={ratio:.3f}. h={h:.3g}. {info}"
+        )
+
+    # ---- latitude -----------------------------------------------------------
+
+    def test_lat_gradient_fd_agreement(self, grad_model):
+        """
+        d(LC_sum)/d(ar_lat) via JAX must agree with central FD at
+        h ≈ 0.001° — 1 % of the sigmoid transition width in degree space.
+        AR placed off-equator (lat=10°) to break the lat=0 symmetry.
+        """
+        lat0  = jnp.float32(10.0)
+        long0 = jnp.float32(0.0)
+        flux0 = jnp.float32(0.7)
+        h     = jnp.float32(self._H_LATLONG)
+
+        grad_jax = float(jax.grad(
+            lambda lat: self._lc_sum(grad_model, lat, long0, flux0)
+        )(lat0))
+
+        fd = self._fd(
+            lambda lat: self._lc_sum(grad_model, jnp.float32(lat), long0, flux0),
+            float(lat0), float(h),
+        )
+
+        self._check_fd_agreement("ar_lat", grad_jax, fd, float(h),
+                                 transition_width=0.1 * 180 / np.pi / self._SPR)
+
+    def test_lat_gradient_finite_and_nonzero(self, grad_model):
+        """Gradient w.r.t. ar_lat must be finite and non-zero (AR off equator)."""
+        lat0 = jnp.float32(10.0)
+        grad = float(jax.grad(
+            lambda lat: self._lc_sum(grad_model, lat, jnp.float32(0.0), jnp.float32(0.7))
+        )(lat0))
+        assert np.isfinite(grad), f"d(LC)/d(ar_lat) is non-finite: {grad}"
+        assert abs(grad) > 0,     f"d(LC)/d(ar_lat) is unexpectedly zero at lat=10°"
+
+    # ---- longitude ----------------------------------------------------------
+
+    def test_long_gradient_fd_agreement(self, grad_model):
+        """
+        d(LC_sum)/d(ar_long) via JAX must agree with central FD at h ≈ 0.001°.
+        AR placed off the central meridian (long=10°) so the gradient is non-zero.
+        """
+        lat0  = jnp.float32(0.0)
+        long0 = jnp.float32(10.0)
+        flux0 = jnp.float32(0.7)
+        h     = jnp.float32(self._H_LATLONG)
+
+        grad_jax = float(jax.grad(
+            lambda lng: self._lc_sum(grad_model, lat0, lng, flux0)
+        )(long0))
+
+        fd = self._fd(
+            lambda lng: self._lc_sum(grad_model, lat0, jnp.float32(lng), flux0),
+            float(long0), float(h),
+        )
+
+        self._check_fd_agreement("ar_long", grad_jax, fd, float(h),
+                                 transition_width=0.1 * 180 / np.pi / self._SPR)
+
+    def test_long_gradient_finite_and_nonzero(self, grad_model):
+        """Gradient w.r.t. ar_long must be finite and non-zero (AR off meridian)."""
+        long0 = jnp.float32(10.0)
+        grad = float(jax.grad(
+            lambda lng: self._lc_sum(grad_model, jnp.float32(0.0), lng, jnp.float32(0.7))
+        )(long0))
+        assert np.isfinite(grad), f"d(LC)/d(ar_long) is non-finite: {grad}"
+        assert abs(grad) > 0,     f"d(LC)/d(ar_long) is unexpectedly zero at long=10°"
+
+    # ---- flux contrast ------------------------------------------------------
+
+    def test_flux_gradient_positive_for_dark_spot(self, grad_model):
+        """
+        For a dark spot (flux < 1), increasing flux_active (less dark) must
+        raise total LC flux: d(LC_sum)/d(flux_active) > 0.
+        """
+        flux0 = jnp.float32(0.7)
+        grad = float(jax.grad(
+            lambda fa: self._lc_sum(grad_model, jnp.float32(0.0), jnp.float32(0.0), fa)
+        )(flux0))
+        assert grad > 0, (
+            f"d(LC)/d(flux_active) = {grad:.4g}; expected > 0 "
+            "(less dark spot → higher flux)"
+        )
+
+    def test_flux_gradient_fd_agreement(self, grad_model):
+        """
+        d(LC_sum)/d(flux_active) via JAX must agree with central FD at h=0.01.
+        Flux enters the total flux linearly, so any reasonable h works.
+        """
+        flux0 = jnp.float32(0.7)
+        h     = jnp.float32(self._H_FLUX)
+
+        grad_jax = float(jax.grad(
+            lambda fa: self._lc_sum(grad_model, jnp.float32(0.0), jnp.float32(0.0), fa)
+        )(flux0))
+
+        fd = self._fd(
+            lambda fa: self._lc_sum(
+                grad_model, jnp.float32(0.0), jnp.float32(0.0), jnp.float32(fa)
+            ),
+            float(flux0), float(h),
+        )
+
+        self._check_fd_agreement("flux_active", grad_jax, fd, float(h))
