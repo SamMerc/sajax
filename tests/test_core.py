@@ -2009,7 +2009,7 @@ class TestARParamGradientsFD:
     def test_flux_gradient_fd_agreement(self, grad_model):
         """
         d(LC_sum)/d(flux_active) via JAX must agree with central FD at h=0.01.
-        Flux enters the total flux linearly, so any reasonable h works.
+        Flux enters the total flux linearly → rtol=1e-3 (observed rel_err=6e-5).
         """
         flux0 = jnp.float32(0.7)
         h     = jnp.float32(self._H_FLUX)
@@ -2025,7 +2025,11 @@ class TestARParamGradientsFD:
             float(flux0), float(h),
         )
 
-        self._check_fd_agreement("flux_active", grad_jax, fd, float(h))
+        assert np.isfinite(fd) and abs(fd) > 0, "flux_active FD zero or non-finite"
+        np.testing.assert_allclose(
+            grad_jax, fd, rtol=1e-3,
+            err_msg=f"flux_active JAX ({grad_jax:.8g}) vs FD ({fd:.8g})",
+        )
 
 
 # ===================================================================
@@ -2126,6 +2130,14 @@ class TestStellarParamGradientsFD:
             f"'{name}' JAX ({jax_g:.4g}) vs FD ({fd:.4g}), ratio={ratio:.3f}"
         )
 
+    def _check_tight(self, name, jax_g, fd, rtol):
+        """Tight assertion for non-sigmoid parameters using assert_allclose."""
+        assert np.isfinite(fd) and abs(fd) > 0, f"'{name}' FD zero or non-finite"
+        np.testing.assert_allclose(
+            jax_g, fd, rtol=rtol,
+            err_msg=f"'{name}' JAX ({jax_g:.8g}) vs FD ({fd:.8g})",
+        )
+
     # ---- stellar inclination ------------------------------------------------
 
     def test_inc_star_gradient_finite_and_nonzero(self, grad_model):
@@ -2184,7 +2196,10 @@ class TestStellarParamGradientsFD:
         assert abs(g) > 0,     "d(LC)/d(u1) is zero"
 
     def test_u1_gradient_fd_agreement(self, grad_model):
-        """JAX vs FD at h=0.01; u1 enters the intensity formula linearly."""
+        """
+        JAX vs FD at h=0.01; u1 enters the intensity formula linearly.
+        rtol=5e-3 (observed rel_err=2e-3).
+        """
         spr     = grad_model["star_pixel_rad"]
         rotated = jax.vmap(
             lambda c: rotate_active_region(c, jnp.float32(0.0), jnp.float32(90.0))
@@ -2199,10 +2214,15 @@ class TestStellarParamGradientsFD:
 
         jax_g = float(jax.grad(lc)(u1_0))
         fd    = self._fd(lambda u: float(lc(jnp.float32(u))), float(u1_0), self._H_LDC)
-        self._check("u1", jax_g, fd, self._H_LDC)
+        self._check_tight("u1", jax_g, fd, rtol=5e-3)
 
     def test_u2_gradient_fd_agreement(self, grad_model):
-        """JAX vs FD at h=0.01 for the quadratic LDC coefficient u2."""
+        """
+        JAX vs FD at h=0.01 for the quadratic LDC coefficient u2.
+        rtol=5e-2: the FD signal for the quadratic term is weaker (the (1−μ)²
+        weight concentrates flux on the limb), raising float32 round-off to
+        ~3 % — still far tighter than the sigmoid factor-of-2 bound.
+        """
         spr     = grad_model["star_pixel_rad"]
         rotated = jax.vmap(
             lambda c: rotate_active_region(c, jnp.float32(0.0), jnp.float32(90.0))
@@ -2217,7 +2237,7 @@ class TestStellarParamGradientsFD:
 
         jax_g = float(jax.grad(lc)(u2_0))
         fd    = self._fd(lambda u: float(lc(jnp.float32(u))), float(u2_0), self._H_LDC)
-        self._check("u2", jax_g, fd, self._H_LDC)
+        self._check_tight("u2", jax_g, fd, rtol=5e-2)
 
     # ---- equatorial velocity ------------------------------------------------
 
@@ -2244,8 +2264,9 @@ class TestStellarParamGradientsFD:
         """
         FD at h=100 km/s.  vel_disc is linear in ve so the function is
         smooth at any h; at ve±100 km/s, vel_disc_max ≈ 3×10⁻⁴ ≪ 1,
-        confirming the linear regime.  Large h makes the FD signal
-        (~10⁻⁵) detectable above float32 noise (~10⁻⁷).
+        confirming the linear regime.  Large h is needed to lift the FD
+        signal (~10⁻⁵) above float32 noise (~10⁻⁷).
+        rtol=5e-3 (observed rel_err=1.7e-3).
         """
         spr     = grad_model["star_pixel_rad"]
         y_disc  = grad_model["y_disc"]
@@ -2259,7 +2280,7 @@ class TestStellarParamGradientsFD:
 
         jax_g = float(jax.grad(lc)(jnp.float32(2.0)))
         fd    = self._fd(lambda v: float(lc(jnp.float32(v))), 2.0, self._H_VE)
-        self._check("ve", jax_g, fd, self._H_VE)
+        self._check_tight("ve", jax_g, fd, rtol=5e-3)
 
     # ---- rotation period ----------------------------------------------------
 

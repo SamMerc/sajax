@@ -724,6 +724,14 @@ class TestOrbitalParamGradientsFD:
             f"'{name}' JAX ({jax_g:.4g}) vs FD ({fd:.4g}), ratio={ratio:.3f}"
         )
 
+    def _check_tight(self, name, jax_g, fd, rtol):
+        """Assert JAX and FD agree to rtol for smooth (non-sigmoid) parameters."""
+        assert np.isfinite(fd) and abs(fd) > 0, f"'{name}' FD zero or non-finite"
+        np.testing.assert_allclose(
+            jax_g, fd, rtol=rtol,
+            err_msg=f"'{name}' JAX ({jax_g:.8g}) vs FD ({fd:.8g})",
+        )
+
     # ---- a_over_rstar -------------------------------------------------------
 
     def test_a_gradient_finite_and_nonzero(self):
@@ -735,7 +743,7 @@ class TestOrbitalParamGradientsFD:
         assert abs(g) > 0,     "d/d(a) is zero"
 
     def test_a_gradient_fd_agreement(self):
-        """FD at h=0.01 R★; planet_sky_position is smooth and linear in a."""
+        """FD at h=0.01 R★; smooth trig → rtol=1e-3 (observed rel_err < 5e-5)."""
         h = 0.01
         jax_g = float(jax.grad(
             lambda a: self._scalar(self._xyz(a_over_rstar=a))
@@ -744,7 +752,7 @@ class TestOrbitalParamGradientsFD:
             lambda a: self._scalar(self._xyz(a_over_rstar=float(a))),
             self._A, h,
         )
-        self._check("a_over_rstar", jax_g, fd, h)
+        self._check_tight("a_over_rstar", jax_g, fd, rtol=1e-3)
 
     # ---- period -------------------------------------------------------------
 
@@ -761,7 +769,7 @@ class TestOrbitalParamGradientsFD:
         assert abs(g) > 0,     "d/d(period) is zero at t=0.5 d"
 
     def test_period_gradient_fd_agreement(self):
-        """FD at h=0.01 d; planet_sky_position is smooth in period."""
+        """FD at h=0.01 d; smooth trig → rtol=1e-3 (observed rel_err < 4e-4)."""
         h = 0.01
         jax_g = float(jax.grad(
             lambda P: self._scalar(self._xyz(t=0.5, period=P))
@@ -770,7 +778,7 @@ class TestOrbitalParamGradientsFD:
             lambda P: self._scalar(self._xyz(t=0.5, period=float(P))),
             self._P, h,
         )
-        self._check("period", jax_g, fd, h)
+        self._check_tight("period", jax_g, fd, rtol=1e-3)
 
     # ---- k (planet radius ratio) --------------------------------------------
 
@@ -815,7 +823,7 @@ class TestOrbitalParamGradientsFD:
         assert abs(g) > 0,     "d/d(inc) is zero at inc=89°"
 
     def test_inclination_gradient_fd_agreement(self):
-        """FD at h=1×10⁻⁴ rad; planet_sky_position is smooth in inclination."""
+        """FD at h=1e-4 rad; smooth trig → rtol=1e-3 (observed rel_err < 3e-4)."""
         h = 1e-4
         jax_g = float(jax.grad(
             lambda i: self._scalar(self._xyz(inclination=i))
@@ -824,7 +832,7 @@ class TestOrbitalParamGradientsFD:
             lambda i: self._scalar(self._xyz(inclination=float(i))),
             self._INC, h,
         )
-        self._check("inclination", jax_g, fd, h)
+        self._check_tight("inclination", jax_g, fd, rtol=1e-3)
 
     # ---- eccentricity -------------------------------------------------------
 
@@ -841,7 +849,7 @@ class TestOrbitalParamGradientsFD:
         assert abs(g) > 0,     "d/d(ecc) is zero"
 
     def test_ecc_gradient_fd_agreement(self):
-        """FD at h=0.01; planet_sky_position is smooth in eccentricity."""
+        """FD at h=0.01; smooth Kepler solver → rtol=1e-3 (observed rel_err < 2e-4)."""
         h = 0.01
         jax_g = float(jax.grad(
             lambda e: self._scalar(self._xyz(t=0.5, ecc=e))
@@ -850,7 +858,7 @@ class TestOrbitalParamGradientsFD:
             lambda e: self._scalar(self._xyz(t=0.5, ecc=float(e))),
             0.1, h,
         )
-        self._check("ecc", jax_g, fd, h)
+        self._check_tight("ecc", jax_g, fd, rtol=1e-3)
 
     # ---- argument of periastron --------------------------------------------
 
@@ -868,7 +876,7 @@ class TestOrbitalParamGradientsFD:
         assert abs(g) > 0,     "d/d(omega_peri) is zero at ecc=0.1"
 
     def test_omega_gradient_fd_agreement(self):
-        """FD at h=0.01 rad; planet_sky_position is smooth in omega_peri."""
+        """FD at h=0.01 rad; smooth trig → rtol=1e-3 (observed rel_err < 6e-5)."""
         omega0 = float(np.pi / 4.0)
         h = 0.01
         jax_g = float(jax.grad(
@@ -878,4 +886,4 @@ class TestOrbitalParamGradientsFD:
             lambda w: self._scalar(self._xyz(t=0.5, ecc=0.1, omega_peri=float(w))),
             omega0, h,
         )
-        self._check("omega_peri", jax_g, fd, h)
+        self._check_tight("omega_peri", jax_g, fd, rtol=1e-3)
