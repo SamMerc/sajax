@@ -20,6 +20,7 @@ from sajax.core import (
     _compute_ar_mask,
     _compute_single_phase,
 )
+from sajax.geometry import rotate_active_region
 
 
 # ---------------------------------------------------------------------------
@@ -2025,3 +2026,281 @@ class TestARParamGradientsFD:
         )
 
         self._check_fd_agreement("flux_active", grad_jax, fd, float(h))
+
+
+# ===================================================================
+# FD-agreement tests for stellar model parameters
+# ===================================================================
+
+class TestStellarParamGradientsFD:
+    """
+    Compare JAX autodiff to central finite differences for stellar model
+    parameters: stellar inclination (inc_star), equatorial velocity (ve),
+    quadratic limb-darkening coefficients (u1, u2), and rotation period
+    (P_rot).
+
+    These parameters are baked into the model dict at build time (NumPy),
+    so tests call _compute_single_phase and rotate_active_region directly
+    with the parameter as a JAX-traced input.
+
+    Step-size rationale
+    -------------------
+    inc_star  : trig-smooth; AR-mask sigmoid maps to ~0.35° in inc_star
+                space at this geometry → h = 0.01° gives a 35× margin.
+    u1, u2    : enter the intensity formula linearly → any h; use 0.01.
+    ve        : vel_disc = y·ve/(spr·C) is linear in ve.  The Doppler
+                gradient (~5×10⁻⁸ per km/s) is only detectable with a
+                large h (100 km/s); linear regime holds because vel << 1.
+    P_rot     : phase = (t/P)·360 % 360, sensitivity 1.15 °/day at
+                t=2 d, P=25 d.  AR sigmoid width ≈ 0.11° → h = 0.001 d.
+    """
+
+    _SPR    = 50
+    _ARSIZE = 20.0    # degrees
+    _H_INC  = 0.01    # degrees
+    _H_LDC  = 0.01
+    _H_VE   = 100.0   # km/s  (large but linear; vel_max ~ 3.4e-4 ≪ 1)
+    _H_PROT = 1e-3    # days
+    _C      = 299_792.458  # km/s
+
+    @pytest.fixture(scope="class")
+    def grad_model(self):
+        return build_model(
+            wavelength=np.array([550.0]),
+            flux_quiet=np.array([1.0]),
+            params=dict(ldc_coeffs=[0.4, 0.2], inc_star=90.0),
+            phases_rot=np.array([0.0]),
+            stellar_grid_size=self._SPR,
+            ve=0.0,
+        )
+
+    def _ar_cart(self, spr, lat_deg=30.0, long_deg=45.0):
+        """AR Cartesian coords before rotation — breaks all symmetries."""
+        lat_r  = jnp.deg2rad(jnp.float32(lat_deg))
+        long_r = jnp.deg2rad(jnp.float32(long_deg))
+        return jnp.array([[
+            spr * jnp.sin(long_r) * jnp.cos(lat_r),
+            spr * jnp.sin(lat_r),
+            spr * jnp.cos(long_r) * jnp.cos(lat_r),
+        ]])  # (1, 3)
+
+    def _call_single_phase(self, model, ar_cart_rotated,
+                           vel_disc=None, ldc_coeffs=None):
+        """_compute_single_phase with optional vel_disc / ldc_coeffs override."""
+        flux_norm, _, _ = _compute_single_phase(
+            ar_cart_rotated,
+            jnp.array([0.0, 0.0, -1e10]),
+            wavelength          = model["wavelength"],
+            flux_quiet_interp   = model["flux_quiet"],
+            flux_active_interp  = jnp.array([[0.7]], dtype=jnp.float32),
+            ldc_coeffs          = ldc_coeffs if ldc_coeffs is not None
+                                  else model["ldc_coeffs"],
+            I_profile           = model["I_profile"],
+            mu_profile_pts      = model["mu_profile_pts"],
+            x_disc              = model["x_disc"],
+            y_disc              = model["y_disc"],
+            mu_disc             = model["mu_disc"],
+            vel_disc            = vel_disc if vel_disc is not None
+                                  else model["vel_disc"],
+            star_pixel_rad      = model["star_pixel_rad"],
+            total_pixels        = model["total_pixels"],
+            arsize_rads         = jnp.array([jnp.deg2rad(jnp.float32(self._ARSIZE))]),
+            k                   = jnp.float32(0.0),
+            ldc_mode            = model["ldc_mode"],
+            ar_overlap_mode     = model["ar_overlap_mode"],
+            plot_map_wavelength = model["plot_map_wavelength"],
+            n                   = model["n"],
+            flat_indices        = model["flat_indices"],
+        )
+        return flux_norm
+
+    def _fd(self, f, x, h):
+        return float((f(x + h) - f(x - h)) / (2.0 * h))
+
+    def _check(self, name, jax_g, fd, h):
+        assert abs(fd) > 0.1 * abs(jax_g), (
+            f"'{name}' FD degenerate (fd={fd:.3g}, jax={jax_g:.3g}, h={h:.3g})"
+        )
+        ratio = jax_g / fd
+        assert 0.5 <= ratio <= 2.0, (
+            f"'{name}' JAX ({jax_g:.4g}) vs FD ({fd:.4g}), ratio={ratio:.3f}"
+        )
+
+    # ---- stellar inclination ------------------------------------------------
+
+    def test_inc_star_gradient_finite_and_nonzero(self, grad_model):
+        """
+        d(LC)/d(inc_star) through rotate_active_region must be finite and
+        non-zero.  AR at lat=30°, long=45°, inc=75° keeps the AR off-axis so
+        the rotation tilt changes the visible disc position.
+        """
+        spr     = grad_model["star_pixel_rad"]
+        ar_cart = self._ar_cart(spr)
+
+        def lc(inc_deg):
+            rotated = jax.vmap(
+                lambda c: rotate_active_region(c, jnp.float32(0.0), inc_deg)
+            )(ar_cart)
+            return self._call_single_phase(grad_model, rotated)
+
+        g = float(jax.grad(lc)(jnp.float32(75.0)))
+        assert np.isfinite(g), f"d(LC)/d(inc_star) non-finite: {g}"
+        assert abs(g) > 0,     f"d(LC)/d(inc_star) is zero at inc=75°"
+
+    def test_inc_star_gradient_fd_agreement(self, grad_model):
+        """JAX agrees with FD at h=0.01° (35× inside the sigmoid linear regime)."""
+        spr     = grad_model["star_pixel_rad"]
+        ar_cart = self._ar_cart(spr)
+        inc0    = jnp.float32(75.0)
+        h       = jnp.float32(self._H_INC)
+
+        def lc(inc_deg):
+            rotated = jax.vmap(
+                lambda c: rotate_active_region(c, jnp.float32(0.0), inc_deg)
+            )(ar_cart)
+            return self._call_single_phase(grad_model, rotated)
+
+        jax_g = float(jax.grad(lc)(inc0))
+        fd    = self._fd(lambda i: float(lc(jnp.float32(i))), float(inc0), float(h))
+        self._check("inc_star", jax_g, fd, float(h))
+
+    # ---- limb-darkening coefficient u1 -------------------------------------
+
+    def test_u1_gradient_finite_and_nonzero(self, grad_model):
+        """d(LC)/d(u1) must be finite and non-zero for an off-axis AR."""
+        spr     = grad_model["star_pixel_rad"]
+        rotated = jax.vmap(
+            lambda c: rotate_active_region(c, jnp.float32(0.0), jnp.float32(90.0))
+        )(self._ar_cart(spr))
+
+        def lc(u1):
+            return self._call_single_phase(
+                grad_model, rotated,
+                ldc_coeffs=jnp.array([[u1, jnp.float32(0.2)]]),
+            )
+
+        g = float(jax.grad(lc)(jnp.float32(0.4)))
+        assert np.isfinite(g), f"d(LC)/d(u1) non-finite: {g}"
+        assert abs(g) > 0,     "d(LC)/d(u1) is zero"
+
+    def test_u1_gradient_fd_agreement(self, grad_model):
+        """JAX vs FD at h=0.01; u1 enters the intensity formula linearly."""
+        spr     = grad_model["star_pixel_rad"]
+        rotated = jax.vmap(
+            lambda c: rotate_active_region(c, jnp.float32(0.0), jnp.float32(90.0))
+        )(self._ar_cart(spr))
+        u1_0 = jnp.float32(0.4)
+
+        def lc(u1):
+            return self._call_single_phase(
+                grad_model, rotated,
+                ldc_coeffs=jnp.array([[u1, jnp.float32(0.2)]]),
+            )
+
+        jax_g = float(jax.grad(lc)(u1_0))
+        fd    = self._fd(lambda u: float(lc(jnp.float32(u))), float(u1_0), self._H_LDC)
+        self._check("u1", jax_g, fd, self._H_LDC)
+
+    def test_u2_gradient_fd_agreement(self, grad_model):
+        """JAX vs FD at h=0.01 for the quadratic LDC coefficient u2."""
+        spr     = grad_model["star_pixel_rad"]
+        rotated = jax.vmap(
+            lambda c: rotate_active_region(c, jnp.float32(0.0), jnp.float32(90.0))
+        )(self._ar_cart(spr))
+        u2_0 = jnp.float32(0.2)
+
+        def lc(u2):
+            return self._call_single_phase(
+                grad_model, rotated,
+                ldc_coeffs=jnp.array([[jnp.float32(0.4), u2]]),
+            )
+
+        jax_g = float(jax.grad(lc)(u2_0))
+        fd    = self._fd(lambda u: float(lc(jnp.float32(u))), float(u2_0), self._H_LDC)
+        self._check("u2", jax_g, fd, self._H_LDC)
+
+    # ---- equatorial velocity ------------------------------------------------
+
+    def test_ve_gradient_finite(self, grad_model):
+        """
+        d(LC)/d(ve) must be finite.  vel_disc = y·ve/(spr·C) enters the
+        flux formula linearly; JAX autodiff computes the correct derivative
+        even though the Doppler gradient is tiny (~5×10⁻⁸ per km/s).
+        """
+        spr     = grad_model["star_pixel_rad"]
+        y_disc  = grad_model["y_disc"]
+        rotated = jax.vmap(
+            lambda c: rotate_active_region(c, jnp.float32(0.0), jnp.float32(90.0))
+        )(self._ar_cart(spr))
+
+        def lc(ve):
+            vd = y_disc / spr * (ve / self._C)
+            return self._call_single_phase(grad_model, rotated, vel_disc=vd)
+
+        g = float(jax.grad(lc)(jnp.float32(2.0)))
+        assert np.isfinite(g), f"d(LC)/d(ve) non-finite: {g}"
+
+    def test_ve_gradient_fd_agreement(self, grad_model):
+        """
+        FD at h=100 km/s.  vel_disc is linear in ve so the function is
+        smooth at any h; at ve±100 km/s, vel_disc_max ≈ 3×10⁻⁴ ≪ 1,
+        confirming the linear regime.  Large h makes the FD signal
+        (~10⁻⁵) detectable above float32 noise (~10⁻⁷).
+        """
+        spr     = grad_model["star_pixel_rad"]
+        y_disc  = grad_model["y_disc"]
+        rotated = jax.vmap(
+            lambda c: rotate_active_region(c, jnp.float32(0.0), jnp.float32(90.0))
+        )(self._ar_cart(spr))
+
+        def lc(ve):
+            vd = y_disc / spr * (ve / self._C)
+            return self._call_single_phase(grad_model, rotated, vel_disc=vd)
+
+        jax_g = float(jax.grad(lc)(jnp.float32(2.0)))
+        fd    = self._fd(lambda v: float(lc(jnp.float32(v))), 2.0, self._H_VE)
+        self._check("ve", jax_g, fd, self._H_VE)
+
+    # ---- rotation period ----------------------------------------------------
+
+    def test_prot_gradient_finite_and_nonzero(self, grad_model):
+        """
+        At t=2 d, P_rot=25 d the phase is 28.8° — AR at long=0° is off-
+        center.  d(LC)/d(P_rot) = d(LC)/d(phase) · (−t·360/P²) must be
+        finite and non-zero.
+        """
+        spr     = grad_model["star_pixel_rad"]
+        ar_cart = self._ar_cart(spr, lat_deg=0.0, long_deg=0.0)
+        t = jnp.float32(2.0)
+
+        def lc(P_rot):
+            phase   = (t / P_rot * 360.0) % 360.0
+            rotated = jax.vmap(
+                lambda c: rotate_active_region(c, phase, jnp.float32(90.0))
+            )(ar_cart)
+            return self._call_single_phase(grad_model, rotated)
+
+        g = float(jax.grad(lc)(jnp.float32(25.0)))
+        assert np.isfinite(g), f"d(LC)/d(P_rot) non-finite: {g}"
+        assert abs(g) > 0,     "d(LC)/d(P_rot) is zero at t=2 d, P=25 d"
+
+    def test_prot_gradient_fd_agreement(self, grad_model):
+        """
+        FD at h=0.001 d.  Sensitivity is 1.15 °/day; h=0.001 d shifts the
+        phase by 0.00115° — 95× inside the AR-mask sigmoid width (~0.11°).
+        """
+        spr     = grad_model["star_pixel_rad"]
+        ar_cart = self._ar_cart(spr, lat_deg=0.0, long_deg=0.0)
+        t  = jnp.float32(2.0)
+        P0 = jnp.float32(25.0)
+
+        def lc(P_rot):
+            phase   = (t / P_rot * 360.0) % 360.0
+            rotated = jax.vmap(
+                lambda c: rotate_active_region(c, phase, jnp.float32(90.0))
+            )(ar_cart)
+            return self._call_single_phase(grad_model, rotated)
+
+        jax_g = float(jax.grad(lc)(P0))
+        fd    = self._fd(lambda p: float(lc(jnp.float32(p))), float(P0), self._H_PROT)
+        self._check("P_rot", jax_g, fd, self._H_PROT)

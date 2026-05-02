@@ -16,6 +16,7 @@ from sajax.planet import (
     a_over_rstar_to_stellar_density,
     _compute_planet_mask,
 )
+from sajax import build_stellar_grid
 
 
 # ---------------------------------------------------------------------------
@@ -644,3 +645,237 @@ class TestPlanetGradients:
             f"h=0.1 FD unexpectedly agrees with JAX (ratio={ratio:.3f}). "
             "Transition may be wider than expected — check spr."
         )
+
+
+# ===================================================================
+# FD-agreement tests for the six Keplerian orbital parameters
+# ===================================================================
+
+class TestOrbitalParamGradientsFD:
+    """
+    Verify that JAX autodiff agrees with calibrated finite differences for
+    all six Keplerian orbital parameters: a/R★, period, k, orbital
+    inclination, eccentricity, and argument of periastron.
+
+    Strategy
+    --------
+    a/R★, period, inclination, ecc, omega_peri:
+        Tested through planet_sky_position (pure trig / Kepler solver —
+        no sigmoid).  The output scalar X+Y+Z is smooth in all parameters,
+        so a standard h = 0.01 in natural units is safe everywhere.
+
+    k (planet radius ratio):
+        Tested through _compute_planet_mask, where the transit-edge sigmoid
+        has softness = 1/(10·spr).  Uses the same calibrated h as
+        TestPlanetGradients.
+
+    Orbit geometry: inc=89° so impact parameter b = a·cos(i) ≈ 0.26 R★
+    is non-zero, making gradients w.r.t. inclination and a/R★ non-trivial.
+    For period and ecc tests the planet is evaluated at t=0.5 d (off
+    mid-transit) so the mean-anomaly derivatives are non-zero.
+    """
+
+    _A   = 15.0
+    _INC = float(np.deg2rad(89.0))   # b ≈ 0.26 R★
+    _P   = 5.0
+    _ECC = 0.0
+    _OMG = 0.0
+    _T0  = 0.0
+    _K   = 0.1
+    _SPR = 50.0
+
+    @property
+    def _softness(self):
+        return 1.0 / (10.0 * self._SPR)
+
+    @pytest.fixture(autouse=True)
+    def _grid(self):
+        g = build_stellar_grid(int(self._SPR), 0.0)
+        self._x   = jnp.asarray(g["x"])
+        self._y   = jnp.asarray(g["y"])
+        self._spr = float(g["star_pixel_rad"])
+
+    def _xyz(self, t=0.0, **kw):
+        """planet_sky_position with class defaults, keyword overrides."""
+        p = dict(t0=self._T0, period=self._P, a_over_rstar=self._A,
+                 inclination=self._INC, ecc=self._ECC, omega_peri=self._OMG)
+        p.update(kw)
+        return planet_sky_position(jnp.float32(t), **p)
+
+    def _scalar(self, xyz):
+        X, Y, Z = xyz
+        return X + Y + Z
+
+    def _mask_sum(self, X, Y, Z, k=None):
+        k = jnp.float32(self._K) if k is None else k
+        return jnp.sum(_compute_planet_mask(
+            self._x, self._y, self._spr, X, Y, Z, k,
+        ))
+
+    def _fd(self, f, x, h):
+        return float((f(x + h) - f(x - h)) / (2.0 * h))
+
+    def _check(self, name, jax_g, fd, h):
+        assert abs(fd) > 0.1 * abs(jax_g), (
+            f"'{name}' FD degenerate (fd={fd:.3g}, jax={jax_g:.3g}, h={h:.3g})"
+        )
+        ratio = jax_g / fd
+        assert 0.5 <= ratio <= 2.0, (
+            f"'{name}' JAX ({jax_g:.4g}) vs FD ({fd:.4g}), ratio={ratio:.3f}"
+        )
+
+    # ---- a_over_rstar -------------------------------------------------------
+
+    def test_a_gradient_finite_and_nonzero(self):
+        """d(X+Y+Z)/d(a) must be finite and non-zero (Y = r·sin(ω+f)·cos i ∝ a)."""
+        g = float(jax.grad(
+            lambda a: self._scalar(self._xyz(a_over_rstar=a))
+        )(jnp.float32(self._A)))
+        assert np.isfinite(g), f"d/d(a) non-finite: {g}"
+        assert abs(g) > 0,     "d/d(a) is zero"
+
+    def test_a_gradient_fd_agreement(self):
+        """FD at h=0.01 R★; planet_sky_position is smooth and linear in a."""
+        h = 0.01
+        jax_g = float(jax.grad(
+            lambda a: self._scalar(self._xyz(a_over_rstar=a))
+        )(jnp.float32(self._A)))
+        fd = self._fd(
+            lambda a: self._scalar(self._xyz(a_over_rstar=float(a))),
+            self._A, h,
+        )
+        self._check("a_over_rstar", jax_g, fd, h)
+
+    # ---- period -------------------------------------------------------------
+
+    def test_period_gradient_finite_and_nonzero(self):
+        """
+        At t=0.5 d (off mid-transit) d(X+Y+Z)/d(period) is non-zero.
+        At t=t0 the mean anomaly M=0 and dM/dP = −(2π/P²)·(t−t_peri) = 0,
+        so the off-transit evaluation is essential.
+        """
+        g = float(jax.grad(
+            lambda P: self._scalar(self._xyz(t=0.5, period=P))
+        )(jnp.float32(self._P)))
+        assert np.isfinite(g), f"d/d(period) non-finite: {g}"
+        assert abs(g) > 0,     "d/d(period) is zero at t=0.5 d"
+
+    def test_period_gradient_fd_agreement(self):
+        """FD at h=0.01 d; planet_sky_position is smooth in period."""
+        h = 0.01
+        jax_g = float(jax.grad(
+            lambda P: self._scalar(self._xyz(t=0.5, period=P))
+        )(jnp.float32(self._P)))
+        fd = self._fd(
+            lambda P: self._scalar(self._xyz(t=0.5, period=float(P))),
+            self._P, h,
+        )
+        self._check("period", jax_g, fd, h)
+
+    # ---- k (planet radius ratio) --------------------------------------------
+
+    def test_k_gradient_positive_at_transit_boundary(self):
+        """
+        At mid-transit a pixel at distance k from the planet centre is on
+        the boundary; enlarging the planet must increase its mask value:
+        d(mask_sum)/dk > 0.
+        """
+        X, Y, Z = self._xyz()
+        k0 = jnp.float32(self._K)
+        g  = float(jax.grad(lambda k: self._mask_sum(X, Y, Z, k=k))(k0))
+        assert g > 0, f"d(mask)/dk = {g:.4g}; expected > 0"
+
+    def test_k_gradient_fd_agreement(self):
+        """
+        FD at h = 0.01·softness_transit = 1/(10·spr)·0.01 ≈ 2×10⁻⁴ R★,
+        keeping the step well inside the sigmoid linear regime.
+        """
+        X, Y, Z = self._xyz()
+        k0 = jnp.float32(self._K)
+        h  = jnp.float32(0.01 * self._softness)
+
+        jax_g = float(jax.grad(lambda k: self._mask_sum(X, Y, Z, k=k))(k0))
+        fd    = self._fd(
+            lambda k: float(self._mask_sum(X, Y, Z, k=jnp.float32(k))),
+            float(k0), float(h),
+        )
+        self._check("k", jax_g, fd, float(h))
+
+    # ---- orbital inclination ------------------------------------------------
+
+    def test_inclination_gradient_finite_and_nonzero(self):
+        """
+        Y = r·sin(ω+f)·cos(i), so d(Y)/d(i) = −r·sin(ω+f)·sin(i) ≠ 0
+        at i=89°.  The non-zero impact parameter makes this non-trivial.
+        """
+        g = float(jax.grad(
+            lambda i: self._scalar(self._xyz(inclination=i))
+        )(jnp.float32(self._INC)))
+        assert np.isfinite(g), f"d/d(inc) non-finite: {g}"
+        assert abs(g) > 0,     "d/d(inc) is zero at inc=89°"
+
+    def test_inclination_gradient_fd_agreement(self):
+        """FD at h=1×10⁻⁴ rad; planet_sky_position is smooth in inclination."""
+        h = 1e-4
+        jax_g = float(jax.grad(
+            lambda i: self._scalar(self._xyz(inclination=i))
+        )(jnp.float32(self._INC)))
+        fd = self._fd(
+            lambda i: self._scalar(self._xyz(inclination=float(i))),
+            self._INC, h,
+        )
+        self._check("inclination", jax_g, fd, h)
+
+    # ---- eccentricity -------------------------------------------------------
+
+    def test_ecc_gradient_finite_and_nonzero(self):
+        """
+        d(X+Y+Z)/d(ecc) at ecc=0.1, t=0.5 d (off mid-transit).
+        The orbital radius r = a(1−e²)/(1+e·cos f) depends on ecc through
+        both the Kepler solver and the radius formula.
+        """
+        g = float(jax.grad(
+            lambda e: self._scalar(self._xyz(t=0.5, ecc=e))
+        )(jnp.float32(0.1)))
+        assert np.isfinite(g), f"d/d(ecc) non-finite: {g}"
+        assert abs(g) > 0,     "d/d(ecc) is zero"
+
+    def test_ecc_gradient_fd_agreement(self):
+        """FD at h=0.01; planet_sky_position is smooth in eccentricity."""
+        h = 0.01
+        jax_g = float(jax.grad(
+            lambda e: self._scalar(self._xyz(t=0.5, ecc=e))
+        )(jnp.float32(0.1)))
+        fd = self._fd(
+            lambda e: self._scalar(self._xyz(t=0.5, ecc=float(e))),
+            0.1, h,
+        )
+        self._check("ecc", jax_g, fd, h)
+
+    # ---- argument of periastron --------------------------------------------
+
+    def test_omega_gradient_finite_and_nonzero(self):
+        """
+        d(X+Y+Z)/d(omega_peri) at ω=π/4, ecc=0.1, t=0.5 d.
+        For a circular orbit (ecc=0) ω cancels in the expression ω+f, so
+        ecc=0.1 is required to make the projected position depend on ω.
+        """
+        omega0 = jnp.float32(np.pi / 4.0)
+        g = float(jax.grad(
+            lambda w: self._scalar(self._xyz(t=0.5, ecc=0.1, omega_peri=w))
+        )(omega0))
+        assert np.isfinite(g), f"d/d(omega_peri) non-finite: {g}"
+        assert abs(g) > 0,     "d/d(omega_peri) is zero at ecc=0.1"
+
+    def test_omega_gradient_fd_agreement(self):
+        """FD at h=0.01 rad; planet_sky_position is smooth in omega_peri."""
+        omega0 = float(np.pi / 4.0)
+        h = 0.01
+        jax_g = float(jax.grad(
+            lambda w: self._scalar(self._xyz(t=0.5, ecc=0.1, omega_peri=w))
+        )(jnp.float32(omega0)))
+        fd = self._fd(
+            lambda w: self._scalar(self._xyz(t=0.5, ecc=0.1, omega_peri=float(w))),
+            omega0, h,
+        )
+        self._check("omega_peri", jax_g, fd, h)
