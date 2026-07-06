@@ -58,7 +58,7 @@ from __future__ import annotations
 
 import numpy as np
 import jax.numpy as jnp
-from jax import vmap, nn as jax_nn
+from jax import vmap
 
 
 # ---------------------------------------------------------------------------
@@ -269,7 +269,7 @@ def _compute_planet_mask(
 
     Returns
     -------
-    jnp.ndarray, shape (total_pixels,), dtype bool_
+    jnp.ndarray, shape (total_pixels,), dtype float32, values in {0, 1}
     """
     # Normalise pixel coordinates to stellar radii
     xn = x_disc / star_pixel_rad
@@ -278,13 +278,8 @@ def _compute_planet_mask(
     # Squared sky-plane distance from planet centre to each pixel
     d2 = (xn - X) ** 2 + (yn - Y) ** 2
 
-    # Soft disc mask: sigmoid boundary so gradients flow w.r.t. k and planet position.
-    # Transition width fixed at 1/10 pixel (matching _compute_ar_mask convention).
-    # Using 0.1*k instead caused a +~330 ppm systematic bias in transit depth for k~0.1
-    # because the ε²/r curvature correction is non-negligible when ε/r ~ 10%.
-    d = jnp.sqrt(d2 + 1e-8)
-    softness = 1.0 / (10.0 * star_pixel_rad)
-    disc_mask = jax_nn.sigmoid((k - d) / softness)
+    # Hard disc mask: pixel is occulted iff it lies within the planet disc.
+    disc_mask = (d2 < k ** 2).astype(jnp.float32)
 
     # Hard Z gate: planet in front of the star is topologically binary.
     z_gate = jnp.where(Z > 0.0, 1.0, 0.0)
