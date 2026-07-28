@@ -27,9 +27,6 @@ _compute_planet_mask
 
 LdcMode
     Type alias for supported limb-darkening laws.
-
-ArOverlapMode
-    Type alias for active-region overlap resolution rules.
 """
 
 from .core import (
@@ -40,7 +37,6 @@ from .core import (
     evaluate_light_curve,
     build_stellar_grid,
     LdcMode,
-    ArOverlapMode,
 )
 from .geometry import rotate_active_region
 
@@ -58,5 +54,4 @@ __all__ = [
     "rotate_active_region",
     "_compute_planet_mask",
     "LdcMode",
-    "ArOverlapMode",
 ]
