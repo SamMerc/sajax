@@ -14,16 +14,17 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
         with:
-          python-version: "3.11"
+          enable-cache: true
 
+      # --locked fails the build if uv.lock is out of date with pyproject.toml.
       - name: Install SAJAX and test dependencies
-        run: pip install -e ".[dev]"
+        run: ./setup_env.sh --cpu --locked
 
       - name: Run tests with coverage
-        run: pytest --cov --cov-branch --cov-report=xml
+        run: uv run --no-sync pytest --cov --cov-branch --cov-report=xml
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5

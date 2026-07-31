@@ -24,6 +24,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7", "pytest-cov", "jupyter", "ipykernel"]
+docs = ["sphinx>=7.0", "sphinx-book-theme", "myst-nb", "sphinx-copybutton", "sphinx-autoapi"]
+# Marker required: without it, resolving off Linux x86_64 backtracks to jax 0.4.21 instead of skipping.
+cuda = ["jax[cuda12]>=0.4; sys_platform == 'linux' and platform_machine == 'x86_64'"]
 
 [project.urls]
 Repository = "https://github.com/SamMerc/sajax"
