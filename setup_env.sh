@@ -50,7 +50,6 @@ fi
 # ---- Resolve the accelerator ------------------------------------------------
 detect_accel() {
     # A GPU counts as present only if nvidia-smi exists AND reports a device.
-    # Login nodes typically have neither; some have the binary but no hardware.
     if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L 2>/dev/null | grep -q "^GPU 0:"; then
         echo cuda
     else
@@ -129,7 +128,6 @@ if [[ "$ACCEL" == cuda ]]; then
     echo "  note: the CUDA runtime is ~3.1 GB on first install."
 fi
 
-# uv sync is exact: switching cpu<->gpu prunes and reinstalls the CUDA stack.
 uv sync $LOCK_MODE "${EXTRAS[@]}"
 
 report

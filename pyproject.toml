@@ -1,5 +1,7 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+# setuptools>=77 is required for the PEP 639 SPDX `license = "MIT"` string below;
+# earlier versions reject it and demand a {file}/{text} table.
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -24,8 +26,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7", "pytest-cov", "jupyter", "ipykernel"]
-docs = ["sphinx>=7.0", "sphinx-book-theme", "myst-nb", "sphinx-copybutton", "sphinx-autoapi"]
-# Marker required: without it, resolving off Linux x86_64 backtracks to jax 0.4.21 instead of skipping.
+# ipykernel: myst-nb executes the notebooks under docs/examples that ship without
+# stored outputs, which needs a Jupyter kernel at docs-build time.
+docs = ["sphinx>=7.0", "sphinx-book-theme", "myst-nb", "sphinx-copybutton", "sphinx-autoapi", "ipykernel"]
 cuda = ["jax[cuda12]>=0.4; sys_platform == 'linux' and platform_machine == 'x86_64'"]
 
 [project.urls]

@@ -22,5 +22,4 @@ environment with `uv run <cmd>` or `source .venv/bin/activate`.
 **Dependencies:** `numpy`, `jax`, `jaxlib`, `matplotlib`, `scipy`
 
 GPU support comes from the `cuda` extra (`pip install "sajax[cuda]"`, or
-`./setup_env.sh --gpu`), which is Linux x86_64 only and pulls in ~3 GB of
-NVIDIA runtime.
+`./setup_env.sh --gpu`).

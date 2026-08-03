@@ -37,8 +37,7 @@ cd sajax
 
 Useful flags: `--cpu` / `--gpu` to override the auto-detection (state `--gpu`
 explicitly when provisioning on a GPU-less HPC login node), `--docs` to add the
-sphinx dependencies, and `--check` to report what is already installed. The
-CUDA extra is Linux x86_64 only and pulls in ~3 GB of NVIDIA runtime.
+sphinx dependencies, and `--check` to report what is already installed. 
 
 Run commands in the environment with `uv run <cmd>` (e.g. `uv run pytest`), or
 activate it with `source .venv/bin/activate`.
