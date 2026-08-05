@@ -10,12 +10,10 @@ import pytest
 import jax
 import jax.numpy as jnp
 
-from sajax import compute_light_curve, build_stellar_grid
+from sajax import quick_lc, build_stellar_grid
 from sajax.core import (
-    build_model,
-    build_combined_model,
-    evaluate_light_curve,
-    compute_combined_light_curve,
+    build_system,
+    make_lc,
     _compute_planet_mask,
     _compute_ar_shape,
     _compute_single_phase,
@@ -28,6 +26,37 @@ C_KMS = 299_792.458  # speed of light [km/s]
 # exact shape of the AR boundary -- sharp enough to be visually spot-like.
 _SM = 20.0
 
+# build_system/quick_lc now require times+P_rot (a real time axis)
+# instead of a directly-given phases_rot array. Most tests below only ever
+# cared about a rotational phase snapshot, not real elapsed time, so this
+# holds a fixed reference P_rot and converts old phases_rot (degrees)
+# values into an equivalent times array, purely to keep those call sites
+# concise after the API change -- _t(phases_rot)/_P_ROT reconstructs
+# exactly the phases_rot that used to be passed directly.
+_P_ROT = 1.0
+
+def _t(phases_rot):
+    return np.atleast_1d(np.asarray(phases_rot, dtype=np.float64)) / 360.0 * _P_ROT
+
+
+def _quiet_baseline(wl, flux_quiet, base_params, times, stellar_grid_size=50, ve=0.0,
+                    ld_mode="quadratic"):
+    """Disc-integrated flux of the bare quiet star (no AR, no transit) at
+    each of ``times``. ``make_lc``/``quick_lc`` no longer normalise their
+    output to this internally, so tests that care about the pre-AR/-transit
+    baseline (rather than an assumed constant like 1.0) compute it directly
+    here -- passing ``flux_active=flux_quiet`` gives contrast exactly 1
+    everywhere regardless of the AR geometry, i.e. an exact quiet-star LC.
+    """
+    result = quick_lc(
+        wavelength=wl, flux_quiet=flux_quiet, flux_active=flux_quiet,
+        **base_params,
+        ar_lat=[0.0], ar_long=[0.0], ar_size=[1.0], ar_smoothness=[_SM],
+        times=times, P_rot=_P_ROT, stellar_grid_size=stellar_grid_size,
+        ve=ve, ld_mode=ld_mode,
+    )
+    return np.array(result[0])
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -37,7 +66,7 @@ _SM = 20.0
 def flat_spectra():
     """Flat spectra on a small wavelength grid — fast for tests.
 
-    Uses float64 throughout to match build_model's internal dtype.
+    Uses float64 throughout to match build_system's internal dtype.
     """
     wl         = np.linspace(500.0, 600.0, 30, dtype=np.float64)
     flux_quiet = np.ones_like(wl)
@@ -48,7 +77,7 @@ def flat_spectra():
 @pytest.fixture
 def base_params():
     return dict(
-        ldc_coeffs=[0.3, 0.1],   # quadratic law: [u1, u2]
+        ld_coeffs=[0.3, 0.1],   # quadratic law: [u1, u2]
         inc_star=90.0,
     )
 
@@ -57,14 +86,14 @@ def base_params():
 def small_model(flat_spectra, base_params):
     """Pre-built model for tests that need the two-stage API."""
     wl, flux_quiet, _ = flat_spectra
-    return build_model(
+    return build_system(
         wavelength=wl,
         flux_quiet=flux_quiet,
-        params=base_params,
-        phases_rot=np.linspace(0, 360, 8, endpoint=False),
+        **base_params,
+        times=_t(np.linspace(0, 360, 8, endpoint=False)), P_rot=_P_ROT,
         stellar_grid_size=50,
         ve=2.0,
-        ldc_mode="quadratic",
+        ld_mode="quadratic",
     )
 
 
@@ -138,43 +167,41 @@ class TestOutputShapes:
 
     def test_single_phase(self, flat_spectra, base_params):
         wl, flux_quiet, flux_active = flat_spectra
-        result = compute_light_curve(
+        result = quick_lc(
             wavelength=wl,
             flux_quiet=flux_quiet,
             flux_active=flux_active,
-            params=base_params,
+            **base_params,
             ar_lat=[20.0],
             ar_long=[0.0],
             ar_size=[10.0],
             ar_smoothness=[_SM],
-            phases_rot=[0.0],
+            times=_t([0.0]), P_rot=_P_ROT,
             stellar_grid_size=50,
             ve=2.0,
-            ldc_mode="quadratic",
+            ld_mode="quadratic",
         )
-        assert result["lc"].shape == (1, len(wl))
-        assert result["epsilon"].shape == (1, len(wl))
-        assert result["star_maps"].ndim == 3
+        assert result[0].shape == (1, len(wl))
+        assert result[1].ndim == 3
 
     def test_multi_phase(self, flat_spectra, base_params):
         wl, flux_quiet, flux_active = flat_spectra
         phases = np.linspace(0, 360, 8, endpoint=False)
-        result = compute_light_curve(
+        result = quick_lc(
             wavelength=wl,
             flux_quiet=flux_quiet,
             flux_active=flux_active,
-            params=base_params,
+            **base_params,
             ar_lat=[20.0],
             ar_long=[0.0],
             ar_size=[10.0],
             ar_smoothness=[_SM],
-            phases_rot=phases,
+            times=_t(phases), P_rot=_P_ROT,
             stellar_grid_size=50,
             ve=2.0,
         )
-        assert result["lc"].shape == (8, len(wl))
-        assert result["epsilon"].shape == (8, len(wl))
-        assert result["star_maps"].shape[0] == 8
+        assert result[0].shape == (8, len(wl))
+        assert result[1].shape[0] == 8
 
 
 # ===================================================================
@@ -184,87 +211,64 @@ class TestOutputShapes:
 class TestPhysics:
 
     def test_no_ar_flux_is_unity(self, flat_spectra, base_params):
-        """With a vanishingly small AR the light curve should be ~1."""
+        """With a vanishingly small AR the light curve should match the quiet-star baseline."""
         wl, flux_quiet, flux_active = flat_spectra
-        result = compute_light_curve(
+        baseline = _quiet_baseline(wl, flux_quiet, base_params, _t([0.0]))
+        result = quick_lc(
             wavelength=wl, flux_quiet=flux_quiet, flux_active=flux_active,
-            params=base_params,
+            **base_params,
             ar_lat=[0.0], ar_long=[0.0], ar_size=[0.001], ar_smoothness=[_SM],
-            phases_rot=[0.0], stellar_grid_size=50, ve=0.0, ldc_mode="quadratic",
+            times=_t([0.0]), P_rot=_P_ROT, stellar_grid_size=50, ve=0.0, ld_mode="quadratic",
         )
-        assert abs(float(result["lc"][0, 0]) - 1.0) < 0.01
+        assert abs(float(result[0][0, 0]) - float(baseline[0, 0])) < 0.01
 
     def test_cold_ar_dims_flux(self, flat_spectra, base_params):
-        """A visible cold AR should reduce the total flux."""
+        """A visible cold AR should reduce the total flux below the quiet-star baseline."""
         wl, flux_quiet, flux_active = flat_spectra
-        result = compute_light_curve(
+        baseline = _quiet_baseline(wl, flux_quiet, base_params, _t([0.0]))
+        result = quick_lc(
             wavelength=wl, flux_quiet=flux_quiet, flux_active=flux_active,
-            params=base_params,
+            **base_params,
             ar_lat=[0.0], ar_long=[0.0], ar_size=[20.0], ar_smoothness=[_SM],
-            phases_rot=[0.0], stellar_grid_size=50, ve=0.0, ldc_mode="quadratic",
+            times=_t([0.0]), P_rot=_P_ROT, stellar_grid_size=50, ve=0.0, ld_mode="quadratic",
         )
-        assert float(result["lc"][0, 0]) < 1.0
+        assert float(result[0][0, 0]) < float(baseline[0, 0])
 
     def test_hot_ar_brightens_flux(self, flat_spectra, base_params):
-        """A facula (flux_active > flux_quiet) should increase total flux."""
+        """A facula (flux_active > flux_quiet) should increase total flux above the quiet-star baseline."""
         wl, flux_quiet, _ = flat_spectra
         flux_facula = np.full_like(wl, 1.3)
-        result = compute_light_curve(
+        baseline = _quiet_baseline(wl, flux_quiet, base_params, _t([0.0]))
+        result = quick_lc(
             wavelength=wl, flux_quiet=flux_quiet, flux_active=flux_facula,
-            params=base_params,
+            **base_params,
             ar_lat=[0.0], ar_long=[0.0], ar_size=[20.0], ar_smoothness=[_SM],
-            phases_rot=[0.0], stellar_grid_size=50, ve=0.0, ldc_mode="quadratic",
+            times=_t([0.0]), P_rot=_P_ROT, stellar_grid_size=50, ve=0.0, ld_mode="quadratic",
         )
-        assert float(result["lc"][0, 0]) > 1.0
+        assert float(result[0][0, 0]) > float(baseline[0, 0])
 
     def test_far_side_ar_invisible(self, flat_spectra, base_params):
         """An AR on the far side of the star should not affect the flux."""
         wl, flux_quiet, flux_active = flat_spectra
-        result = compute_light_curve(
+        baseline = _quiet_baseline(wl, flux_quiet, base_params, _t([0.0]))
+        result = quick_lc(
             wavelength=wl, flux_quiet=flux_quiet, flux_active=flux_active,
-            params=base_params,
+            **base_params,
             ar_lat=[0.0], ar_long=[180.0], ar_size=[15.0], ar_smoothness=[_SM],
-            phases_rot=[0.0], stellar_grid_size=50, ve=0.0, ldc_mode="quadratic",
+            times=_t([0.0]), P_rot=_P_ROT, stellar_grid_size=50, ve=0.0, ld_mode="quadratic",
         )
-        assert abs(float(result["lc"][0, 0]) - 1.0) < 0.01
+        assert abs(float(result[0][0, 0]) - float(baseline[0, 0])) < 0.01
 
     def test_light_curve_is_periodic(self, flat_spectra, base_params):
         """LC at phase=0 should equal LC at phase=360."""
         wl, flux_quiet, flux_active = flat_spectra
-        result = compute_light_curve(
+        result = quick_lc(
             wavelength=wl, flux_quiet=flux_quiet, flux_active=flux_active,
-            params=base_params,
+            **base_params,
             ar_lat=[20.0], ar_long=[45.0], ar_size=[10.0], ar_smoothness=[_SM],
-            phases_rot=[0.0, 360.0], stellar_grid_size=50, ve=2.0, ldc_mode="quadratic",
+            times=_t([0.0, 360.0]), P_rot=_P_ROT, stellar_grid_size=50, ve=2.0, ld_mode="quadratic",
         )
-        np.testing.assert_allclose(result["lc"][0], result["lc"][1], rtol=1e-5)
-
-    def test_epsilon_unity_without_ar(self, flat_spectra, base_params):
-        """Contamination factor should be ~1 everywhere with no AR."""
-        wl, flux_quiet, flux_active = flat_spectra
-        result = compute_light_curve(
-            wavelength=wl, flux_quiet=flux_quiet, flux_active=flux_active,
-            params=base_params,
-            ar_lat=[0.0], ar_long=[0.0], ar_size=[0.001], ar_smoothness=[_SM],
-            phases_rot=[0.0], stellar_grid_size=50, ve=0.0,
-        )
-        np.testing.assert_allclose(
-            result["epsilon"][0], 1.0, atol=0.01,
-            err_msg="epsilon should be ~1 when no AR is visible",
-        )
-
-    def test_epsilon_gt_one_for_cold_ar(self, flat_spectra, base_params):
-        """ε = F_quiet / F_spotted > 1 when the AR dims the star."""
-        wl, flux_quiet, flux_active = flat_spectra
-        result = compute_light_curve(
-            wavelength=wl, flux_quiet=flux_quiet, flux_active=flux_active,
-            params=base_params,
-            ar_lat=[0.0], ar_long=[0.0], ar_size=[20.0], ar_smoothness=[_SM],
-            phases_rot=[0.0], stellar_grid_size=50, ve=0.0,
-        )
-        assert np.all(result["epsilon"][0] > 1.0), (
-            "epsilon should be > 1 for a cold AR (flux_active < flux_quiet)"
-        )
+        np.testing.assert_allclose(result[0][0], result[0][1], rtol=1e-5)
 
 
 # ===================================================================
@@ -276,15 +280,15 @@ class TestMultiAR:
     def test_multi_ar_shapes(self, flat_spectra, base_params):
         """Two ARs should work and return correct shapes."""
         wl, flux_quiet, flux_active = flat_spectra
-        result = compute_light_curve(
+        result = quick_lc(
             wavelength=wl, flux_quiet=flux_quiet, flux_active=flux_active,
-            params=base_params,
+            **base_params,
             ar_lat=[20.0, -20.0], ar_long=[0.0, 180.0], ar_size=[10.0, 10.0],
             ar_smoothness=[_SM, _SM],
-            phases_rot=np.linspace(0, 360, 6, endpoint=False),
+            times=_t(np.linspace(0, 360, 6, endpoint=False)), P_rot=_P_ROT,
             stellar_grid_size=50, ve=2.0,
         )
-        assert result["lc"].shape == (6, len(wl))
+        assert result[0].shape == (6, len(wl))
 
     def test_per_ar_spectra(self, flat_spectra, base_params):
         """Each AR can have its own spectrum: flux_active shape (nar, nwave)."""
@@ -296,15 +300,15 @@ class TestMultiAR:
             np.full(nwave, 1.2),    # facula
         ])  # (3, nwave)
 
-        result = compute_light_curve(
+        result = quick_lc(
             wavelength=wl, flux_quiet=flux_quiet, flux_active=flux_active_multi,
-            params=base_params,
+            **base_params,
             ar_lat=[10.0, -10.0, 30.0], ar_long=[0.0, 60.0, 120.0],
             ar_size=[8.0, 8.0, 8.0], ar_smoothness=[_SM, _SM, _SM],
-            phases_rot=[0.0, 90.0], stellar_grid_size=50, ve=1.0,
+            times=_t([0.0, 90.0]), P_rot=_P_ROT, stellar_grid_size=50, ve=1.0,
         )
-        assert result["lc"].shape == (2, len(wl))
-        assert np.all(np.isfinite(result["lc"]))
+        assert result[0].shape == (2, len(wl))
+        assert np.all(np.isfinite(result[0]))
 
 
 # ===================================================================
@@ -326,21 +330,21 @@ class TestAROverlapCompounding:
     ):
         wl, flux_quiet, _ = flat_spectra
         nwave = len(wl)
-        combined = compute_light_curve(
+        combined = quick_lc(
             wavelength=wl, flux_quiet=flux_quiet,
             flux_active=np.stack([np.full(nwave, 0.3), np.full(nwave, 0.7)]),
-            params=base_params,
+            **base_params,
             ar_lat=[0.0, 0.0], ar_long=[0.0, 0.0], ar_size=[15.0, 15.0],
             ar_smoothness=[50.0, 50.0],
-            phases_rot=[0.0], stellar_grid_size=50, ve=0.0,
+            times=_t([0.0]), P_rot=_P_ROT, stellar_grid_size=50, ve=0.0,
         )
-        shallower_alone = compute_light_curve(
+        shallower_alone = quick_lc(
             wavelength=wl, flux_quiet=flux_quiet, flux_active=np.full((1, nwave), 0.7),
-            params=base_params,
+            **base_params,
             ar_lat=[0.0], ar_long=[0.0], ar_size=[15.0], ar_smoothness=[50.0],
-            phases_rot=[0.0], stellar_grid_size=50, ve=0.0,
+            times=_t([0.0]), P_rot=_P_ROT, stellar_grid_size=50, ve=0.0,
         )
-        assert float(combined["lc"][0, 0]) < float(shallower_alone["lc"][0, 0]), (
+        assert float(combined[0][0, 0]) < float(shallower_alone[0][0, 0]), (
             "overlapping components should compound, giving a deeper dip "
             "than either component alone"
         )
@@ -352,17 +356,17 @@ class TestAROverlapCompounding:
         """
         wl = np.array([550.0])
         flux_quiet = np.array([1.0])
-        params = dict(ldc_coeffs=[0.0, 0.0], inc_star=90.0)
-        model = build_model(
-            wavelength=wl, flux_quiet=flux_quiet, params=params,
-            phases_rot=np.array([0.0]), stellar_grid_size=60, ve=0.0,
+        params = dict(ld_coeffs=[0.0, 0.0], inc_star=90.0)
+        model = build_system(
+            wavelength=wl, flux_quiet=flux_quiet, **params,
+            times=_t(np.array([0.0])), P_rot=_P_ROT, stellar_grid_size=60, ve=0.0,
         )
         flux_active = jnp.array([[0.3], [0.7]])
-        result = evaluate_light_curve(
+        result = make_lc(
             model, flux_active, jnp.array([0.0, 0.0]), jnp.array([0.0, 0.0]),
             jnp.array([15.0, 15.0]), jnp.array([50.0, 50.0]),
         )
-        star_map = np.array(result["star_maps"][0])
+        star_map = np.array(result[1][0])
         centre = star_map.shape[0] // 2
         expected = 1.0 - ((1 - 0.3) + (1 - 0.7))
         assert abs(star_map[centre, centre] - expected) < 1e-4
@@ -371,22 +375,22 @@ class TestAROverlapCompounding:
         """Two well-separated ARs shouldn't measurably interact."""
         wl, flux_quiet, _ = flat_spectra
         nwave = len(wl)
-        combined = compute_light_curve(
+        combined = quick_lc(
             wavelength=wl, flux_quiet=flux_quiet,
             flux_active=np.stack([np.full(nwave, 0.3), np.full(nwave, 1.5)]),
-            params=base_params,
+            **base_params,
             ar_lat=[0.0, 0.0], ar_long=[0.0, 180.0], ar_size=[10.0, 10.0],
             ar_smoothness=[_SM, _SM],
-            phases_rot=[0.0], stellar_grid_size=50, ve=0.0,
+            times=_t([0.0]), P_rot=_P_ROT, stellar_grid_size=50, ve=0.0,
         )
-        cold_alone = compute_light_curve(
+        cold_alone = quick_lc(
             wavelength=wl, flux_quiet=flux_quiet, flux_active=np.full((1, nwave), 0.3),
-            params=base_params,
+            **base_params,
             ar_lat=[0.0], ar_long=[0.0], ar_size=[10.0], ar_smoothness=[_SM],
-            phases_rot=[0.0], stellar_grid_size=50, ve=0.0,
+            times=_t([0.0]), P_rot=_P_ROT, stellar_grid_size=50, ve=0.0,
         )
         np.testing.assert_allclose(
-            combined["lc"][0], cold_alone["lc"][0], rtol=1e-3,
+            combined[0][0], cold_alone[0][0], rtol=1e-3,
             err_msg="far-side AR should not measurably affect the near-side AR",
         )
 
@@ -397,27 +401,26 @@ class TestAROverlapCompounding:
 
 class TestLDCModes:
 
-    @pytest.mark.parametrize("ldc_mode,ldc_coeffs", [
+    @pytest.mark.parametrize("ld_mode,ld_coeffs", [
         ("linear",      [0.3]),
         ("quadratic",   [0.3, 0.1]),
         ("power2",      [0.4, 0.6]),
         ("kipping3",    [0.2, 0.3, 0.1]),
         ("nonlinear4",  [0.1, 0.2, 0.15, 0.05]),
     ])
-    def test_analytic_ldc_modes(
-        self, flat_spectra, base_params, ldc_mode, ldc_coeffs
+    def test_analytic_ld_modes(
+        self, flat_spectra, base_params, ld_mode, ld_coeffs
     ):
         wl, flux_quiet, flux_active = flat_spectra
-        params = {**base_params, "ldc_coeffs": ldc_coeffs}
-        result = compute_light_curve(
+        params = {**base_params, "ld_coeffs": ld_coeffs}
+        result = quick_lc(
             wavelength=wl, flux_quiet=flux_quiet, flux_active=flux_active,
-            params=params,
+            **params,
             ar_lat=[15.0], ar_long=[0.0], ar_size=[8.0], ar_smoothness=[_SM],
-            phases_rot=[0.0, 90.0], stellar_grid_size=50, ve=1.0, ldc_mode=ldc_mode,
+            times=_t([0.0, 90.0]), P_rot=_P_ROT, stellar_grid_size=50, ve=1.0, ld_mode=ld_mode,
         )
-        assert result["lc"].shape == (2, len(wl))
-        assert np.all(np.isfinite(result["lc"]))
-        assert np.all(np.isfinite(result["epsilon"]))
+        assert result[0].shape == (2, len(wl))
+        assert np.all(np.isfinite(result[0]))
 
     def test_intensity_profile_mode(self, flat_spectra):
         wl, flux_quiet, flux_active = flat_spectra
@@ -426,78 +429,79 @@ class TestLDCModes:
         I_profile = np.tile(mu_pts, (nwave, 1))  # (nwave, 50)
 
         params = dict(inc_star=90.0, mu_profile=mu_pts, I_profile=I_profile)
-        result = compute_light_curve(
+        result = quick_lc(
             wavelength=wl, flux_quiet=flux_quiet, flux_active=flux_active,
-            params=params,
+            **params,
             ar_lat=[0.0], ar_long=[0.0], ar_size=[10.0], ar_smoothness=[_SM],
-            phases_rot=[0.0], stellar_grid_size=50, ve=0.0, ldc_mode="intensity_profile",
+            times=_t([0.0]), P_rot=_P_ROT, stellar_grid_size=50, ve=0.0, ld_mode="intensity_profile",
         )
-        assert result["lc"].shape == (1, nwave)
-        assert np.all(np.isfinite(result["lc"]))
+        assert result[0].shape == (1, nwave)
+        assert np.all(np.isfinite(result[0]))
 
-    def test_legacy_u1_u2_keys(self, flat_spectra):
+    def test_quadratic_ld_coeffs_as_plain_list(self, flat_spectra):
+        """ld_coeffs=[u1, u2] works directly for the quadratic law -- no
+        dict/legacy-key indirection needed now that it's a plain kwarg."""
         wl, flux_quiet, flux_active = flat_spectra
-        params = dict(inc_star=90.0, u1=0.3, u2=0.1)
-        result = compute_light_curve(
+        result = quick_lc(
             wavelength=wl, flux_quiet=flux_quiet, flux_active=flux_active,
-            params=params,
+            inc_star=90.0, ld_coeffs=[0.3, 0.1],
             ar_lat=[10.0], ar_long=[0.0], ar_size=[8.0], ar_smoothness=[_SM],
-            phases_rot=[0.0], stellar_grid_size=50, ve=0.0, ldc_mode="quadratic",
+            times=_t([0.0]), P_rot=_P_ROT, stellar_grid_size=50, ve=0.0, ld_mode="quadratic",
         )
-        assert np.all(np.isfinite(result["lc"]))
+        assert np.all(np.isfinite(result[0]))
 
     def test_per_wavelength_ldc(self, flat_spectra):
         wl, flux_quiet, flux_active = flat_spectra
         nwave = len(wl)
         params = dict(
             inc_star=90.0,
-            ldc_coeffs=[np.linspace(0.2, 0.5, nwave), np.linspace(0.05, 0.2, nwave)],
+            ld_coeffs=[np.linspace(0.2, 0.5, nwave), np.linspace(0.05, 0.2, nwave)],
         )
-        result = compute_light_curve(
+        result = quick_lc(
             wavelength=wl, flux_quiet=flux_quiet, flux_active=flux_active,
-            params=params,
+            **params,
             ar_lat=[10.0], ar_long=[0.0], ar_size=[10.0], ar_smoothness=[_SM],
-            phases_rot=[0.0], stellar_grid_size=50, ve=0.0, ldc_mode="quadratic",
+            times=_t([0.0]), P_rot=_P_ROT, stellar_grid_size=50, ve=0.0, ld_mode="quadratic",
         )
-        assert np.all(np.isfinite(result["lc"]))
+        assert np.all(np.isfinite(result[0]))
 
     def test_per_ar_ldc_differs_from_quiet(self, flat_spectra, base_params):
         """An AR with different LDC coefficients than quiet must give a
         different light curve than the default (quiet's own coefficients)."""
         wl, flux_quiet, _ = flat_spectra
         nwave = len(wl)
-        model = build_model(
-            wavelength=wl, flux_quiet=flux_quiet, params=base_params,
-            phases_rot=np.array([0.0]), stellar_grid_size=50, ve=0.0,
+        model = build_system(
+            wavelength=wl, flux_quiet=flux_quiet, **base_params,
+            times=_t(np.array([0.0])), P_rot=_P_ROT, stellar_grid_size=50, ve=0.0,
         )
         common = dict(
             flux_active=jnp.asarray(np.full((1, nwave), 0.5)),
             ar_lat=jnp.array([0.0]), ar_long=jnp.array([0.0]),
             ar_size=jnp.array([15.0]), ar_smoothness=jnp.array([_SM]),
         )
-        default_result = evaluate_light_curve(model, **common)
+        default_result = make_lc(model, **common)
         custom_ldc = jnp.asarray(np.tile([0.9, 0.05], (nwave, 1))[None, :, :])
-        custom_result = evaluate_light_curve(model, **common, ldc_coeffs_active=custom_ldc)
-        assert not np.allclose(default_result["lc"], custom_result["lc"])
+        custom_result = make_lc(model, **common, ld_coeffs_active=custom_ldc)
+        assert not np.allclose(default_result[0], custom_result[0])
 
     def test_default_ar_ldc_matches_quiet(self, flat_spectra, base_params):
-        """Omitting ldc_coeffs_active must exactly match explicitly passing
+        """Omitting ld_coeffs_active must exactly match explicitly passing
         the quiet photosphere's own coefficients, broadcast to all ARs."""
         wl, flux_quiet, _ = flat_spectra
         nwave = len(wl)
-        model = build_model(
-            wavelength=wl, flux_quiet=flux_quiet, params=base_params,
-            phases_rot=np.array([0.0]), stellar_grid_size=50, ve=0.0,
+        model = build_system(
+            wavelength=wl, flux_quiet=flux_quiet, **base_params,
+            times=_t(np.array([0.0])), P_rot=_P_ROT, stellar_grid_size=50, ve=0.0,
         )
         common = dict(
             flux_active=jnp.asarray(np.full((1, nwave), 0.5)),
             ar_lat=jnp.array([0.0]), ar_long=jnp.array([0.0]),
             ar_size=jnp.array([15.0]), ar_smoothness=jnp.array([_SM]),
         )
-        r_default = evaluate_light_curve(model, **common)
-        explicit_quiet_ldc = jnp.broadcast_to(model["ldc_coeffs"][None, :, :], (1, nwave, 2))
-        r_explicit = evaluate_light_curve(model, **common, ldc_coeffs_active=explicit_quiet_ldc)
-        np.testing.assert_allclose(r_default["lc"], r_explicit["lc"], rtol=1e-6)
+        r_default = make_lc(model, **common)
+        explicit_quiet_ldc = jnp.broadcast_to(model["ld_coeffs"][None, :, :], (1, nwave, 2))
+        r_explicit = make_lc(model, **common, ld_coeffs_active=explicit_quiet_ldc)
+        np.testing.assert_allclose(r_default[0], r_explicit[0], rtol=1e-6)
 
 
 # ===================================================================
@@ -506,22 +510,22 @@ class TestLDCModes:
 
 class TestInputValidation:
 
-    def test_invalid_ldc_mode_raises_valueerror(self, flat_spectra):
+    def test_invalid_ld_mode_raises_valueerror(self, flat_spectra):
         wl, flux_quiet, flux_active = flat_spectra
-        params = dict(inc_star=90.0, ldc_coeffs=[0.3])
-        with pytest.raises(ValueError, match="ldc_mode"):
-            build_model(
-                wavelength=wl, flux_quiet=flux_quiet, params=params,
-                phases_rot=[0.0], stellar_grid_size=50, ve=0.0, ldc_mode="banana",
+        params = dict(inc_star=90.0, ld_coeffs=[0.3])
+        with pytest.raises(ValueError, match="ld_mode"):
+            build_system(
+                wavelength=wl, flux_quiet=flux_quiet, **params,
+                times=_t([0.0]), P_rot=_P_ROT, stellar_grid_size=50, ve=0.0, ld_mode="banana",
             )
 
-    def test_wrong_number_of_ldc_coeffs_raises(self, flat_spectra):
+    def test_wrong_number_of_ld_coeffs_raises(self, flat_spectra):
         wl, flux_quiet, flux_active = flat_spectra
-        params = dict(inc_star=90.0, ldc_coeffs=[0.3, 0.1])
+        params = dict(inc_star=90.0, ld_coeffs=[0.3, 0.1])
         with pytest.raises(ValueError, match="coefficient"):
-            build_model(
-                wavelength=wl, flux_quiet=flux_quiet, params=params,
-                phases_rot=[0.0], stellar_grid_size=50, ve=0.0, ldc_mode="nonlinear4",
+            build_system(
+                wavelength=wl, flux_quiet=flux_quiet, **params,
+                times=_t([0.0]), P_rot=_P_ROT, stellar_grid_size=50, ve=0.0, ld_mode="nonlinear4",
             )
 
     def test_non_monotonic_mu_profile_raises(self, flat_spectra):
@@ -530,15 +534,15 @@ class TestInputValidation:
         bad_mu = np.array([0.0, 0.5, 0.3, 1.0])
         params = dict(inc_star=90.0, mu_profile=bad_mu, I_profile=np.ones((nwave, len(bad_mu))))
         with pytest.raises(ValueError, match="mu_profile.*increasing"):
-            build_model(
-                wavelength=wl, flux_quiet=flux_quiet, params=params,
-                phases_rot=[0.0], stellar_grid_size=50, ve=0.0, ldc_mode="intensity_profile",
+            build_system(
+                wavelength=wl, flux_quiet=flux_quiet, **params,
+                times=_t([0.0]), P_rot=_P_ROT, stellar_grid_size=50, ve=0.0, ld_mode="intensity_profile",
             )
 
     def test_flux_active_shape_mismatch_raises(self, small_model):
         wrong_flux = jnp.ones(5)
         with pytest.raises(ValueError, match="flux_active"):
-            evaluate_light_curve(
+            make_lc(
                 small_model, flux_active=wrong_flux,
                 ar_lat=jnp.array([0.0]), ar_long=jnp.array([0.0]),
                 ar_size=jnp.array([10.0]), ar_smoothness=jnp.array([_SM]),
@@ -548,7 +552,7 @@ class TestInputValidation:
         nwave = small_model["nwave"]
         wrong_flux = jnp.ones((5, nwave))
         with pytest.raises(ValueError, match="flux_active"):
-            evaluate_light_curve(
+            make_lc(
                 small_model, flux_active=wrong_flux,
                 ar_lat=jnp.array([0.0]), ar_long=jnp.array([0.0]),
                 ar_size=jnp.array([10.0]), ar_smoothness=jnp.array([_SM]),
@@ -557,82 +561,72 @@ class TestInputValidation:
     def test_ar_smoothness_shape_mismatch_raises(self, small_model):
         nwave = small_model["nwave"]
         with pytest.raises(ValueError, match="ar_smoothness"):
-            evaluate_light_curve(
+            make_lc(
                 small_model, flux_active=jnp.ones((2, nwave)),
                 ar_lat=jnp.array([0.0, 10.0]), ar_long=jnp.array([0.0, 10.0]),
                 ar_size=jnp.array([10.0, 10.0]),
                 ar_smoothness=jnp.array([1.0, 2.0, 3.0]),  # wrong size
             )
 
-    def test_ldc_coeffs_active_shape_mismatch_raises(self, small_model):
+    def test_ld_coeffs_active_shape_mismatch_raises(self, small_model):
         nwave = small_model["nwave"]
-        with pytest.raises(ValueError, match="ldc_coeffs_active"):
-            evaluate_light_curve(
+        with pytest.raises(ValueError, match="ld_coeffs_active"):
+            make_lc(
                 small_model, flux_active=jnp.ones((1, nwave)),
                 ar_lat=jnp.array([0.0]), ar_long=jnp.array([0.0]),
                 ar_size=jnp.array([10.0]), ar_smoothness=jnp.array([_SM]),
-                ldc_coeffs_active=jnp.ones((1, nwave, 5)),  # wrong n_coeffs (quadratic expects 2)
+                ld_coeffs_active=jnp.ones((1, nwave, 5)),  # wrong n_coeffs (quadratic expects 2)
             )
 
-    def test_ldc_coeffs_wavelength_length_mismatch_raises(self, flat_spectra):
+    def test_ld_coeffs_wavelength_length_mismatch_raises(self, flat_spectra):
         wl, flux_quiet, _ = flat_spectra
-        params = dict(inc_star=90.0, ldc_coeffs=[np.ones(5), np.ones(5)])
+        params = dict(inc_star=90.0, ld_coeffs=[np.ones(5), np.ones(5)])
         with pytest.raises(ValueError, match="wavelength grid"):
-            build_model(
-                wavelength=wl, flux_quiet=flux_quiet, params=params,
-                phases_rot=[0.0], stellar_grid_size=50, ve=0.0, ldc_mode="quadratic",
+            build_system(
+                wavelength=wl, flux_quiet=flux_quiet, **params,
+                times=_t([0.0]), P_rot=_P_ROT, stellar_grid_size=50, ve=0.0, ld_mode="quadratic",
             )
 
-    def test_missing_ldc_coeffs_raises(self, flat_spectra):
+    def test_missing_ld_coeffs_raises(self, flat_spectra):
         wl, flux_quiet, _ = flat_spectra
         params = dict(inc_star=90.0)
-        with pytest.raises(ValueError, match="ldc_coeffs"):
-            build_model(
-                wavelength=wl, flux_quiet=flux_quiet, params=params,
-                phases_rot=[0.0], stellar_grid_size=50, ve=0.0, ldc_mode="power2",
+        with pytest.raises(ValueError, match="ld_coeffs"):
+            build_system(
+                wavelength=wl, flux_quiet=flux_quiet, **params,
+                times=_t([0.0]), P_rot=_P_ROT, stellar_grid_size=50, ve=0.0, ld_mode="power2",
             )
 
     def test_invalid_oversample_raises(self, flat_spectra, base_params):
         wl, flux_quiet, _ = flat_spectra
         with pytest.raises(ValueError, match="oversample"):
-            build_model(
-                wavelength=wl, flux_quiet=flux_quiet, params=base_params,
-                phases_rot=[0.0], stellar_grid_size=50, ve=0.0, oversample=0,
+            build_system(
+                wavelength=wl, flux_quiet=flux_quiet, **base_params,
+                times=_t([0.0]), P_rot=_P_ROT, stellar_grid_size=50, ve=0.0, oversample=0,
             )
 
 
 # ===================================================================
-# Contamination factor edge cases
+# Active-region edge cases
 # ===================================================================
 
 class TestContaminationEdgeCases:
 
-    def test_epsilon_finite_for_normal_ar(self, flat_spectra, base_params):
-        wl, flux_quiet, flux_active = flat_spectra
-        result = compute_light_curve(
-            wavelength=wl, flux_quiet=flux_quiet, flux_active=flux_active,
-            params=base_params,
-            ar_lat=[0.0], ar_long=[0.0], ar_size=[15.0], ar_smoothness=[_SM],
-            phases_rot=[0.0], stellar_grid_size=50, ve=0.0,
-        )
-        assert np.all(np.isfinite(result["epsilon"]))
-
-    def test_epsilon_handles_totally_dark_ar(self, flat_spectra, base_params):
-        """A totally dark AR covering almost the whole disc shouldn't crash;
-        epsilon may be very large or nan where bin_flux -> 0, by design."""
+    def test_totally_dark_ar_does_not_crash(self, flat_spectra, base_params):
+        """A totally dark AR covering almost the whole disc shouldn't crash."""
         wl, flux_quiet, _ = flat_spectra
         flux_dark = np.zeros_like(wl)
-        result = compute_light_curve(
+        result = quick_lc(
             wavelength=wl, flux_quiet=flux_quiet, flux_active=flux_dark,
-            params=base_params,
+            **base_params,
             ar_lat=[0.0], ar_long=[0.0], ar_size=[89.0], ar_smoothness=[_SM],
-            phases_rot=[0.0], stellar_grid_size=50, ve=0.0,
+            times=_t([0.0]), P_rot=_P_ROT, stellar_grid_size=50, ve=0.0,
         )
-        assert result["epsilon"].shape == (1, len(wl))
+        assert result[0].shape == (1, len(wl))
+        assert np.all(np.isfinite(result[0]))
 
 
 # ===================================================================
-# Two-stage API (build_model + evaluate_light_curve)
+# Two-stage API (build_system + make_lc)
 # ===================================================================
 
 class TestTwoStageAPI:
@@ -641,40 +635,39 @@ class TestTwoStageAPI:
         wl, flux_quiet, flux_active = flat_spectra
         phases = np.linspace(0, 360, 6, endpoint=False)
 
-        result_one = compute_light_curve(
+        result_one = quick_lc(
             wavelength=wl, flux_quiet=flux_quiet, flux_active=flux_active,
-            params=base_params,
+            **base_params,
             ar_lat=[15.0], ar_long=[30.0], ar_size=[10.0], ar_smoothness=[_SM],
-            phases_rot=phases, stellar_grid_size=50, ve=2.0,
+            times=_t(phases), P_rot=_P_ROT, stellar_grid_size=50, ve=2.0,
         )
 
-        model = build_model(
-            wavelength=wl, flux_quiet=flux_quiet, params=base_params,
-            phases_rot=phases, stellar_grid_size=50, ve=2.0,
+        model = build_system(
+            wavelength=wl, flux_quiet=flux_quiet, **base_params,
+            times=_t(phases), P_rot=_P_ROT, stellar_grid_size=50, ve=2.0,
         )
-        result_two = evaluate_light_curve(
+        result_two = make_lc(
             model,
             flux_active=jnp.asarray(flux_active),
             ar_lat=jnp.array([15.0]), ar_long=jnp.array([30.0]),
             ar_size=jnp.array([10.0]), ar_smoothness=jnp.array([_SM]),
         )
 
-        np.testing.assert_allclose(result_one["lc"], np.array(result_two["lc"]), rtol=1e-5)
-        np.testing.assert_allclose(result_one["epsilon"], np.array(result_two["epsilon"]), rtol=1e-5)
+        np.testing.assert_allclose(result_one[0], np.array(result_two[0]), rtol=1e-5)
 
     def test_evaluate_reusable_with_different_ar_params(self, small_model):
         nwave = small_model["nwave"]
-        result_a = evaluate_light_curve(
+        result_a = make_lc(
             small_model, flux_active=jnp.ones(nwave) * 0.5,
             ar_lat=jnp.array([0.0]), ar_long=jnp.array([0.0]),
             ar_size=jnp.array([10.0]), ar_smoothness=jnp.array([_SM]),
         )
-        result_b = evaluate_light_curve(
+        result_b = make_lc(
             small_model, flux_active=jnp.ones(nwave) * 0.9,
             ar_lat=jnp.array([45.0]), ar_long=jnp.array([90.0]),
             ar_size=jnp.array([5.0]), ar_smoothness=jnp.array([_SM]),
         )
-        assert not np.allclose(np.array(result_a["lc"]), np.array(result_b["lc"]))
+        assert not np.allclose(np.array(result_a[0]), np.array(result_b[0]))
 
 
 # ===================================================================
@@ -685,19 +678,19 @@ def test_oversample_smooths_light_curve():
     wavelength = np.array([550.0])
     flux_quiet = np.array([1.0])
     flux_active = np.array([[0.7]])
-    params = dict(ldc_coeffs=[0.4, 0.2], inc_star=90.0)
+    params = dict(ld_coeffs=[0.4, 0.2], inc_star=90.0)
     phases = np.linspace(0, 360, 500, endpoint=False)
 
     common = dict(
         wavelength=wavelength, flux_quiet=flux_quiet, flux_active=flux_active,
-        params=params,
+        **params,
         ar_lat=[20.0], ar_long=[5.0], ar_size=[11.0], ar_smoothness=[_SM],
-        phases_rot=phases, stellar_grid_size=100, ve=2.0, ldc_mode="quadratic",
+        times=_t(phases), P_rot=_P_ROT, stellar_grid_size=100, ve=2.0, ld_mode="quadratic",
     )
 
-    # Single wavelength bin here -- squeeze lc down to one value per phase.
-    lc_no_os = np.asarray(compute_light_curve(**common, oversample=1)["lc"])[:, 0]
-    lc_os3   = np.asarray(compute_light_curve(**common, oversample=3)["lc"])[:, 0]
+    # Single wavelength bin here -- lc is already squeezed to (nphase,).
+    lc_no_os = np.asarray(quick_lc(**common, oversample=1)[0])
+    lc_os3   = np.asarray(quick_lc(**common, oversample=3)[0])
 
     assert lc_no_os.shape == lc_os3.shape
 
@@ -714,28 +707,28 @@ def test_oversample_1_is_identity():
     wavelength = np.array([550.0])
     flux_quiet = np.array([1.0])
     flux_active = np.array([[0.7]])
-    params = dict(ldc_coeffs=[0.4, 0.2], inc_star=90.0)
+    params = dict(ld_coeffs=[0.4, 0.2], inc_star=90.0)
     phases = np.linspace(0, 360, 100, endpoint=False)
 
     common = dict(
         wavelength=wavelength, flux_quiet=flux_quiet, flux_active=flux_active,
-        params=params,
+        **params,
         ar_lat=[20.0], ar_long=[5.0], ar_size=[11.0], ar_smoothness=[_SM],
-        phases_rot=phases, stellar_grid_size=80, ve=2.0,
+        times=_t(phases), P_rot=_P_ROT, stellar_grid_size=80, ve=2.0,
     )
 
-    lc_default = compute_light_curve(**common)["lc"]
-    lc_os1     = compute_light_curve(**common, oversample=1)["lc"]
+    lc_default = quick_lc(**common)[0]
+    lc_os1     = quick_lc(**common, oversample=1)[0]
 
     np.testing.assert_array_equal(lc_default, lc_os1)
 
 
 def test_oversample_invalid_value():
     with pytest.raises(ValueError, match="oversample"):
-        build_model(
+        build_system(
             wavelength=np.array([550.0]), flux_quiet=np.array([1.0]),
-            params=dict(ldc_coeffs=[0.4, 0.2]),
-            phases_rot=np.linspace(0, 360, 10),
+            **dict(ld_coeffs=[0.4, 0.2]),
+            times=_t(np.linspace(0, 360, 10)), P_rot=_P_ROT,
             stellar_grid_size=50, ve=2.0, oversample=0,
         )
 
@@ -744,21 +737,20 @@ def test_oversample_preserves_shape():
     wavelength = np.array([550.0])
     flux_quiet = np.array([1.0])
     flux_active = np.array([[0.7]])
-    params = dict(ldc_coeffs=[0.4, 0.2], inc_star=90.0)
+    params = dict(ld_coeffs=[0.4, 0.2], inc_star=90.0)
     phases = np.linspace(0, 360, 50, endpoint=False)
 
     common = dict(
         wavelength=wavelength, flux_quiet=flux_quiet, flux_active=flux_active,
-        params=params,
+        **params,
         ar_lat=[20.0], ar_long=[5.0], ar_size=[11.0], ar_smoothness=[_SM],
-        phases_rot=phases, stellar_grid_size=80, ve=2.0,
+        times=_t(phases), P_rot=_P_ROT, stellar_grid_size=80, ve=2.0,
     )
 
     for os_factor in [1, 3, 5]:
-        result = compute_light_curve(**common, oversample=os_factor)
-        assert result["lc"].shape == (50, 1)
-        assert result["epsilon"].shape[0] == 50
-        assert result["star_maps"].shape[0] == 50
+        result = quick_lc(**common, oversample=os_factor)
+        assert result[0].shape == (50,)
+        assert result[1].shape[0] == 50
 
 
 # ===================================================================
@@ -770,60 +762,62 @@ class TestNumericalEdgeCases:
     def test_ar_at_pole(self, flat_spectra, base_params):
         wl, flux_quiet, flux_active = flat_spectra
         for lat in [90.0, -90.0]:
-            result = compute_light_curve(
+            result = quick_lc(
                 wavelength=wl, flux_quiet=flux_quiet, flux_active=flux_active,
-                params=base_params,
+                **base_params,
                 ar_lat=[lat], ar_long=[0.0], ar_size=[10.0], ar_smoothness=[_SM],
-                phases_rot=[0.0], stellar_grid_size=50, ve=0.0,
+                times=_t([0.0]), P_rot=_P_ROT, stellar_grid_size=50, ve=0.0,
             )
-            assert np.all(np.isfinite(result["lc"]))
+            assert np.all(np.isfinite(result[0]))
 
     def test_ar_size_zero(self, flat_spectra, base_params):
         wl, flux_quiet, flux_active = flat_spectra
-        result = compute_light_curve(
+        baseline = _quiet_baseline(wl, flux_quiet, base_params, _t([0.0]))
+        result = quick_lc(
             wavelength=wl, flux_quiet=flux_quiet, flux_active=flux_active,
-            params=base_params,
+            **base_params,
             ar_lat=[0.0], ar_long=[0.0], ar_size=[0.0], ar_smoothness=[_SM],
-            phases_rot=[0.0], stellar_grid_size=50, ve=0.0,
+            times=_t([0.0]), P_rot=_P_ROT, stellar_grid_size=50, ve=0.0,
         )
         np.testing.assert_allclose(
-            result["lc"][0], 1.0, atol=1e-3,
+            result[0][0], baseline[0], atol=1e-3,
             err_msg="Zero-size AR should have negligible effect on flux",
         )
 
     def test_ar_size_90_degrees(self, flat_spectra, base_params):
         wl, flux_quiet, flux_active = flat_spectra
-        result = compute_light_curve(
+        baseline = _quiet_baseline(wl, flux_quiet, base_params, _t([0.0]))
+        result = quick_lc(
             wavelength=wl, flux_quiet=flux_quiet, flux_active=flux_active,
-            params=base_params,
+            **base_params,
             ar_lat=[0.0], ar_long=[0.0], ar_size=[90.0], ar_smoothness=[_SM],
-            phases_rot=[0.0], stellar_grid_size=50, ve=0.0,
+            times=_t([0.0]), P_rot=_P_ROT, stellar_grid_size=50, ve=0.0,
         )
-        assert np.all(np.isfinite(result["lc"]))
-        assert float(result["lc"][0, 0]) < 0.95
+        assert np.all(np.isfinite(result[0]))
+        assert float(result[0][0, 0]) < 0.95 * float(baseline[0, 0])
 
     def test_inclination_zero_pole_on(self, flat_spectra):
         wl, flux_quiet, flux_active = flat_spectra
-        params = dict(ldc_coeffs=[0.3, 0.1], inc_star=0.0)
-        result = compute_light_curve(
+        params = dict(ld_coeffs=[0.3, 0.1], inc_star=0.0)
+        result = quick_lc(
             wavelength=wl, flux_quiet=flux_quiet, flux_active=flux_active,
-            params=params,
+            **params,
             ar_lat=[0.0], ar_long=[0.0], ar_size=[10.0], ar_smoothness=[_SM],
-            phases_rot=[0.0, 90.0, 180.0], stellar_grid_size=50, ve=0.0,
+            times=_t([0.0, 90.0, 180.0]), P_rot=_P_ROT, stellar_grid_size=50, ve=0.0,
         )
-        assert np.all(np.isfinite(result["lc"]))
+        assert np.all(np.isfinite(result[0]))
 
     def test_inclination_zero_constant_lc(self, flat_spectra):
         wl, flux_quiet, flux_active = flat_spectra
-        params = dict(ldc_coeffs=[0.3, 0.1], inc_star=0.0)
+        params = dict(ld_coeffs=[0.3, 0.1], inc_star=0.0)
         phases = np.linspace(0, 360, 12, endpoint=False)
-        result = compute_light_curve(
+        result = quick_lc(
             wavelength=wl, flux_quiet=flux_quiet, flux_active=flux_active,
-            params=params,
+            **params,
             ar_lat=[0.0], ar_long=[0.0], ar_size=[10.0], ar_smoothness=[_SM],
-            phases_rot=phases, stellar_grid_size=50, ve=0.0,
+            times=_t(phases), P_rot=_P_ROT, stellar_grid_size=50, ve=0.0,
         )
-        lc = result["lc"]
+        lc = result[0]
         np.testing.assert_allclose(
             lc, np.mean(lc), rtol=5e-3,
             err_msg="Pole-on view should produce a constant light curve",
@@ -833,15 +827,14 @@ class TestNumericalEdgeCases:
         wl = np.array([550.0])
         flux_quiet = np.array([1.0])
         flux_active = np.array([0.8])
-        result = compute_light_curve(
+        result = quick_lc(
             wavelength=wl, flux_quiet=flux_quiet, flux_active=flux_active,
-            params=base_params,
+            **base_params,
             ar_lat=[10.0], ar_long=[0.0], ar_size=[10.0], ar_smoothness=[_SM],
-            phases_rot=[0.0], stellar_grid_size=50, ve=0.0,
+            times=_t([0.0]), P_rot=_P_ROT, stellar_grid_size=50, ve=0.0,
         )
-        assert result["lc"].shape == (1, 1)
-        assert result["epsilon"].shape == (1, 1)
-        assert np.all(np.isfinite(result["lc"]))
+        assert result[0].shape == (1,)
+        assert np.all(np.isfinite(result[0]))
 
 
 # ===================================================================
@@ -852,14 +845,14 @@ class TestSymmetry:
 
     def test_equatorial_ar_symmetric_phases(self, flat_spectra, base_params):
         wl, flux_quiet, flux_active = flat_spectra
-        result = compute_light_curve(
+        result = quick_lc(
             wavelength=wl, flux_quiet=flux_quiet, flux_active=flux_active,
-            params=base_params,
+            **base_params,
             ar_lat=[0.0], ar_long=[0.0], ar_size=[10.0], ar_smoothness=[_SM],
-            phases_rot=[45.0, 315.0], stellar_grid_size=50, ve=0.0, ldc_mode="quadratic",
+            times=_t([45.0, 315.0]), P_rot=_P_ROT, stellar_grid_size=50, ve=0.0, ld_mode="quadratic",
         )
         np.testing.assert_allclose(
-            result["lc"][0], result["lc"][1], rtol=1e-4,
+            result[0][0], result[0][1], rtol=1e-4,
             err_msg="Equatorial AR should be symmetric about phase=0",
         )
 
@@ -867,20 +860,20 @@ class TestSymmetry:
         wl, flux_quiet, flux_active = flat_spectra
         phases = np.linspace(0, 360, 8, endpoint=False)
 
-        result_north = compute_light_curve(
+        result_north = quick_lc(
             wavelength=wl, flux_quiet=flux_quiet, flux_active=flux_active,
-            params=base_params,
+            **base_params,
             ar_lat=[30.0], ar_long=[0.0], ar_size=[10.0], ar_smoothness=[_SM],
-            phases_rot=phases, stellar_grid_size=50, ve=0.0,
+            times=_t(phases), P_rot=_P_ROT, stellar_grid_size=50, ve=0.0,
         )
-        result_south = compute_light_curve(
+        result_south = quick_lc(
             wavelength=wl, flux_quiet=flux_quiet, flux_active=flux_active,
-            params=base_params,
+            **base_params,
             ar_lat=[-30.0], ar_long=[0.0], ar_size=[10.0], ar_smoothness=[_SM],
-            phases_rot=phases, stellar_grid_size=50, ve=0.0,
+            times=_t(phases), P_rot=_P_ROT, stellar_grid_size=50, ve=0.0,
         )
         np.testing.assert_allclose(
-            result_north["lc"], result_south["lc"], rtol=1e-4,
+            result_north[0], result_south[0], rtol=1e-4,
             err_msg="N/S symmetric ARs should produce identical LCs at inc=90°",
         )
 
@@ -897,7 +890,7 @@ FLUX_FACULA  = np.array([1.1])
 STELLAR_GRID = 60
 VE           = 0.0
 
-BASE_PARAMS = dict(ldc_coeffs=[0.4, 0.2], inc_star=90.0)
+BASE_PARAMS = dict(ld_coeffs=[0.4, 0.2], inc_star=90.0)
 
 TIMES = np.linspace(-0.15, 0.15, 200)
 P_ROT = 25.0
@@ -915,50 +908,51 @@ TRANSIT_PARAMS = dict(
 
 @pytest.fixture(scope="module")
 def combined_model():
-    return build_combined_model(
+    return build_system(
         wavelength        = WAVELENGTH,
         flux_quiet        = FLUX_QUIET,
-        params            = BASE_PARAMS,
+        **BASE_PARAMS,
         times             = TIMES,
         P_rot             = P_ROT,
-        transit_params    = TRANSIT_PARAMS,
+        **TRANSIT_PARAMS,
         stellar_grid_size = STELLAR_GRID,
         ve                = VE,
-        ldc_mode          = "quadratic",
+        ld_mode          = "quadratic",
         oversample        = 1,
     )
 
 
 @pytest.fixture(scope="module")
 def stellar_only_model():
-    phases = (TIMES / P_ROT * 360.0) % 360.0
-    return build_model(
+    return build_system(
         wavelength        = WAVELENGTH,
         flux_quiet        = FLUX_QUIET,
-        params            = BASE_PARAMS,
-        phases_rot        = phases,
+        **BASE_PARAMS,
+        times             = TIMES,
+        P_rot             = P_ROT,
         stellar_grid_size = STELLAR_GRID,
         ve                = VE,
-        ldc_mode          = "quadratic",
+        ld_mode          = "quadratic",
         oversample        = 1,
     )
 
 
-def _combined_lc(transit_params=None, ar_lat=None, ar_long=None, ar_size=None,
+def _combined_lc(transit_overrides=None, ar_lat=None, ar_long=None, ar_size=None,
                  ar_smoothness=None, flux_active=None, oversample=1, params=None):
     """Thin wrapper that fills in defaults to keep test bodies short."""
-    return compute_combined_light_curve(
+    tp = {**TRANSIT_PARAMS, **(transit_overrides or {})}
+    return quick_lc(
         wavelength        = WAVELENGTH,
         flux_quiet        = FLUX_QUIET,
         flux_active       = np.atleast_2d(flux_active if flux_active is not None else FLUX_QUIET),
-        params            = params or BASE_PARAMS,
+        **(params or BASE_PARAMS),
         ar_lat            = ar_lat  or [0.0],
         ar_long           = ar_long or [180.0],  # far side — invisible by default
         ar_size           = ar_size or [0.001],
         ar_smoothness     = ar_smoothness or [_SM],
         times             = TIMES,
         P_rot             = P_ROT,
-        transit_params    = transit_params or TRANSIT_PARAMS,
+        **tp,
         stellar_grid_size = STELLAR_GRID,
         ve                = VE,
         oversample        = oversample,
@@ -1018,7 +1012,7 @@ class TestComputePlanetMask:
 
 
 # ===================================================================
-# 2.  build_combined_model — model dict structure
+# 2.  build_system (transit-attached) — model dict structure
 # ===================================================================
 
 class TestBuildCombinedModel:
@@ -1031,7 +1025,9 @@ class TestBuildCombinedModel:
 
     def test_k_value_stored(self, combined_model):
         assert "k" in combined_model
-        assert float(combined_model["k"]) == pytest.approx(TRANSIT_PARAMS["k"])
+        # k is always stored as an array of shape (nwave,) now (even for a
+        # scalar input) so it can also hold a genuinely per-wavelength value.
+        assert float(combined_model["k"][0]) == pytest.approx(TRANSIT_PARAMS["k"])
 
     def test_planet_xyz_shape(self, combined_model):
         xyz    = combined_model["planet_xyz"]
@@ -1046,16 +1042,16 @@ class TestBuildCombinedModel:
         required = [
             "x_disc", "y_disc", "mu_disc", "row_idx", "vel_row",
             "star_pixel_rad", "total_pixels", "wavelength",
-            "phases_rot", "ldc_coeffs", "flat_indices", "n",
+            "phases_rot", "ld_coeffs", "flat_indices", "n",
         ]
         for key in required:
             assert key in combined_model, f"Stellar key missing: '{key}'"
 
     def test_oversample_inflates_nphase(self):
         oversample = 3
-        model = build_combined_model(
-            wavelength=WAVELENGTH, flux_quiet=FLUX_QUIET, params=BASE_PARAMS,
-            times=TIMES, P_rot=P_ROT, transit_params=TRANSIT_PARAMS,
+        model = build_system(
+            wavelength=WAVELENGTH, flux_quiet=FLUX_QUIET, **BASE_PARAMS,
+            times=TIMES, P_rot=P_ROT, **TRANSIT_PARAMS,
             stellar_grid_size=STELLAR_GRID, ve=VE, oversample=oversample,
         )
         n_orig    = model["nphase_original"]
@@ -1064,9 +1060,9 @@ class TestBuildCombinedModel:
 
     def test_planet_xyz_length_matches_nphase(self):
         oversample = 3
-        model = build_combined_model(
-            wavelength=WAVELENGTH, flux_quiet=FLUX_QUIET, params=BASE_PARAMS,
-            times=TIMES, P_rot=P_ROT, transit_params=TRANSIT_PARAMS,
+        model = build_system(
+            wavelength=WAVELENGTH, flux_quiet=FLUX_QUIET, **BASE_PARAMS,
+            times=TIMES, P_rot=P_ROT, **TRANSIT_PARAMS,
             stellar_grid_size=STELLAR_GRID, ve=VE, oversample=oversample,
         )
         assert model["planet_xyz"].shape[0] == model["nphase"]
@@ -1080,25 +1076,26 @@ class TestTransitPhysics:
 
     def test_output_shape_matches_times(self):
         result = _combined_lc()
-        assert result["lc"].shape == (len(TIMES), 1)
+        assert result[0].shape == (len(TIMES),)
 
     def test_lc_finite(self):
-        assert np.all(np.isfinite(_combined_lc()["lc"]))
+        assert np.all(np.isfinite(_combined_lc()[0]))
 
-    def test_transit_produces_flux_dip(self):
-        lc = _combined_lc()["lc"]
-        assert float(np.min(lc)) < 1.0
+    def test_transit_produces_flux_dip(self, stellar_only_model):
+        lc = _combined_lc()[0]
+        baseline = float(np.min(np.array(make_lc(stellar_only_model)[0])))
+        assert float(np.min(lc)) < baseline
 
     def test_transit_depth_scales_with_k(self):
-        d_small = 1.0 - float(np.min(_combined_lc({**TRANSIT_PARAMS, "k": 0.05})["lc"]))
-        d_large = 1.0 - float(np.min(_combined_lc({**TRANSIT_PARAMS, "k": 0.15})["lc"]))
+        d_small = 1.0 - float(np.min(_combined_lc({**TRANSIT_PARAMS, "k": 0.05})[0]))
+        d_large = 1.0 - float(np.min(_combined_lc({**TRANSIT_PARAMS, "k": 0.15})[0]))
         assert d_large > d_small
 
     def test_approximate_transit_depth_equals_k_squared(self):
         k = 0.1
         tp = {**TRANSIT_PARAMS, "k": k}
-        params_no_ld = dict(ldc_coeffs=[0.0, 0.0], inc_star=90.0)
-        lc = _combined_lc(tp, params=params_no_ld)["lc"]
+        params_no_ld = dict(ld_coeffs=[0.0, 0.0], inc_star=90.0)
+        lc = _combined_lc(tp, params=params_no_ld)[0]
         depth = 1.0 - float(np.min(lc))
         np.testing.assert_allclose(depth, k**2, rtol=0.15)
 
@@ -1107,18 +1104,18 @@ class TestTransitPhysics:
         a   = TRANSIT_PARAMS["a_over_rstar"]
         inc_grazing = np.arccos(0.85 / a)
 
-        d_central = 1.0 - float(np.min(_combined_lc({**TRANSIT_PARAMS, "k": k})["lc"]))
+        d_central = 1.0 - float(np.min(_combined_lc({**TRANSIT_PARAMS, "k": k})[0]))
         d_grazing = 1.0 - float(np.min(_combined_lc(
-            {**TRANSIT_PARAMS, "k": k, "inclination": inc_grazing})["lc"]))
+            {**TRANSIT_PARAMS, "k": k, "inclination": inc_grazing})[0]))
         assert d_central > d_grazing
 
     def test_spot_crossing_produces_positive_bump(self):
         lc_spot = _combined_lc(
             ar_lat=[0.0], ar_long=[0.0], ar_size=[10.0], flux_active=FLUX_SPOT,
-        )["lc"]
+        )[0]
         lc_clean = _combined_lc(
             ar_lat=[0.0], ar_long=[180.0], ar_size=[10.0], flux_active=FLUX_SPOT,
-        )["lc"]
+        )[0]
 
         oot = np.abs(TIMES) > 0.12
         lc_spot_norm = lc_spot / np.median(lc_spot[oot])
@@ -1131,10 +1128,10 @@ class TestTransitPhysics:
     def test_facula_crossing_produces_negative_anomaly(self):
         lc_fac = _combined_lc(
             ar_lat=[0.0], ar_long=[0.0], ar_size=[10.0], flux_active=FLUX_FACULA,
-        )["lc"]
+        )[0]
         lc_clean = _combined_lc(
             ar_lat=[0.0], ar_long=[180.0], ar_size=[10.0], flux_active=FLUX_FACULA,
-        )["lc"]
+        )[0]
 
         oot = np.abs(TIMES) > 0.12
         lc_fac_norm = lc_fac / np.median(lc_fac[oot])
@@ -1148,7 +1145,7 @@ class TestTransitPhysics:
         result_combined = _combined_lc(
             ar_lat=[0.0], ar_long=[180.0], ar_size=[0.001], flux_active=FLUX_QUIET,
         )
-        result_stellar = evaluate_light_curve(
+        result_stellar = make_lc(
             stellar_only_model,
             flux_active=jnp.array(FLUX_QUIET),
             ar_lat=jnp.array([0.0]), ar_long=jnp.array([180.0]),
@@ -1156,22 +1153,24 @@ class TestTransitPhysics:
         )
         oot = np.abs(TIMES) > 0.12
         np.testing.assert_allclose(
-            result_combined["lc"][oot], np.array(result_stellar["lc"])[oot], rtol=1e-4,
+            result_combined[0][oot], np.array(result_stellar[0])[oot], rtol=1e-4,
         )
 
-    def test_eccentric_orbit_centre_Z_positive(self):
+    def test_eccentric_orbit_centre_Z_positive(self, stellar_only_model):
+        baseline = float(np.min(np.array(make_lc(stellar_only_model)[0])))
         for ecc, omega in [(0.3, np.pi / 2.0), (0.5, np.pi / 4.0)]:
             tp = {**TRANSIT_PARAMS, "ecc": ecc, "omega_peri": omega}
-            lc = _combined_lc(tp)["lc"]
-            assert float(np.min(lc)) < 1.0
+            lc = _combined_lc(tp)[0]
+            assert float(np.min(lc)) < baseline
 
-    def test_no_transit_when_fully_inclined(self):
+    def test_no_transit_when_fully_inclined(self, stellar_only_model):
         a = TRANSIT_PARAMS["a_over_rstar"]
         k = TRANSIT_PARAMS["k"]
         inc_no_transit = np.arccos(2.0 * (1.0 + k) / a)
         tp = {**TRANSIT_PARAMS, "inclination": inc_no_transit}
-        lc = _combined_lc(tp)["lc"]
-        np.testing.assert_allclose(lc, 1.0, atol=0.005)
+        lc = _combined_lc(tp)[0]
+        baseline = np.array(make_lc(stellar_only_model)[0])
+        np.testing.assert_allclose(lc, baseline, atol=0.005)
 
 
 # ===================================================================
@@ -1182,16 +1181,17 @@ class TestTransitOversampling:
 
     def test_oversample_preserves_output_shape(self):
         for os in [1, 3, 5]:
-            lc = _combined_lc(oversample=os)["lc"]
-            assert lc.shape == (len(TIMES), 1)
+            lc = _combined_lc(oversample=os)[0]
+            assert lc.shape == (len(TIMES),)
 
     def test_oversampled_lc_is_finite(self):
-        lc = _combined_lc(oversample=3)["lc"]
+        lc = _combined_lc(oversample=3)[0]
         assert np.all(np.isfinite(lc))
 
-    def test_oversampled_transit_still_present(self):
-        lc = _combined_lc(oversample=3)["lc"]
-        assert float(np.min(lc)) < 1.0
+    def test_oversampled_transit_still_present(self, stellar_only_model):
+        lc = _combined_lc(oversample=3)[0]
+        baseline = float(np.min(np.array(make_lc(stellar_only_model)[0])))
+        assert float(np.min(lc)) < baseline
 
 
 # ===================================================================
@@ -1204,37 +1204,36 @@ class TestAPIConsistency:
         assert not stellar_only_model.get("has_transit", False)
 
     def test_evaluate_stellar_only_still_works(self, stellar_only_model):
-        result = evaluate_light_curve(
+        result = make_lc(
             stellar_only_model,
             flux_active=jnp.array(FLUX_SPOT),
             ar_lat=jnp.array([20.0]), ar_long=jnp.array([0.0]),
             ar_size=jnp.array([10.0]), ar_smoothness=jnp.array([_SM]),
         )
-        lc = np.array(result["lc"])
+        lc = np.array(result[0])
         assert np.all(np.isfinite(lc))
-        assert lc.shape == (len(TIMES), 1)
+        assert lc.shape == (len(TIMES),)
 
-    def test_compute_light_curve_api_unchanged(self):
-        from sajax import compute_light_curve
-        phases = (TIMES / P_ROT * 360.0) % 360.0
-        result = compute_light_curve(
+    def test_quick_lc_api_unchanged(self):
+        from sajax import quick_lc
+        result = quick_lc(
             wavelength=WAVELENGTH, flux_quiet=FLUX_QUIET, flux_active=FLUX_SPOT,
-            params=BASE_PARAMS,
+            **BASE_PARAMS,
             ar_lat=[20.0], ar_long=[0.0], ar_size=[10.0], ar_smoothness=[_SM],
-            phases_rot=phases,
+            times=TIMES, P_rot=P_ROT,
             stellar_grid_size=STELLAR_GRID, ve=VE,
         )
-        assert result["lc"].shape == (len(TIMES), 1)
-        assert np.all(np.isfinite(result["lc"]))
+        assert result[0].shape == (len(TIMES),)
+        assert np.all(np.isfinite(result[0]))
 
     def test_no_transit_flag_gives_unity_transit_factor(self, stellar_only_model):
-        result_stellar = evaluate_light_curve(
+        result_stellar = make_lc(
             stellar_only_model,
             flux_active=jnp.array(FLUX_QUIET),
             ar_lat=jnp.array([0.0]), ar_long=jnp.array([180.0]),
             ar_size=jnp.array([0.001]), ar_smoothness=jnp.array([_SM]),
         )
-        lc = np.array(result_stellar["lc"])
+        lc = np.array(result_stellar[0])
         assert float(np.max(lc) - np.min(lc)) < 0.005
 
 
@@ -1251,21 +1250,21 @@ class TestAutodiff:
 
     @pytest.fixture(scope="class")
     def grad_model(self):
-        return build_model(
+        return build_system(
             wavelength=np.array([550.0]),
             flux_quiet=np.array([1.0]),
-            params=dict(ldc_coeffs=[0.4, 0.2], inc_star=90.0),
-            phases_rot=np.array([0.0]),
+            **dict(ld_coeffs=[0.4, 0.2], inc_star=90.0),
+            times=_t(np.array([0.0])), P_rot=_P_ROT,
             stellar_grid_size=50,
             ve=0.0,
         )
 
     @staticmethod
     def _lc_scalar(model, flux_active, ar_lat, ar_long, ar_size, ar_smoothness):
-        return jnp.sum(evaluate_light_curve(
+        return jnp.sum(make_lc(
             model, flux_active=flux_active, ar_lat=ar_lat, ar_long=ar_long,
             ar_size=ar_size, ar_smoothness=ar_smoothness,
-        )["lc"])
+        )[0])
 
     def test_grad_wrt_flux_active(self, grad_model):
         fa = jnp.array([0.7])
@@ -1422,10 +1421,10 @@ class TestARShapeGradients:
         nwave = len(wl)
         assert float(flux_active[0]) < float(flux_quiet[0])
 
-        model = build_model(
-            wavelength=wl, flux_quiet=flux_quiet, params=base_params,
-            phases_rot=np.array([0.0]), stellar_grid_size=int(self._spr),
-            ve=0.0, ldc_mode="quadratic",
+        model = build_system(
+            wavelength=wl, flux_quiet=flux_quiet, **base_params,
+            times=_t(np.array([0.0])), P_rot=_P_ROT, stellar_grid_size=int(self._spr),
+            ve=0.0, ld_mode="quadratic",
         )
         spr = float(model["star_pixel_rad"])
         ar_cart    = jnp.array([[0.0, 0.0, spr]], dtype=jnp.float32)
@@ -1435,13 +1434,13 @@ class TestARShapeGradients:
         n_mu       = model["mu_profile_pts"].shape[0]
 
         def flux_fn(arsize):
-            fval, _, _ = _compute_single_phase(
+            fval, _ = _compute_single_phase(
                 ar_cart, planet_xyz,
                 wavelength          = model["wavelength"],
                 flux_quiet          = model["flux_quiet"],
                 flux_active         = flux_act,
-                ldc_coeffs_quiet    = model["ldc_coeffs"],
-                ldc_coeffs_active   = jnp.broadcast_to(model["ldc_coeffs"][None, :, :], (1, nwave, n_coeffs)),
+                ld_coeffs_quiet    = model["ld_coeffs"],
+                ld_coeffs_active   = jnp.broadcast_to(model["ld_coeffs"][None, :, :], (1, nwave, n_coeffs)),
                 I_profile_quiet     = model["I_profile"],
                 I_profile_active    = jnp.broadcast_to(model["I_profile"][None, :, :], (1, nwave, n_mu)),
                 mu_profile_pts      = model["mu_profile_pts"],
@@ -1454,8 +1453,8 @@ class TestARShapeGradients:
                 total_pixels        = model["total_pixels"],
                 arsize_rads         = jnp.array([arsize]),
                 ar_smoothness       = jnp.array([_SM]),
-                k                   = jnp.float32(0.0),
-                ldc_mode            = model["ldc_mode"],
+                k                   = jnp.zeros(nwave),  # k is (nwave,) now, not a scalar
+                ld_mode            = model["ld_mode"],
                 plot_map_wavelength = model["plot_map_wavelength"],
                 n                   = model["n"],
                 flat_indices        = model["flat_indices"],
@@ -1469,14 +1468,14 @@ class TestARShapeGradients:
 
 # ===================================================================
 # FD-agreement tests for spot lat, long, size, and flux through the
-# full evaluate_light_curve pipeline
+# full make_lc pipeline
 # ===================================================================
 
 class TestARParamGradientsFD:
     """
     Compare JAX autodiff to central finite differences for active-region
     latitude, longitude, and flux contrast, using the public
-    ``evaluate_light_curve`` API. Step sizes below were empirically
+    ``make_lc`` API. Step sizes below were empirically
     calibrated (not derived from a closed form, since the super-Gaussian's
     effective transition width doesn't have as simple a formula as the old
     sigmoid did) against a 20-degree AR at ar_smoothness=20 on a 50-pixel grid.
@@ -1489,11 +1488,11 @@ class TestARParamGradientsFD:
 
     @pytest.fixture(scope="class")
     def grad_model(self):
-        return build_model(
+        return build_system(
             wavelength   = np.array([550.0]),
             flux_quiet   = np.array([1.0]),
-            params       = dict(ldc_coeffs=[0.4, 0.2], inc_star=90.0),
-            phases_rot   = np.array([0.0]),
+            **dict(ld_coeffs=[0.4, 0.2], inc_star=90.0),
+            times=_t(np.array([0.0])), P_rot=_P_ROT,
             stellar_grid_size = self._SPR,
             ve           = 0.0,
         )
@@ -1501,14 +1500,14 @@ class TestARParamGradientsFD:
     def _lc_sum(self, model, lat, long, flux, arsize=None, smoothness=None):
         arsize = jnp.float32(self._ARSIZE) if arsize is None else arsize
         smoothness = jnp.float32(_SM) if smoothness is None else smoothness
-        return jnp.sum(evaluate_light_curve(
+        return jnp.sum(make_lc(
             model,
             flux_active   = jnp.array([flux]),
             ar_lat        = jnp.array([lat]),
             ar_long       = jnp.array([long]),
             ar_size       = jnp.array([arsize]),
             ar_smoothness = jnp.array([smoothness]),
-        )["lc"])
+        )[0])
 
     def _fd(self, f, x, h):
         return float((f(x + h) - f(x - h)) / (2.0 * h))
@@ -1604,7 +1603,7 @@ class TestStellarParamGradientsFD:
     These parameters are baked into the model dict at build time (NumPy),
     so tests call _compute_single_phase directly with the parameter as a
     JAX-traced input, constructing whichever piece of the model that
-    parameter feeds into (e.g. ldc_coeffs_quiet for u1/u2, vel_row for ve).
+    parameter feeds into (e.g. ld_coeffs_quiet for u1/u2, vel_row for ve).
     """
 
     _SPR    = 50
@@ -1616,11 +1615,11 @@ class TestStellarParamGradientsFD:
 
     @pytest.fixture(scope="class")
     def grad_model(self):
-        return build_model(
+        return build_system(
             wavelength=np.array([550.0]),
             flux_quiet=np.array([1.0]),
-            params=dict(ldc_coeffs=[0.4, 0.2], inc_star=90.0),
-            phases_rot=np.array([0.0]),
+            **dict(ld_coeffs=[0.4, 0.2], inc_star=90.0),
+            times=_t(np.array([0.0])), P_rot=_P_ROT,
             stellar_grid_size=self._SPR,
             ve=0.0,
         )
@@ -1635,19 +1634,19 @@ class TestStellarParamGradientsFD:
         ]])  # (1, 3)
 
     def _call_single_phase(self, model, ar_cart_rotated,
-                           vel_row=None, ldc_coeffs_quiet=None):
+                           vel_row=None, ld_coeffs_quiet=None):
         nwave    = 1
         n_coeffs = 2
         n_mu     = model["mu_profile_pts"].shape[0]
-        ldc_q    = ldc_coeffs_quiet if ldc_coeffs_quiet is not None else model["ldc_coeffs"]
-        flux_norm, _, _ = _compute_single_phase(
+        ldc_q    = ld_coeffs_quiet if ld_coeffs_quiet is not None else model["ld_coeffs"]
+        flux_norm, _ = _compute_single_phase(
             ar_cart_rotated,
             jnp.array([0.0, 0.0, -1e10]),
             wavelength          = model["wavelength"],
             flux_quiet          = model["flux_quiet"],
             flux_active         = jnp.array([[0.7]], dtype=jnp.float32),
-            ldc_coeffs_quiet    = ldc_q,
-            ldc_coeffs_active   = jnp.broadcast_to(model["ldc_coeffs"][None, :, :], (1, nwave, n_coeffs)),
+            ld_coeffs_quiet    = ldc_q,
+            ld_coeffs_active   = jnp.broadcast_to(model["ld_coeffs"][None, :, :], (1, nwave, n_coeffs)),
             I_profile_quiet     = model["I_profile"],
             I_profile_active    = jnp.broadcast_to(model["I_profile"][None, :, :], (1, nwave, n_mu)),
             mu_profile_pts      = model["mu_profile_pts"],
@@ -1660,8 +1659,8 @@ class TestStellarParamGradientsFD:
             total_pixels        = model["total_pixels"],
             arsize_rads         = jnp.array([jnp.deg2rad(jnp.float32(self._ARSIZE))]),
             ar_smoothness       = jnp.array([_SM]),
-            k                   = jnp.float32(0.0),
-            ldc_mode            = model["ldc_mode"],
+            k                   = jnp.zeros(nwave),  # k is (nwave,) now, not a scalar
+            ld_mode            = model["ld_mode"],
             plot_map_wavelength = model["plot_map_wavelength"],
             n                   = model["n"],
             flat_indices        = model["flat_indices"],
@@ -1727,7 +1726,7 @@ class TestStellarParamGradientsFD:
         def lc(u1):
             return self._call_single_phase(
                 grad_model, rotated,
-                ldc_coeffs_quiet=jnp.array([[u1, jnp.float32(0.2)]]),
+                ld_coeffs_quiet=jnp.array([[u1, jnp.float32(0.2)]]),
             )
 
         g = float(jax.grad(lc)(jnp.float32(0.4)))
@@ -1744,7 +1743,7 @@ class TestStellarParamGradientsFD:
         def lc(u1):
             return self._call_single_phase(
                 grad_model, rotated,
-                ldc_coeffs_quiet=jnp.array([[u1, jnp.float32(0.2)]]),
+                ld_coeffs_quiet=jnp.array([[u1, jnp.float32(0.2)]]),
             )
 
         jax_g = float(jax.grad(lc)(u1_0))
@@ -1761,7 +1760,7 @@ class TestStellarParamGradientsFD:
         def lc(u2):
             return self._call_single_phase(
                 grad_model, rotated,
-                ldc_coeffs_quiet=jnp.array([[jnp.float32(0.4), u2]]),
+                ld_coeffs_quiet=jnp.array([[jnp.float32(0.4), u2]]),
             )
 
         jax_g = float(jax.grad(lc)(u2_0))
@@ -1805,10 +1804,10 @@ class TestStellarParamGradientsFD:
         """
         wl = np.linspace(500.0, 600.0, 200, dtype=np.float64)
         flux_quiet_line = (1.0 - 0.8 * np.exp(-((wl - 555.0) / 1.0) ** 2)).astype(np.float64)
-        model = build_model(
+        model = build_system(
             wavelength=wl, flux_quiet=flux_quiet_line,
-            params=dict(ldc_coeffs=[0.4, 0.2], inc_star=90.0),
-            phases_rot=np.array([0.0]), stellar_grid_size=self._SPR, ve=0.0,
+            **dict(ld_coeffs=[0.4, 0.2], inc_star=90.0),
+            times=_t(np.array([0.0])), P_rot=_P_ROT, stellar_grid_size=self._SPR, ve=0.0,
         )
         nwave    = len(wl)
         n_coeffs = 2
@@ -1822,12 +1821,12 @@ class TestStellarParamGradientsFD:
 
         def lc(ve):
             vel_row = coords / spr * (ve / self._C)
-            fval, _, _ = _compute_single_phase(
+            fval, _ = _compute_single_phase(
                 rotated, jnp.array([0.0, 0.0, -1e10]),
                 wavelength=model["wavelength"], flux_quiet=model["flux_quiet"],
                 flux_active=flux_active_wl,
-                ldc_coeffs_quiet=model["ldc_coeffs"],
-                ldc_coeffs_active=jnp.broadcast_to(model["ldc_coeffs"][None, :, :], (1, nwave, n_coeffs)),
+                ld_coeffs_quiet=model["ld_coeffs"],
+                ld_coeffs_active=jnp.broadcast_to(model["ld_coeffs"][None, :, :], (1, nwave, n_coeffs)),
                 I_profile_quiet=model["I_profile"],
                 I_profile_active=jnp.broadcast_to(model["I_profile"][None, :, :], (1, nwave, n_mu)),
                 mu_profile_pts=model["mu_profile_pts"],
@@ -1836,7 +1835,7 @@ class TestStellarParamGradientsFD:
                 star_pixel_rad=spr, total_pixels=model["total_pixels"],
                 arsize_rads=jnp.array([jnp.deg2rad(jnp.float32(self._ARSIZE))]),
                 ar_smoothness=jnp.array([_SM]),
-                k=jnp.float32(0.0), ldc_mode=model["ldc_mode"],
+                k=jnp.zeros(nwave), ld_mode=model["ld_mode"],  # k is (nwave,) now, not a scalar
                 plot_map_wavelength=model["plot_map_wavelength"], n=model["n"],
                 flat_indices=model["flat_indices"],
             )
@@ -1887,3 +1886,233 @@ class TestStellarParamGradientsFD:
         jax_g = float(jax.grad(lc)(P0))
         fd    = self._fd(lambda p: float(lc(jnp.float32(p))), float(P0), self._H_PROT)
         self._check("P_rot", jax_g, fd, self._H_PROT)
+
+
+# ===================================================================
+# 6.  Transit-parameter autodiff -- dynamic make_lc path
+# ===================================================================
+
+class TestTransitAutodiff:
+    """
+    Verify gradient flow through the combined (star + transit) pipeline for
+    the orbital parameters, via make_lc's individual transit
+    keyword arguments (t0, period, a_over_rstar, inclination, ecc,
+    omega_peri, k -- added alongside ``transit_softness``).
+
+    The occultation mask in ``_compute_planet_mask`` is a hard threshold by
+    default: on the fixed pixel grid, occulted flux is a genuine staircase
+    function of every parameter that moves the mask (k, a_over_rstar,
+    inclination, t0, period, ecc, omega_peri), so its analytic derivative is
+    exactly 0 almost everywhere -- this is not a bug, and is asserted below
+    so a future change doesn't silently paper over it. ``transit_softness``
+    is the opt-in escape hatch for gradient-based retrieval.
+    """
+
+    _SOFTNESS = 1.0 / (10.0 * STELLAR_GRID)  # matches TestPlanetGradients' convention
+
+    @pytest.fixture(scope="class")
+    def transit_model(self):
+        return build_system(
+            wavelength=WAVELENGTH, flux_quiet=FLUX_QUIET, **BASE_PARAMS,
+            times=TIMES, P_rot=P_ROT, **TRANSIT_PARAMS,
+            stellar_grid_size=STELLAR_GRID, ve=VE, oversample=1,
+        )
+
+    def _lc_sum(self, model, transit_overrides, transit_softness=0.0):
+        """transit_overrides overrides one or more of TRANSIT_PARAMS' keys;
+        the full (required) set is always passed to make_lc."""
+        tp = {**TRANSIT_PARAMS, **transit_overrides}
+        result = make_lc(
+            model,
+            flux_active=jnp.array(FLUX_SPOT),
+            ar_lat=jnp.array([5.0]), ar_long=jnp.array([0.0]),
+            ar_size=jnp.array([8.0]), ar_smoothness=jnp.array([_SM]),
+            t0=tp["t0"], period=tp["period"], a_over_rstar=tp["a_over_rstar"],
+            inclination=tp["inclination"], ecc=tp.get("ecc", 0.0),
+            omega_peri=tp.get("omega_peri", 0.0), k=tp["k"],
+            transit_softness=transit_softness,
+        )
+        return jnp.sum(result[0])
+
+    def test_hard_edge_grad_wrt_k_is_zero(self, transit_model):
+        """Documents the known limitation: default (hard-edge) grad is 0."""
+        g = jax.grad(
+            lambda k: self._lc_sum(transit_model, {"k": k})
+        )(jnp.float32(0.1))
+        assert float(g) == 0.0
+
+    @pytest.mark.parametrize("param, value", [
+        ("k", 0.1),
+        ("a_over_rstar", 15.0),
+        ("inclination", np.pi / 2.0),
+        ("period", 5.0),
+    ])
+    def test_soft_mask_grad_is_finite_and_nonzero(self, transit_model, param, value):
+        g = jax.grad(
+            lambda v: self._lc_sum(
+                transit_model, {param: v}, transit_softness=self._SOFTNESS,
+            )
+        )(jnp.float32(value))
+        assert jnp.isfinite(g)
+        assert jnp.abs(g) > 0
+
+    def test_soft_mask_disabled_by_default(self, transit_model):
+        """transit_softness defaults to 0.0 -- identical to the hard edge."""
+        lc_default = self._lc_sum(transit_model, {"k": 0.1})
+        lc_explicit_hard = self._lc_sum(transit_model, {"k": 0.1}, transit_softness=0.0)
+        assert float(lc_default) == float(lc_explicit_hard)
+
+
+# ===================================================================
+# 7.  make_lc API symmetry -- AR & transit parameter groups
+# ===================================================================
+
+class TestParameterGroupValidation:
+    """
+    Both the AR parameter group (flux_active/ar_lat/ar_long/ar_size/
+    ar_smoothness) and the transit parameter group (t0/period/a_over_rstar/
+    inclination/k) are all-or-nothing: give every one of them, or none.
+    Giving some but not all is a user error and should raise ValueError
+    rather than silently doing something unintended.
+    """
+
+    @pytest.fixture(scope="class")
+    def transit_model(self):
+        return build_system(
+            wavelength=WAVELENGTH, flux_quiet=FLUX_QUIET, **BASE_PARAMS,
+            times=TIMES, P_rot=P_ROT, **TRANSIT_PARAMS,
+            stellar_grid_size=STELLAR_GRID, ve=VE, oversample=1,
+        )
+
+    # ---- AR group -----------------------------------------------------
+
+    def test_partial_ar_args_raises(self, stellar_only_model):
+        with pytest.raises(ValueError, match="active-region"):
+            make_lc(
+                stellar_only_model,
+                flux_active=jnp.array(FLUX_SPOT), ar_lat=jnp.array([0.0]),
+                # ar_long, ar_size, ar_smoothness omitted
+            )
+
+    def test_no_ar_args_gives_quiet_star(self, stellar_only_model):
+        result = make_lc(stellar_only_model)
+        lc = np.array(result[0])
+        assert np.all(np.isfinite(lc))
+        # A quiet star's flux is constant at every phase/wavelength (no AR,
+        # no transit -- nothing varies it).
+        np.testing.assert_allclose(lc, np.broadcast_to(lc[0], lc.shape), rtol=1e-5)
+
+    # ---- Transit group --------------------------------------------------
+
+    def test_partial_transit_args_raises(self, transit_model):
+        with pytest.raises(ValueError, match="transit"):
+            make_lc(
+                transit_model,
+                flux_active=jnp.array(FLUX_SPOT),
+                ar_lat=jnp.array([5.0]), ar_long=jnp.array([0.0]),
+                ar_size=jnp.array([8.0]), ar_smoothness=jnp.array([_SM]),
+                k=0.1,  # t0/period/a_over_rstar/inclination omitted
+            )
+
+    def test_transit_args_without_transit_model_raises(self, stellar_only_model):
+        with pytest.raises(ValueError, match="no transit attached"):
+            make_lc(
+                stellar_only_model,
+                flux_active=jnp.array(FLUX_SPOT),
+                ar_lat=jnp.array([5.0]), ar_long=jnp.array([0.0]),
+                ar_size=jnp.array([8.0]), ar_smoothness=jnp.array([_SM]),
+                **TRANSIT_PARAMS,
+            )
+
+    def test_lone_ecc_without_required_raises(self, transit_model):
+        """ecc/omega_peri alone (without the 5 required) is also an error."""
+        with pytest.raises(ValueError, match="transit"):
+            make_lc(
+                transit_model,
+                flux_active=jnp.array(FLUX_SPOT),
+                ar_lat=jnp.array([5.0]), ar_long=jnp.array([0.0]),
+                ar_size=jnp.array([8.0]), ar_smoothness=jnp.array([_SM]),
+                ecc=0.1,
+            )
+
+    def test_no_transit_args_uses_static_model_transit(self, transit_model, stellar_only_model):
+        """Omitting all transit kwargs falls back to the model's static transit."""
+        result = make_lc(
+            transit_model,
+            flux_active=jnp.array(FLUX_QUIET),
+            ar_lat=jnp.array([0.0]), ar_long=jnp.array([180.0]),
+            ar_size=jnp.array([0.001]), ar_smoothness=jnp.array([_SM]),
+        )
+        lc = np.array(result[0])
+        assert np.all(np.isfinite(lc))
+        baseline = float(np.min(np.array(make_lc(stellar_only_model)[0])))
+        assert float(np.min(lc)) < baseline  # the static transit still occults
+
+
+# ===================================================================
+# 8.  Dynamic override of the quiet photosphere's own LDC coefficients
+# ===================================================================
+
+class TestQuietLdcOverride:
+    """
+    ``ld_coeffs_quiet`` lets make_lc override the quiet
+    photosphere's own limb-darkening coefficients per call (JAX values/
+    tracers included), mirroring how ld_coeffs_active already works for
+    active regions -- the build-time ``ld_coeffs`` given to build_system
+    was otherwise static for the model's whole lifetime.
+    """
+
+    @pytest.fixture(scope="class")
+    def grad_model(self):
+        return build_system(
+            wavelength=np.array([550.0]), flux_quiet=np.array([1.0]),
+            times=_t(np.array([0.0])), P_rot=_P_ROT, stellar_grid_size=50, ve=0.0,
+            ld_coeffs=[0.4, 0.2], inc_star=90.0,
+        )
+
+    def test_default_matches_static_value(self, grad_model):
+        kwargs = dict(
+            flux_active=jnp.array(FLUX_SPOT), ar_lat=jnp.array([20.0]),
+            ar_long=jnp.array([0.0]), ar_size=jnp.array([10.0]),
+            ar_smoothness=jnp.array([_SM]),
+        )
+        lc_default = make_lc(grad_model, **kwargs)[0]
+        lc_explicit = make_lc(
+            grad_model, **kwargs, ld_coeffs_quiet=jnp.array([[0.4, 0.2]]),
+        )[0]
+        np.testing.assert_allclose(np.array(lc_default), np.array(lc_explicit))
+
+    def test_overriding_changes_the_light_curve(self, grad_model):
+        kwargs = dict(
+            flux_active=jnp.array(FLUX_SPOT), ar_lat=jnp.array([20.0]),
+            ar_long=jnp.array([0.0]), ar_size=jnp.array([10.0]),
+            ar_smoothness=jnp.array([_SM]),
+        )
+        lc_default = make_lc(grad_model, **kwargs)[0]
+        lc_overridden = make_lc(
+            grad_model, **kwargs, ld_coeffs_quiet=jnp.array([[0.1, 0.05]]),
+        )[0]
+        assert not np.allclose(np.array(lc_default), np.array(lc_overridden))
+
+    def test_shape_mismatch_raises(self, grad_model):
+        with pytest.raises(ValueError, match="ld_coeffs_quiet"):
+            make_lc(
+                grad_model, flux_active=jnp.array(FLUX_SPOT),
+                ar_lat=jnp.array([20.0]), ar_long=jnp.array([0.0]),
+                ar_size=jnp.array([10.0]), ar_smoothness=jnp.array([_SM]),
+                ld_coeffs_quiet=jnp.array([[0.1, 0.05, 0.0]]),  # wrong n_coeffs
+            )
+
+    def test_grad_wrt_quiet_u1_is_finite_and_nonzero(self, grad_model):
+        def f(u1):
+            result = make_lc(
+                grad_model, flux_active=jnp.array(FLUX_SPOT),
+                ar_lat=jnp.array([20.0]), ar_long=jnp.array([0.0]),
+                ar_size=jnp.array([10.0]), ar_smoothness=jnp.array([_SM]),
+                ld_coeffs_quiet=jnp.array([[u1, 0.2]]),
+            )
+            return jnp.sum(result[0])
+
+        g = jax.grad(f)(jnp.float32(0.4))
+        assert jnp.isfinite(g)
+        assert jnp.abs(g) > 0

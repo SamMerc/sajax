@@ -3,15 +3,21 @@ SAJAX — Stellar Activity Grid for Exoplanets in JAX.
 
 Public API
 ----------
-build_model
-    Pre-build all static model arrays once before MCMC sampling.
+build_system
+    Pre-build all static model arrays once before MCMC sampling. Takes
+    ``times``/``P_rot`` to derive the stellar-rotation phase grid, plus an
+    optional, all-or-nothing planetary-transit parameter group
+    (``t0``/``period``/``a_over_rstar``/``inclination``/``k``); when
+    occulting a starspot or facula, the planet mask is applied at the
+    individual pixel level, so the resulting light-curve anomaly is
+    computed correctly.
 
-evaluate_light_curve
+make_lc
     Pure JAX evaluation — accepts JAX tracers, compatible with
     jit, vmap, emcee_jax, and gradient-based samplers.
 
-compute_light_curve
-    Convenience wrapper: build_model + evaluate_light_curve in one call.
+quick_lc
+    Convenience wrapper: build_system + make_lc in one call.
     Use for one-off evaluations outside MCMC.
 
 build_stellar_grid
@@ -25,18 +31,16 @@ _compute_planet_mask
     Compute the mask over stellar disc pixels: ``True`` where the pixel is occulted
     by the planet at this epoch.
 
-LdcMode
+LdMode
     Type alias for supported limb-darkening laws.
 """
 
 from .core import (
-    compute_light_curve,
-    compute_combined_light_curve,
-    build_model,
-    build_combined_model,
-    evaluate_light_curve,
+    quick_lc,
+    build_system,
+    make_lc,
     build_stellar_grid,
-    LdcMode,
+    LdMode,
 )
 from .geometry import rotate_active_region
 
@@ -46,12 +50,10 @@ from importlib.metadata import version
 __version__ = version("sajax")
 __all__ = [
     "build_stellar_grid",
-    "build_model",
-    "build_combined_model",
-    "evaluate_light_curve",
-    "compute_light_curve",
-    "compute_combined_light_curve",
+    "build_system",
+    "make_lc",
+    "quick_lc",
     "rotate_active_region",
     "_compute_planet_mask",
-    "LdcMode",
+    "LdMode",
 ]

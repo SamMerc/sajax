@@ -589,6 +589,43 @@ class TestPlanetGradients:
             "Transition may be wider than expected — check spr."
         )
 
+    def test_default_softness_is_exact_hard_edge(self):
+        """softness=0.0 (the default) reproduces the old boolean threshold."""
+        xn = jnp.array([0.05, 0.15], dtype=jnp.float32)  # inside / outside k=0.1
+        px = xn * self._spr
+        py = jnp.zeros_like(px)
+        mask = _compute_planet_mask(
+            px, py, self._spr,
+            jnp.float32(0.0), jnp.float32(0.0), jnp.float32(1.0), jnp.float32(0.1),
+        )
+        np.testing.assert_array_equal(np.array(mask), [1.0, 0.0])
+
+    def test_soft_mask_grad_wrt_k_matches_fd(self):
+        """
+        With softness = softness_transit (the opt-in path used for
+        gradient-based transit retrieval), jax.grad through
+        _compute_planet_mask must be finite, non-zero, and agree with a
+        finite-difference estimate taken at h = 1% of the transition width.
+        """
+        k_val    = jnp.float32(0.1)
+        softness = jnp.float32(self._softness_transit)
+        h        = 0.01 * self._softness_transit
+
+        px = jnp.array([float(k_val) * self._spr], dtype=jnp.float32)
+        py = jnp.array([0.0], dtype=jnp.float32)
+
+        def f(k):
+            return jnp.sum(_compute_planet_mask(
+                px, py, self._spr,
+                jnp.float32(0.0), jnp.float32(0.0), jnp.float32(1.0), k, softness,
+            ))
+
+        grad_jax = float(jax.grad(f)(k_val))
+        fd = float((f(k_val + h) - f(k_val - h)) / (2.0 * h))
+
+        assert np.isfinite(grad_jax) and grad_jax != 0.0
+        np.testing.assert_allclose(grad_jax, fd, rtol=0.05)
+
 
 # ===================================================================
 # FD-agreement tests for the six Keplerian orbital parameters

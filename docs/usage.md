@@ -23,7 +23,7 @@ It takes stellar spectra, active region properties, and rotation parameters to p
 | `ar_size` | Angular radius of active region [deg] | `[10.0]` |
 | `phases_rot` | Rotation phases [deg] | `np.linspace(0, 360, 50)` |
 | `inc_star` | Stellar inclination [deg] | `90.0` (equator-on) |
-| `ldc_mode` | Limb-darkening law or intensity Profile| `"quadratic"`, `"nonlinear4"`, etc. or `"intensity_profile"`|
+| `ld_mode` | Limb-darkening law or intensity Profile| `"quadratic"`, `"nonlinear4"`, etc. or `"intensity_profile"`|
 
 ## Key Outputs
 
@@ -61,7 +61,7 @@ SAJAX supports multiple limb-darkening laws:
 
 ```python
 import numpy as np
-from sajax import compute_light_curve
+from sajax import quick_lc
 
 # Wavelength grid (e.g. in microns)
 wavelength  = np.linspace(0.3, 5.0, 200)
@@ -76,7 +76,7 @@ params = dict(
     inc_star    = 90.0,     # stellar inclination [deg]  (equator-on)
 )
 
-result = compute_light_curve(
+result = quick_lc(
     wavelength         = wavelength,
     flux_quiet         = flux_quiet,
     flux_active        = flux_active,
@@ -87,7 +87,7 @@ result = compute_light_curve(
     phases_rot         = np.linspace(0, 360, 50, endpoint=False),
     stellar_grid_size  = 100,             # stellar radius in pixels
     ve                 = 2.0,              # equatorial velocity [km/s]
-    ldc_mode           = "Quadratic",      #treatment of limb darkening
+    ld_mode           = "Quadratic",      #treatment of limb darkening
     plot_map_wavelength= 1.0,
 )
 

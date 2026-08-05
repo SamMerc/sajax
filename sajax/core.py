@@ -91,13 +91,13 @@ Key differences from the original NumPy/SciPy implementation
 
 JIT compilation
 ---------------
-*Do NOT jit(evaluate_light_curve) directly* -- it contains Python-level
+*Do NOT jit(make_lc) directly* -- it contains Python-level
 control flow on model metadata.  Instead, the inner _compute_all_phases
 is the hot path and is safe to JIT via:
 
     from jax import jit
     _compute_all_phases_jit = jit(_compute_all_phases, static_argnames=[
-        "star_pixel_rad", "total_pixels", "ldc_mode",
+        "star_pixel_rad", "total_pixels", "ld_mode",
         "plot_map_wavelength", "n",
     ])
 """
@@ -112,10 +112,10 @@ import jax.numpy as jnp
 from jax import vmap
 
 from .geometry import rotate_active_region
-from .planet import _compute_planet_mask
+from .planet import _compute_planet_mask, compute_planet_sky_positions
 
 # Type alias
-LdcMode = Literal[
+LdMode = Literal[
     "linear",          # 1 coeff  : u
     "quadratic",       # 2 coeffs : u1, u2
     "power2",          # 2 coeffs : c, alpha
@@ -241,7 +241,7 @@ def build_stellar_grid(
 
 
 # ---------------------------------------------------------------------------
-# 1b. Phase oversampling  (NumPy -- runs once in build_model)
+# 1b. Phase oversampling  (NumPy -- runs once in build_system)
 # ---------------------------------------------------------------------------
 
 def _make_oversampled_phases(
@@ -374,51 +374,51 @@ def _compute_ar_shape(
 
 def _evaluate_ldc(
     mu_disc:        jnp.ndarray, # (total_pixels,) grid of in-disc mu values
-    ldc_coeffs_wl:  jnp.ndarray, # (n_coeffs,) one row for this wavelength
+    ld_coeffs_wl:  jnp.ndarray, # (n_coeffs,) one row for this wavelength
     I_prof_wl:      jnp.ndarray, # (n_mu_pts,) used only for "intensity_profile"
     mu_profile_pts: jnp.ndarray, # (n_mu_pts,) set of mu points of the user-provided intensity profile. used only for "intensity_profile"
-    ldc_mode:       LdcMode,     # limb-darkening law to use
+    ld_mode:       LdMode,     # limb-darkening law to use
 ) -> jnp.ndarray:
     """
     Evaluate the limb-darkening law at each pixel for one wavelength bin.
 
     The same function is used for the quiet photosphere and for every
-    active region -- each caller supplies its own ``ldc_coeffs_wl`` (and,
-    for ``ldc_mode="intensity_profile"``, its own ``I_prof_wl``), but the
-    functional law itself (``ldc_mode``) is shared by the whole star.
+    active region -- each caller supplies its own ``ld_coeffs_wl`` (and,
+    for ``ld_mode="intensity_profile"``, its own ``I_prof_wl``), but the
+    functional law itself (``ld_mode``) is shared by the whole star.
 
     Returns
     -------
     jnp.ndarray, shape (total_pixels,)
     """
-    if ldc_mode == "intensity_profile":
+    if ld_mode == "intensity_profile":
         # Interpolate a user-supplied I(mu) profile.
         result = jnp.interp(mu_disc, mu_profile_pts, I_prof_wl,
                              left=0.0, right=0.0)
-    elif ldc_mode == "linear":
+    elif ld_mode == "linear":
         # I(μ) = 1 - u*(1 - μ)
-        result = 1.0 - ldc_coeffs_wl[0] * (1.0 - mu_disc)
-    elif ldc_mode == "quadratic":
+        result = 1.0 - ld_coeffs_wl[0] * (1.0 - mu_disc)
+    elif ld_mode == "quadratic":
         # I(μ) = 1 - u1*(1-μ) - u2*(1-μ)^2
         result = (1.0
-                  - ldc_coeffs_wl[0] * (1.0 - mu_disc)
-                  - ldc_coeffs_wl[1] * (1.0 - mu_disc) ** 2)
-    elif ldc_mode == "power2":
+                  - ld_coeffs_wl[0] * (1.0 - mu_disc)
+                  - ld_coeffs_wl[1] * (1.0 - mu_disc) ** 2)
+    elif ld_mode == "power2":
         # I(μ) = 1 - a*(1 - μ^b)
-        result = 1.0 - ldc_coeffs_wl[0] * (1.0 - mu_disc ** ldc_coeffs_wl[1])
-    elif ldc_mode == "kipping3":
+        result = 1.0 - ld_coeffs_wl[0] * (1.0 - mu_disc ** ld_coeffs_wl[1])
+    elif ld_mode == "kipping3":
         # I(μ) = 1 - c1*(1-μ^0.5) - c2*(1-μ) - c3*(1-μ^(3/2))
         result = (1.0
-                  - ldc_coeffs_wl[0] * (1.0 - mu_disc ** 0.5)
-                  - ldc_coeffs_wl[1] * (1.0 - mu_disc)
-                  - ldc_coeffs_wl[2] * (1.0 - mu_disc ** 1.5))
+                  - ld_coeffs_wl[0] * (1.0 - mu_disc ** 0.5)
+                  - ld_coeffs_wl[1] * (1.0 - mu_disc)
+                  - ld_coeffs_wl[2] * (1.0 - mu_disc ** 1.5))
     else:  # "nonlinear4"  -- Claret (2000) four-parameter law
         # I(μ) = 1 - Σ_{k=1}^{4} c_k*(1 - μ^(k/2))
         result = (1.0
-                  - ldc_coeffs_wl[0] * (1.0 - mu_disc ** 0.5)
-                  - ldc_coeffs_wl[1] * (1.0 - mu_disc)
-                  - ldc_coeffs_wl[2] * (1.0 - mu_disc ** 1.5)
-                  - ldc_coeffs_wl[3] * (1.0 - mu_disc ** 2.0))
+                  - ld_coeffs_wl[0] * (1.0 - mu_disc ** 0.5)
+                  - ld_coeffs_wl[1] * (1.0 - mu_disc)
+                  - ld_coeffs_wl[2] * (1.0 - mu_disc ** 1.5)
+                  - ld_coeffs_wl[3] * (1.0 - mu_disc ** 2.0))
 
     # Intensity can't be negative. Unphysical LDCs (e.g. u1+u2 > 1 for the
     # quadratic law) otherwise dip slightly negative near the limb, which
@@ -435,10 +435,11 @@ def _evaluate_ldc(
 def _flux_at_wavelength(
     # --- vmapped: one scalar/slice per wavelength ---
     wavelength_target:    float,
-    ldc_coeffs_quiet_wl:  jnp.ndarray, # (n_coeffs,)
-    ldc_coeffs_active_wl: jnp.ndarray, # (nar, n_coeffs)
+    ld_coeffs_quiet_wl:  jnp.ndarray, # (n_coeffs,)
+    ld_coeffs_active_wl: jnp.ndarray, # (nar, n_coeffs)
     I_prof_quiet_wl:      jnp.ndarray, # (n_mu_pts,)
     I_prof_active_wl:     jnp.ndarray, # (nar, n_mu_pts)
+    k_wl:                 float,      # Rp / R* at this wavelength
     # --- broadcast: shared across wavelengths ---
     wavelength_grid: jnp.ndarray, # (nwave,) full spectral axis
     flux_quiet:      jnp.ndarray, # (nwave,) full quiet-photosphere spectrum
@@ -446,12 +447,16 @@ def _flux_at_wavelength(
     mu_disc:         jnp.ndarray, # (total_pixels,) grid of in-disc mu values
     total_pixels:    int,
     ar_shapes:       jnp.ndarray, # (nar, total_pixels)
-    planet_mask:     jnp.ndarray, # (total_pixels,)
+    x_disc:          jnp.ndarray, # (total_pixels,) -- for the per-wavelength planet mask
+    y_disc:          jnp.ndarray, # (total_pixels,)
+    star_pixel_rad:  float,
+    planet_xyz:      jnp.ndarray, # (3,) planet sky position, shared across wavelengths
+    transit_softness: float,
     mu_profile_pts:  jnp.ndarray, # (n_mu_pts,)
     row_idx:         jnp.ndarray, # (total_pixels,) int
     vel_row:         jnp.ndarray, # (n,)
-    ldc_mode:        LdcMode,
-) -> tuple[float, float, jnp.ndarray]:
+    ld_mode:        LdMode,
+) -> tuple[float, jnp.ndarray]:
     """
     Compute disc-integrated flux for a single wavelength channel.
 
@@ -463,19 +468,31 @@ def _flux_at_wavelength(
     contrast, evaluated at each pixel's own Doppler-shifted wavelength and
     with its own limb-darkening law. Overlapping active regions sum, so
     e.g. an umbra sitting inside a penumbra contributes simultaneously (the
-    combined dip exceeds either component's own contrast). The planet mask
-    zeroes out occulted pixels.
+    combined dip exceeds either component's own contrast).
+
+    The planet mask is computed here, per wavelength, from ``k_wl`` -- not
+    precomputed once per phase like ``ar_shapes`` -- because ``k`` (unlike
+    everything else that's shared across wavelengths) may itself vary by
+    wavelength for a chromatic transit depth. Recomputing the mask once per
+    (phase, wavelength) instead of once per phase is the price of that
+    generality; the mask itself is a cheap elementwise op over the pixel
+    grid relative to the rest of this function.
 
     All arrays are 1D (in-disc pixels only) - no starmask needed.
-    ``planet_mask`` is True for pixels occulted by the planet; those pixels
+    The planet mask is 1 for pixels occulted by the planet; those pixels
     contribute zero flux regardless of active-region status.
 
     Returns
     -------
-    star_spec  : float            - un-active-region'ed integrated flux
     total_flux : float            - active-region'ed integrated flux
     arted_flux : (total_pixels,)  - per-pixel flux values (for map output)
     """
+    planet_mask = _compute_planet_mask(
+        x_disc, y_disc, star_pixel_rad,
+        planet_xyz[0], planet_xyz[1], planet_xyz[2], k_wl,
+        transit_softness,
+    )
+
     # ---- Per-row Doppler-shifted spectral lookup -------------------------
     # The rotation axis is the y-axis, so velocity depends only on grid row
     # (see build_stellar_grid): resample each spectrum once per row (n
@@ -492,20 +509,18 @@ def _flux_at_wavelength(
 
     # ---- Limb darkening (own law coefficients per AR and for quiet) -----
     ldc_quiet = _evaluate_ldc(
-        mu_disc, ldc_coeffs_quiet_wl, I_prof_quiet_wl, mu_profile_pts, ldc_mode,
+        mu_disc, ld_coeffs_quiet_wl, I_prof_quiet_wl, mu_profile_pts, ld_mode,
     )  # (total_pixels,)
 
     ldc_active = vmap(
         lambda coeffs, iprof: _evaluate_ldc(
-            mu_disc, coeffs, iprof, mu_profile_pts, ldc_mode,
+            mu_disc, coeffs, iprof, mu_profile_pts, ld_mode,
         )
-    )(ldc_coeffs_active_wl, I_prof_active_wl)  # (nar, total_pixels)
+    )(ld_coeffs_active_wl, I_prof_active_wl)  # (nar, total_pixels)
 
     # ---- Physical flux (Doppler-shifted spectrum x limb darkening) ------
     F_quiet_px  = F_quiet_local * ldc_quiet    # (total_pixels,)
     F_active_px = F_active_local * ldc_active  # (nar, total_pixels)
-
-    star_spec = jnp.sum(F_quiet_px) / total_pixels
 
     # ---- Contrast surface: overlapping ARs sum -----
     # Floored denominator: see _FLUX_RATIO_EPS -- pixels where F_quiet_px
@@ -522,7 +537,7 @@ def _flux_at_wavelength(
     arted_flux = arted_flux * (1.0 - planet_mask)
 
     total_flux = jnp.sum(arted_flux) / jnp.float32(total_pixels)
-    return star_spec, total_flux, arted_flux
+    return total_flux, arted_flux
 
 
 # ---------------------------------------------------------------------------
@@ -536,8 +551,8 @@ def _compute_single_phase(
     wavelength:          jnp.ndarray,  # (nwave,)
     flux_quiet:          jnp.ndarray,  # (nwave,)
     flux_active:         jnp.ndarray,  # (nar, nwave)
-    ldc_coeffs_quiet:    jnp.ndarray,  # (nwave, n_coeffs)
-    ldc_coeffs_active:   jnp.ndarray,  # (nar, nwave, n_coeffs)
+    ld_coeffs_quiet:    jnp.ndarray,  # (nwave, n_coeffs)
+    ld_coeffs_active:   jnp.ndarray,  # (nar, nwave, n_coeffs)
     I_profile_quiet:     jnp.ndarray,  # (nwave, n_mu_pts)
     I_profile_active:    jnp.ndarray,  # (nar, nwave, n_mu_pts)
     mu_profile_pts:      jnp.ndarray,  # (n_mu_pts,)
@@ -550,23 +565,32 @@ def _compute_single_phase(
     total_pixels:        int,
     arsize_rads:         jnp.ndarray,  # (nar,)
     ar_smoothness:       jnp.ndarray,  # (nar,)
-    k:                   float,        # Rp / R*
-    ldc_mode:            LdcMode,
+    k:                   jnp.ndarray,  # (nwave,) Rp / R*, one value per wavelength
+    ld_mode:            LdMode,
     plot_map_wavelength: float,
     n:                   int,         # full grid side (for map scatter)
     flat_indices:        jnp.ndarray, # (total_pixels,) scatter indices
-) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    transit_softness:    float = 0.0, # see _compute_planet_mask
+) -> tuple[jnp.ndarray, jnp.ndarray]:
     """
     Full spectral computation for one rotational phase, including optional
     pixel-level planet occultation.
     ``planet_xyz`` is the planet's sky-plane position (X, Y, Z) in stellar
-    radii.  Pass ``jnp.array([0., 0., -1e10])`` and ``k=0.0`` to disable
-    the transit mask (no performance cost -- the mask is all-False).
+    radii -- the same at every wavelength (the orbit doesn't depend on
+    wavelength). ``k`` may still differ per wavelength (a chromatic transit
+    depth), so the occultation mask itself is computed per wavelength inside
+    ``_flux_at_wavelength``, not once here. Pass
+    ``jnp.array([0., 0., -1e10])`` and an all-zero ``k`` to disable the
+    transit mask (no performance cost -- the mask is all-False).
 
     Returns
     -------
-    flux_per_wavelength   : (nwave,)  normalised flux at each wavelength bin
-    contamination_factor  : (nwave,)
+    flux_per_wavelength   : (nwave,)  disc-integrated flux at each
+                             wavelength bin, in the same units as
+                             ``flux_quiet``/``flux_active`` (not normalised
+                             to the quiet-star baseline -- divide by that
+                             yourself, e.g. via a quiet-star-only call to
+                             ``make_lc``, if you want relative flux)
     star_map              : (n, n)  flux map at plot_map_wavelength
     """
     # ---- active region shapes: (nar, total_pixels) -----------------------
@@ -577,48 +601,40 @@ def _compute_single_phase(
         )
     )(ar_cart_all, arsize_rads, ar_smoothness)
 
-    # ---- Planet mask: (total_pixels,)  ----------------------------------
-    planet_mask = _compute_planet_mask(
-        x_disc, y_disc, star_pixel_rad,
-        planet_xyz[0], planet_xyz[1], planet_xyz[2], k,
-    )
-
     # ---- vmap over wavelengths ----
-    # ldc_coeffs_active/I_profile_active have the wavelength axis second
+    # ld_coeffs_active/I_profile_active have the wavelength axis second
     # (nar, nwave, ...), so they vmap on axis=1; everything else vmaps on
-    # its leading (wavelength) axis.
+    # its leading (wavelength) axis -- including k now, so the planet mask
+    # (computed inside _flux_at_wavelength) can differ per wavelength too.
     _flux_vmap = vmap(
         functools.partial(
             _flux_at_wavelength,
-            wavelength_grid = wavelength,
-            flux_quiet      = flux_quiet,
-            flux_active     = flux_active,
-            mu_disc         = mu_disc,
-            total_pixels    = total_pixels,
-            ar_shapes       = ar_shapes,
-            planet_mask     = planet_mask,
-            mu_profile_pts  = mu_profile_pts,
-            row_idx         = row_idx,
-            vel_row         = vel_row,
-            ldc_mode        = ldc_mode,
+            wavelength_grid  = wavelength,
+            flux_quiet       = flux_quiet,
+            flux_active      = flux_active,
+            mu_disc          = mu_disc,
+            total_pixels     = total_pixels,
+            ar_shapes        = ar_shapes,
+            x_disc           = x_disc,
+            y_disc           = y_disc,
+            star_pixel_rad   = star_pixel_rad,
+            planet_xyz       = planet_xyz,
+            transit_softness = transit_softness,
+            mu_profile_pts   = mu_profile_pts,
+            row_idx          = row_idx,
+            vel_row          = vel_row,
+            ld_mode         = ld_mode,
         ),
-        in_axes=(0, 0, 1, 0, 1),
+        in_axes=(0, 0, 1, 0, 1, 0),
     )
 
-    star_specs, bin_fluxes, flux_discs = _flux_vmap(
+    flux_per_wavelength, flux_discs = _flux_vmap(
         wavelength,
-        ldc_coeffs_quiet,
-        ldc_coeffs_active,
+        ld_coeffs_quiet,
+        ld_coeffs_active,
         I_profile_quiet,
         I_profile_active,
-    )
-
-    # ---- Per-wavelength normalised flux and contamination factor --------
-    flux_per_wavelength   = bin_fluxes / jnp.where(
-        star_specs == 0.0, jnp.nan, star_specs
-    )
-    contamination_factor = star_specs / jnp.where(
-        bin_fluxes == 0.0, jnp.nan, bin_fluxes
+        k,
     )
 
     # ---- Reconstruct 2D map at plot_map_wavelength ----------------------
@@ -626,7 +642,7 @@ def _compute_single_phase(
     flux_1d   = flux_discs[map_idx]   # (total_pixels,)
     star_map  = jnp.zeros(n * n).at[flat_indices].set(flux_1d).reshape(n, n)
 
-    return flux_per_wavelength, contamination_factor, star_map
+    return flux_per_wavelength, star_map
 
 
 # ---------------------------------------------------------------------------
@@ -640,8 +656,8 @@ def _compute_all_phases(
     wavelength:          jnp.ndarray,
     flux_quiet:          jnp.ndarray,
     flux_active:         jnp.ndarray,
-    ldc_coeffs_quiet:    jnp.ndarray, # (nwave, n_coeffs)
-    ldc_coeffs_active:   jnp.ndarray, # (nar, nwave, n_coeffs)
+    ld_coeffs_quiet:    jnp.ndarray, # (nwave, n_coeffs)
+    ld_coeffs_active:   jnp.ndarray, # (nar, nwave, n_coeffs)
     I_profile_quiet:     jnp.ndarray,
     I_profile_active:    jnp.ndarray,
     mu_profile_pts:      jnp.ndarray,
@@ -654,23 +670,24 @@ def _compute_all_phases(
     total_pixels:        int,
     arsize_rads:         jnp.ndarray,
     ar_smoothness:       jnp.ndarray,
-    k:                   float,       # Rp / R★
-    ldc_mode:            LdcMode,
+    k:                   jnp.ndarray,  # (nwave,) Rp / R★, one value per wavelength
+    ld_mode:            LdMode,
     plot_map_wavelength: float,
     n:                   int,
     flat_indices:        jnp.ndarray,
+    transit_softness:    float = 0.0,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
     vmap ``_compute_single_phase`` over the phase axis.
 
     ``planet_xyz_all`` contains the planet (X, Y, Z) position at each
-    (oversampled) phase.  Pass ``jnp.full((nphase, 3), [0, 0, -1e10])``
-    and ``k=0.0`` to disable transit (no performance overhead).
+    (oversampled) phase, shared across every wavelength. Pass
+    ``jnp.full((nphase, 3), [0, 0, -1e10])`` and an all-zero ``k`` to
+    disable transit (no performance overhead).
 
     Returns
     -------
     lc_raw    : (nphase, nwave)
-    epsilon   : (nphase, nwave)
     star_maps : (nphase, n, n)
     """
     _phase_vmap = vmap(
@@ -679,8 +696,8 @@ def _compute_all_phases(
             wavelength          = wavelength,
             flux_quiet          = flux_quiet,
             flux_active         = flux_active,
-            ldc_coeffs_quiet    = ldc_coeffs_quiet,
-            ldc_coeffs_active   = ldc_coeffs_active,
+            ld_coeffs_quiet    = ld_coeffs_quiet,
+            ld_coeffs_active   = ld_coeffs_active,
             I_profile_quiet     = I_profile_quiet,
             I_profile_active    = I_profile_active,
             mu_profile_pts      = mu_profile_pts,
@@ -694,10 +711,11 @@ def _compute_all_phases(
             arsize_rads         = arsize_rads,
             ar_smoothness       = ar_smoothness,
             k                   = k,
-            ldc_mode            = ldc_mode,
+            ld_mode            = ld_mode,
             plot_map_wavelength = plot_map_wavelength,
             n                   = n,
             flat_indices        = flat_indices,
+            transit_softness    = transit_softness,
         ),
         in_axes=(0,0), # vmap over both ar_carts and planet_xyz
     )
@@ -707,47 +725,48 @@ def _compute_all_phases(
 # ---------------------------------------------------------------------------
 # 7. Public API -- two-stage design
 #
-#   Stage 1:  build_model()         - NumPy, call once before sampling.
+#   Stage 1:  build_system()         - NumPy, call once before sampling.
 #                                     Pre-builds the grid and all static
 #                                     arrays that are fixed across MCMC steps.
 #
-#   Stage 2:  evaluate_light_curve() - Pure JAX, call at every MCMC step.
+#   Stage 2:  make_lc() - Pure JAX, call at every MCMC step.
 #                                      Accepts JAX arrays / tracers so it is
 #                                      fully compatible with jit, vmap, and
 #                                      gradient-based samplers.
 #
-#   compute_light_curve()            - Convenience wrapper that calls both
+#   quick_lc()            - Convenience wrapper that calls both
 #                                      stages in sequence.  Useful for
 #                                      one-off calls outside MCMC.
 # ---------------------------------------------------------------------------
 
-def _prepare_ldc_coeffs(raw, ldc_mode: LdcMode, nwave: int, label: str) -> np.ndarray:
+def _prepare_ld_coeffs(raw, ld_mode: LdMode, nwave: int, label: str,
+                       verbose: bool = False) -> np.ndarray:
     """
     Validate and broadcast a set of LDC coefficients to shape (nwave, n_coeffs).
 
-    Used for the quiet photosphere's coefficients in ``build_model``.
+    Used for the quiet photosphere's coefficients in ``build_system``.
     Each element of ``raw`` may be a scalar (broadcast across wavelength)
     or an array of length ``nwave``.
     """
-    if ldc_mode == "intensity_profile":
+    if ld_mode == "intensity_profile":
         return np.zeros((nwave, 1), dtype=np.float32)
 
-    if ldc_mode not in _N_COEFFS:
+    if ld_mode not in _N_COEFFS:
         raise ValueError(
-            f"unknown ldc_mode '{ldc_mode}'. "
+            f"unknown ld_mode '{ld_mode}'. "
             f"Must be one of {list(_N_COEFFS.keys()) + ['intensity_profile']}."
         )
-    n_coeffs = _N_COEFFS[ldc_mode]
+    n_coeffs = _N_COEFFS[ld_mode]
 
     if raw is None:
         raise ValueError(
-            f"{label} must be provided for ldc_mode='{ldc_mode}'. "
+            f"{label} must be provided for ld_mode='{ld_mode}'. "
             f"Expected {n_coeffs} coefficient(s)."
         )
     raw = list(raw) if not isinstance(raw, (list, tuple)) else list(raw)
     if len(raw) != n_coeffs:
         raise ValueError(
-            f"{label}: ldc_mode='{ldc_mode}' expects {n_coeffs} "
+            f"{label}: ld_mode='{ld_mode}' expects {n_coeffs} "
             f"coefficient(s) but {len(raw)} were provided."
         )
 
@@ -768,31 +787,44 @@ def _prepare_ldc_coeffs(raw, ldc_mode: LdcMode, nwave: int, label: str) -> np.nd
 
     coeffs = np.stack(coeff_arrays, axis=1)  # (nwave, n_coeffs)
 
-    if all_scalar:
-        coeff_str = ", ".join(f"{float(c[0]):.4f}" for c in coeff_arrays)
-        print(
-            f"{label}: scalar LDCs provided for '{ldc_mode}' law "
-            f"([{coeff_str}]) - broadcasting across all {nwave} wavelength bins."
-        )
-    else:
-        print(
-            f"{label}: per-wavelength LDCs provided for '{ldc_mode}' law "
-            f"({n_coeffs} coefficient(s), {nwave} wavelength bins)."
-        )
+    if verbose:
+        if all_scalar:
+            coeff_str = ", ".join(f"{float(c[0]):.4f}" for c in coeff_arrays)
+            print(
+                f"{label}: scalar LDCs provided for '{ld_mode}' law "
+                f"([{coeff_str}]) - broadcasting across all {nwave} wavelength bins."
+            )
+        else:
+            print(
+                f"{label}: per-wavelength LDCs provided for '{ld_mode}' law "
+                f"({n_coeffs} coefficient(s), {nwave} wavelength bins)."
+            )
 
     return coeffs
 
 
-def build_model(
+def build_system(
     wavelength: np.ndarray,
     flux_quiet: np.ndarray,
-    params: dict,
-    phases_rot: np.ndarray,
-    stellar_grid_size: int,
-    ve: float,
-    ldc_mode: LdcMode = "quadratic",
+    times: np.ndarray,
+    P_rot: float,
+    stellar_grid_size: int = 100,
+    ve: float = 0.0,
+    ld_coeffs: Optional[list] = None,
+    inc_star: float = 90.0,
+    mu_profile: Optional[np.ndarray] = None,
+    I_profile: Optional[np.ndarray] = None,
+    ld_mode: LdMode = "quadratic",
     plot_map_wavelength: Optional[float] = None,
     oversample: int = 1,
+    t0: Optional[float] = None,
+    period: Optional[float] = None,
+    a_over_rstar: Optional[float] = None,
+    inclination: Optional[float] = None,
+    k: Optional[float | np.ndarray] = None,
+    ecc: float = 0.0,
+    omega_peri: float = 0.0,
+    verbose: bool = False,
 ) -> dict:
     """
     Pre-build all static model arrays.  Call this **once** before MCMC.
@@ -802,59 +834,95 @@ def build_model(
     vary per step -- ``flux_active``, ``ar_lat``, ``ar_long``, ``ar_size``,
     ``ar_smoothness``, and each active region's own limb-darkening
     coefficients -- are intentionally excluded and passed to
-    ``evaluate_light_curve`` instead (they may of course still be held
+    ``make_lc`` instead (they may of course still be held
     fixed at every step if you don't want to sample/optimize them).
+
+    ``times``/``P_rot`` -- not a bare rotational-phase array -- are the
+    only user-facing time input: the internal rotational phase grid
+    (``phases_rot = (times / P_rot * 360) % 360``) is always derived from
+    them, since a bare phase array wraps every 360° and can't recover the
+    absolute time reference a transit needs.
+
+    Transit (optional, all-or-nothing) -- give every one of ``t0``,
+    ``period``, ``a_over_rstar``, ``inclination``, ``k`` to attach a
+    planetary transit to the model, or omit all five for a quiet-star/
+    active-region-only model. When occulting a starspot or facula, the
+    planet mask is applied at the individual pixel level, so the resulting
+    light-curve anomaly is computed correctly -- see
+    ``make_lc`` for details on how this interacts with active
+    regions. Compared to multiplying independent stellar and transit light
+    curves, this correctly handles:
+      • Planet occulting a spot (spot-crossing anomaly).
+      • Planet occulting a facula (facula-crossing anomaly).
+      • The varying limb-darkening depth of the transit as a function of
+        the stellar surface brightness profile.
 
     Parameters
     ----------
     wavelength : array_like, shape (nwave,)
+        Wavelength value or array at which the quiet photosphere and active-region spectra are defined.
     flux_quiet : array_like, shape (nwave,)
-        Quiet-photosphere spectrum.
-    params : dict
-        Quiet-photosphere model parameters. Recognised keys:
-
-        ``inc_star`` : float, optional
-            Stellar inclination in degrees (default: 90.0).
-            90° = equator-on, 0° = pole-on.
-
-        ``ldc_coeffs`` : list of float or list of array(nwave,)
-            Quiet-photosphere limb-darkening coefficients for the chosen
-            ``ldc_mode``:
-            - ``"linear"``:     [u]
-            - ``"quadratic"``:  [u1, u2]
-            - ``"power2"``:     [c, alpha]
-            - ``"kipping3"``:   [c1, c2, c3]
-            - ``"nonlinear4"``: [c1, c2, c3, c4]
-            Each element may be a scalar (broadcast to all wavelengths)
-            or an array of length ``nwave``. Active regions carry their
-            own, independent coefficients -- see ``evaluate_light_curve``.
-            For ``"quadratic"`` mode only, ``u1`` and ``u2`` are also
-            accepted as separate keys (legacy interface).
-
-        ``mu_profile`` : array-like, optional
-            Monotonically increasing mu grid points for
-            ``ldc_mode="intensity_profile"`` (default: [0, 1]).
-
-        ``I_profile`` : array-like, shape (nwave, n_mu_pts), optional
-            Quiet-photosphere specific intensity at each (wavelength, mu)
-            grid point. Required when ``ldc_mode="intensity_profile"``.
-    phases_rot : array_like, shape (nphase,)
+        Quiet-photosphere flux / spectrum.
+    times : array_like, shape (ntime,)
+        Absolute observation times [days].
+    P_rot : float
+        Stellar rotation period [days].
     stellar_grid_size : int
+        Size of the stellar grid (number of pixels along one side of the square grid).
     ve : float
-    ldc_mode : str
+        Stellar equatorial rotational velocity [km/s].
+    ld_coeffs : list of float or list of array(nwave,), optional
+        Quiet-photosphere limb-darkening coefficients for the chosen
+        ``ld_mode``:
+        - ``"linear"``:     [u]
+        - ``"quadratic"``:  [u1, u2]
+        - ``"power2"``:     [c, alpha]
+        - ``"kipping3"``:   [c1, c2, c3]
+        - ``"nonlinear4"``: [c1, c2, c3, c4]
+        Each element may be a scalar (broadcast to all wavelengths) or an
+        array of length ``nwave``. Active regions carry their own,
+        independent coefficients -- see ``make_lc``. Not used
+        (and not required) when ``ld_mode="intensity_profile"``; its
+        required length for every other mode is checked against
+        ``ld_mode`` here.
+    inc_star : float, optional
+        Stellar inclination in degrees (default: 90.0).
+        90° = equator-on, 0° = pole-on.
+    mu_profile : array-like, optional
+        Monotonically increasing mu grid points for
+        ``ld_mode="intensity_profile"`` (default: [0, 1]).
+    I_profile : array-like, shape (nwave, n_mu_pts), optional
+        Quiet-photosphere specific intensity at each (wavelength, mu) grid
+        point. Required when ``ld_mode="intensity_profile"``.
+    ld_mode : str
         Limb-darkening law, shared by the quiet photosphere and every
         active region (each with its own coefficient values).
     plot_map_wavelength : float, optional
+        Wavelength at which to plot the stellar map (see ``build_system``).
     oversample : int, optional
         Number of sub-exposures per phase point.  Each requested phase is
         spread into ``oversample`` uniformly spaced sub-phases spanning one
         phase step, and the resulting fluxes are averaged.  This mimics
         finite-exposure integration and smooths limb-crossing artefacts.
         Default: 1 (no oversampling).
+    t0, period, a_over_rstar, inclination : float, optional
+        Transit-geometry parameters: mid-transit epoch, orbital period [days],
+        semi-major axis/R*, and orbital inclination [rad]. All-or-nothing with
+        ``k``.
+    k : float or array-like, shape (nwave,), optional
+        Planet-to-star radius ratio Rp/R*. A scalar (achromatic) or an
+        array of length ``nwave`` (chromatic transit depth).
+    ecc, omega_peri : float, optional
+        Orbital eccentricity and argument of periastron [rad]. Only
+        meaningful together with a transit; default to 0.0 (circular,
+        non-precessing orbit).
+    verbose : bool, optional
+        If True, print informational messages (LDC broadcasting, phase
+        oversampling) while building the model. Default False.
 
     Returns
     -------
-    dict  - pass directly to ``evaluate_light_curve``
+    dict  - pass directly to ``make_lc``
     """
     # Validate oversample
     if not isinstance(oversample, int) or oversample < 1:
@@ -862,8 +930,12 @@ def build_model(
             f"oversample must be an integer >= 1, got {oversample}."
         )
 
-    wavelength = np.asarray(wavelength, dtype=np.float32)
-    flux_quiet = np.asarray(flux_quiet,  dtype=np.float32)
+    # ---- Rotational phase grid, derived internally from times/P_rot --------
+    times_arr_full = np.asarray(times, dtype=np.float64)
+    phases_rot = (times_arr_full / P_rot * 360.0) % 360.0
+
+    wavelength = np.atleast_1d(np.asarray(wavelength, dtype=np.float32))
+    flux_quiet = np.atleast_1d(np.asarray(flux_quiet,  dtype=np.float32))
     phases_rot = np.atleast_1d(np.asarray(phases_rot, dtype=np.float32))
 
     nwave  = len(wavelength)
@@ -873,44 +945,42 @@ def build_model(
     if oversample > 1:
         phases_oversampled = _make_oversampled_phases(phases_rot, oversample)
         nphase_compute = len(phases_oversampled)
-        print(
-            f"build_model: oversampling enabled - {oversample} sub-exposures "
-            f"per phase ({nphase} phases → {nphase_compute} sub-phases)."
-        )
+        if verbose:
+            print(
+                f"build_system: oversampling enabled - {oversample} sub-exposures "
+                f"per phase ({nphase} phases → {nphase_compute} sub-phases)."
+            )
     else:
         phases_oversampled = phases_rot
         nphase_compute = nphase
 
-    inc_star       = float(params.get("inc_star", 90.0))
-    mu_profile_pts = np.asarray(params.get("mu_profile", [0.0, 1.0]),
+    inc_star       = float(inc_star)
+    mu_profile_pts = np.asarray(mu_profile if mu_profile is not None else [0.0, 1.0],
                                 dtype=np.float32)
     if not np.all(np.diff(mu_profile_pts) > 0):
         raise ValueError(
-            "build_model: 'mu_profile' must be strictly increasing. "
+            "build_system: 'mu_profile' must be strictly increasing. "
             f"Got: {mu_profile_pts}"
         )
     I_profile = np.asarray(
-        params.get("I_profile",
-                   np.ones((nwave, len(mu_profile_pts)), dtype=np.float32)),
+        I_profile if I_profile is not None
+        else np.ones((nwave, len(mu_profile_pts)), dtype=np.float32),
         dtype=np.float32,
     )
 
-    # Accept either the unified "ldc_coeffs" key or legacy "u1"/"u2" for quadratic
-    raw = params.get("ldc_coeffs", None)
-    if raw is None and ldc_mode == "quadratic":
-        raw = [params.get("u1", 0.0), params.get("u2", 0.0)]
-    ldc_coeffs = _prepare_ldc_coeffs(raw, ldc_mode, nwave, label="build_model: quiet ldc_coeffs")
+    ld_coeffs = _prepare_ld_coeffs(ld_coeffs, ld_mode, nwave, label="build_system: quiet ld_coeffs",
+                                   verbose=verbose)
 
     grid = build_stellar_grid(stellar_grid_size, ve)
 
     if plot_map_wavelength is None:
         plot_map_wavelength = float(wavelength[nwave // 2])
 
-    return dict(
+    model = dict(
         # spectral
         wavelength          = jnp.asarray(wavelength),
         flux_quiet          = jnp.asarray(flux_quiet),
-        ldc_coeffs          = jnp.asarray(ldc_coeffs),
+        ld_coeffs          = jnp.asarray(ld_coeffs),
         I_profile           = jnp.asarray(I_profile),
         mu_profile_pts      = jnp.asarray(mu_profile_pts),
         # grid
@@ -927,25 +997,102 @@ def build_model(
         oversample          = oversample,
         nphase_original     = nphase,
         inc_star            = inc_star,
-        ldc_mode            = ldc_mode,
+        ld_mode            = ld_mode,
         plot_map_wavelength = float(plot_map_wavelength),
         nwave               = nwave,
         nphase              = nphase_compute,
     )
 
+    # ---- Optional transit ----------------------------------------------------
+    transit_args_given = dict(t0=t0, period=period, a_over_rstar=a_over_rstar,
+                               inclination=inclination, k=k)
+    given = [v is not None for v in transit_args_given.values()]
+    if any(given) and not all(given):
+        raise ValueError(
+            "build_system: t0/period/a_over_rstar/inclination/k are "
+            "all-or-nothing -- give every one of them to attach a transit, "
+            "or omit all five for a quiet-star/active-region-only model."
+        )
+    if all(given):
+        from .planet import build_transit_model   # local import avoids circular dep.
 
-def evaluate_light_curve(
+        # ---- Compute oversampled TIMES to match the oversampled phases ------
+        # We work in absolute time (not phases) so the planet's orbital
+        # position is computed correctly regardless of phase wrapping.
+        if oversample > 1:
+            n_t = len(times_arr_full)
+            dt  = (times_arr_full[1] - times_arr_full[0]) if n_t > 1 else P_rot
+            # Same offset scheme used in _make_oversampled_phases -- results align.
+            offsets = np.linspace(-dt / 2.0, dt / 2.0, oversample, endpoint=False)
+            offsets += dt / (2.0 * oversample)                          # centre sub-bins
+            times_oversampled = (
+                times_arr_full[:, None] + offsets[None, :]
+            ).ravel().astype(np.float32)
+        else:
+            times_oversampled = times_arr_full.astype(np.float32)
+
+        # ---- Validate k against the wavelength grid (scalar or per-wavelength)
+        k_arr = np.atleast_1d(np.asarray(k, dtype=np.float32))
+        if k_arr.size not in (1, nwave):
+            raise ValueError(
+                f"k shape mismatch: got size {k_arr.size} but wavelength grid has "
+                f"{nwave} bin(s). k must be a scalar (the same Rp/R* at every "
+                f"wavelength) or an array of length {nwave} (a chromatic transit depth)."
+            )
+
+        # ---- Build transit model (planet positions at oversampled times) ---
+        transit = build_transit_model(
+            times        = times_oversampled,
+            t0           = float(t0),
+            period       = float(period),
+            a_over_rstar = float(a_over_rstar),
+            inclination  = float(inclination),
+            ecc          = float(ecc),
+            omega_peri   = float(omega_peri),
+            k            = k_arr,
+        )
+
+        # ---- Attach transit data to the model dict --------------------------
+        model["planet_xyz"]  = transit["planet_xyz"]   # (nphase_compute, 3) -- static, from the
+                                                        #   concrete parameters given here
+        model["k"]           = transit["k"]
+        model["has_transit"] = True
+        model["P_rot"]       = P_rot
+        model["times"]       = times_arr_full
+        model["times_oversampled"] = jnp.asarray(times_oversampled)
+        # Defaults for make_lc's dynamic path: t0/period/a_over_rstar/
+        # inclination/k must all be given together (as individual keyword args,
+        # possibly traced) to override these; ecc/omega_peri may be overridden
+        # independently and fall back to the values stored here.
+        model["transit_params"] = dict(
+            t0=t0, period=period, a_over_rstar=a_over_rstar,
+            inclination=inclination, ecc=ecc, omega_peri=omega_peri, k=k,
+        )
+
+    return model
+
+
+def make_lc(
     model: dict,
-    flux_active: jnp.ndarray,
-    ar_lat: jnp.ndarray,
-    ar_long: jnp.ndarray,
-    ar_size: jnp.ndarray,
-    ar_smoothness: jnp.ndarray,
-    ldc_coeffs_active: Optional[jnp.ndarray] = None,
+    flux_active: Optional[jnp.ndarray] = None,
+    ar_lat: Optional[jnp.ndarray] = None,
+    ar_long: Optional[jnp.ndarray] = None,
+    ar_size: Optional[jnp.ndarray] = None,
+    ar_smoothness: Optional[jnp.ndarray] = None,
+    ld_coeffs_active: Optional[jnp.ndarray] = None,
     I_profile_active: Optional[jnp.ndarray] = None,
-) -> dict:
+    ld_coeffs_quiet: Optional[jnp.ndarray] = None,
+    t0: Optional[float] = None,
+    period: Optional[float] = None,
+    a_over_rstar: Optional[float] = None,
+    inclination: Optional[float] = None,
+    ecc: Optional[float] = None,
+    omega_peri: Optional[float] = None,
+    k: Optional[float] = None,
+    transit_softness: float = 0.0,
+) -> tuple:
     """
-    Evaluate the light curve for a given set of active region parameters.
+    Evaluate the light curve for a given set of active region and planetary parameters.
 
     This function is **pure JAX** -- all inputs may be JAX arrays or tracers,
     making it fully compatible with ``jit``, ``vmap``, and gradient-based
@@ -958,45 +1105,112 @@ def evaluate_light_curve(
     Parameters
     ----------
     model : dict
-        Pre-built model dict returned by ``build_model``.
-    flux_active : jnp.ndarray, shape (nar, nwave) or (nwave,)
-        Per-active-region flux spectrum.
+        Pre-built model dict returned by ``build_system``.
+    flux_active : jnp.ndarray, shape (nar, nwave) or (nwave,), optional
+        Per-active-region flux / spectrum.
         - If (nar, nwave): each active region gets its own spectrum.
         - If (nwave,):     broadcasts to all active regions.
-    ar_lat : jnp.ndarray, shape (nar,)
+    ar_lat : jnp.ndarray, shape (nar,), optional
         active region latitudes in degrees. Must be in [-90, 90].
-    ar_long : jnp.ndarray, shape (nar,)
+    ar_long : jnp.ndarray, shape (nar,), optional
         active region longitudes in degrees. Must be in [0, 360).
-    ar_size : jnp.ndarray, shape (nar,)
-        active region angular radii in degrees ("sigma" of each AR's
-        super-Gaussian).
-    ar_smoothness : jnp.ndarray, shape (nar,) or scalar
+    ar_size : jnp.ndarray, shape (nar,), optional
+        active region angular radii in degrees
+    ar_smoothness : jnp.ndarray, shape (nar,) or scalar, optional
         Super-Gaussian order controlling the sharpness of each AR's
         boundary (see ``_compute_ar_shape``). ``1`` is a true Gaussian;
         larger values sharpen the edge, converging to a hard-edged cap as
         ``ar_smoothness -> inf``. A scalar (or size-1 array) is broadcast
         to all active regions.
-    ldc_coeffs_active : jnp.ndarray, shape (nar, nwave, n_coeffs) or (nwave, n_coeffs), optional
+
+        ``flux_active``/``ar_lat``/``ar_long``/``ar_size``/``ar_smoothness``
+        are all-or-nothing: give every one of them to add active region(s),
+        or omit all five for a quiet star. Giving some but not all raises
+        ``ValueError``.
+    ld_coeffs_active : jnp.ndarray, shape (nar, nwave, n_coeffs) or (nwave, n_coeffs), optional
         Per-active-region limb-darkening coefficients, same law as the
-        quiet photosphere (``model["ldc_mode"]``) but independent values.
+        quiet photosphere (``model["ld_mode"]``) but independent values.
         A (nwave, n_coeffs) array broadcasts to all active regions.
         Defaults to the quiet photosphere's own coefficients if omitted.
-        Not used when ``ldc_mode="intensity_profile"``.
+        Not used when ``ld_mode="intensity_profile"``.
     I_profile_active : jnp.ndarray, shape (nar, nwave, n_mu_pts) or (nwave, n_mu_pts), optional
         Per-active-region specific-intensity profile, used only when
-        ``ldc_mode="intensity_profile"``. Defaults to the quiet
+        ``ld_mode="intensity_profile"``. Defaults to the quiet
         photosphere's own profile if omitted.
+    ld_coeffs_quiet : jnp.ndarray, shape (nwave, n_coeffs), optional
+        Dynamic override for the quiet photosphere's own limb-darkening
+        coefficients (JAX values/tracers are fine) -- the build-time
+        ``ld_coeffs`` given to ``build_system`` is
+        otherwise fixed for the life of the model, exactly like the
+        transit-geometry parameters were before they got this same
+        treatment. Defaults to the static value ``model`` was built with.
+        When given, active regions that don't specify their own
+        ``ld_coeffs_active`` default to this (possibly traced) value too,
+        instead of the static one.
+    t0, period, a_over_rstar, inclination : float, optional
+        Transit-geometry parameters: mid-transit epoch, orbital period [days],
+        semi-major axis/R*, and orbital inclination [rad]. 
+    k : float or jnp.ndarray, shape (nwave,), optional
+        Planet-to-star radius ratio Rp/R*. A scalar (achromatic) or an
+        array of length ``nwave`` (chromatic transit depth).
+        The planet's parameters are all-or-nothing, exactly like the AR parameters:
+        give every one of them to evaluate a transit at those (possibly
+        traced) values instead of the static ones ``model`` was built
+        with, or omit all five to fall back to the model's static transit
+        (or to no transit, if it doesn't have one) -- ``ValueError`` if
+        only some are given.
+    ecc, omega_peri : float, optional
+        Orbital eccentricity and argument of periastron [rad]. Only
+        meaningful together with a transit; default to 0.0 (circular,
+        non-precessing orbit). Only used together with the five required
+        transit parameters above (giving either of these without the rest
+        also raises ``ValueError``). Default to the values ``model``'s transit
+        was built with.
+    transit_softness : float, optional
+        Sigmoid transition width [R*] for the planet occultation mask
+        (default 0.0: exact hard edge, matching the physical simulation).
+        The hard edge makes occulted flux a staircase function of every
+        transit-geometry parameter on the fixed pixel grid, so
+        ``jax.grad`` w.r.t. ``k``/``a_over_rstar``/``inclination``/``t0``/
+        ``period``/``ecc``/``omega_peri`` is exactly 0 almost everywhere
+        regardless of the values passed in above. Set this > 0 (e.g. a few
+        tenths of a pixel in R* units) to get a smooth, non-zero gradient
+        for gradient-based retrieval of those parameters. See
+        ``_compute_planet_mask`` for details and trade-offs.
 
     Returns
     -------
-    dict with keys
-    ~~~~~~~~~~~~~~
-    ``lc``        - (nphase_original, nwave) normalised flux at each wavelength bin
-    ``epsilon``   - (nphase_original, nwave) contamination factor ε(λ)
-    ``star_maps`` - (nphase_original, n, n) stellar flux map per phase
+    (lc, star_maps) tuple
+    ~~~~~~~~~~~~~~~~~~~~~
+    ``lc``        - (ntimes, nwave) disc-integrated flux at each
+                    wavelength bin, in the same units as ``flux_quiet``/``flux_active``.
+                    If ``nwave == 1``, the wavelength axis is dropped and this is shape (ntimes,).
+    ``star_maps`` - (ntimes, n, n) stellar flux map per phase
                     (maps are from the *first* sub-exposure of each phase
                     when oversampling is active)
     """
+    # ---- AR parameters: all-or-nothing ------------------------------------
+    _ar_args = dict(flux_active=flux_active, ar_lat=ar_lat, ar_long=ar_long,
+                     ar_size=ar_size, ar_smoothness=ar_smoothness)
+    _ar_given = {name: v for name, v in _ar_args.items() if v is not None}
+    if _ar_given and len(_ar_given) != len(_ar_args):
+        _missing = [name for name in _ar_args if name not in _ar_given]
+        raise ValueError(
+            "make_lc: partial active-region parameters given "
+            f"({sorted(_ar_given)}); missing {_missing}. Provide all of "
+            f"{list(_ar_args)} to add active region(s), or none for a quiet star."
+        )
+    if not _ar_given:
+        # No active region requested: a single AR whose own spectrum and LDC
+        # exactly equal the quiet photosphere's has contrast C_a == 1
+        # everywhere, so its (1 - C_a) contribution is exactly 0 regardless
+        # of its position/size -- i.e. an exact quiet-star light curve.
+        flux_active   = model["flux_quiet"]
+        ar_lat        = jnp.array([0.0])
+        ar_long       = jnp.array([0.0])
+        ar_size       = jnp.array([1.0])
+        ar_smoothness = jnp.array([1.0])
+
     flux_active   = jnp.atleast_1d(jnp.asarray(flux_active))
     ar_lat        = jnp.atleast_1d(jnp.asarray(ar_lat))
     ar_long       = jnp.atleast_1d(jnp.asarray(ar_long))
@@ -1035,29 +1249,42 @@ def evaluate_light_curve(
             f"but expected a scalar or shape ({nar},)."
         )
 
-    ldc_mode = model["ldc_mode"]
-    n_coeffs = 1 if ldc_mode == "intensity_profile" else _N_COEFFS[ldc_mode]
+    ld_mode = model["ld_mode"]
+    n_coeffs = 1 if ld_mode == "intensity_profile" else _N_COEFFS[ld_mode]
+
+    # ---- Quiet photosphere's own LDC coefficients: static (model-built)
+    # value by default, or a per-call (possibly traced) override -----------
+    if ld_coeffs_quiet is None:
+        ld_coeffs_quiet_val = model["ld_coeffs"]
+    else:
+        ld_coeffs_quiet_val = jnp.asarray(ld_coeffs_quiet)
+        if ld_coeffs_quiet_val.shape != (nwave, n_coeffs):
+            raise ValueError(
+                f"ld_coeffs_quiet shape mismatch: got {ld_coeffs_quiet_val.shape} "
+                f"but expected ({nwave}, {n_coeffs})."
+            )
 
     # ---- Per-AR limb-darkening coefficients: default to the quiet
-    # photosphere's own, otherwise broadcast (nwave, n_coeffs) -> (nar, ...)
-    if ldc_coeffs_active is None:
-        ldc_coeffs_active = jnp.broadcast_to(
-            model["ldc_coeffs"][None, :, :], (nar, nwave, n_coeffs)
+    # photosphere's own (dynamic override included), otherwise broadcast
+    # (nwave, n_coeffs) -> (nar, ...)
+    if ld_coeffs_active is None:
+        ld_coeffs_active = jnp.broadcast_to(
+            ld_coeffs_quiet_val[None, :, :], (nar, nwave, n_coeffs)
         )
     else:
-        ldc_coeffs_active = jnp.asarray(ldc_coeffs_active)
-        if ldc_coeffs_active.ndim == 2:
-            if ldc_coeffs_active.shape != (nwave, n_coeffs):
+        ld_coeffs_active = jnp.asarray(ld_coeffs_active)
+        if ld_coeffs_active.ndim == 2:
+            if ld_coeffs_active.shape != (nwave, n_coeffs):
                 raise ValueError(
-                    f"ldc_coeffs_active shape mismatch: got {ldc_coeffs_active.shape} "
+                    f"ld_coeffs_active shape mismatch: got {ld_coeffs_active.shape} "
                     f"but expected ({nwave}, {n_coeffs})."
                 )
-            ldc_coeffs_active = jnp.broadcast_to(
-                ldc_coeffs_active[None, :, :], (nar, nwave, n_coeffs)
+            ld_coeffs_active = jnp.broadcast_to(
+                ld_coeffs_active[None, :, :], (nar, nwave, n_coeffs)
             )
-        elif ldc_coeffs_active.shape != (nar, nwave, n_coeffs):
+        elif ld_coeffs_active.shape != (nar, nwave, n_coeffs):
             raise ValueError(
-                f"ldc_coeffs_active shape mismatch: got {ldc_coeffs_active.shape} "
+                f"ld_coeffs_active shape mismatch: got {ld_coeffs_active.shape} "
                 f"but expected ({nar}, {nwave}, {n_coeffs})."
             )
 
@@ -1109,25 +1336,75 @@ def evaluate_light_curve(
         model["phases_rot"]
     )   # (nphase_compute, nar, 3)
 
-   # ---- Planet positions (if a transit model is present) ---------------
-    if model.get("has_transit", False):
-       planet_xyz_all = model["planet_xyz"]    # (nphase_compute, 3)
-       k_val          = float(model["k"])
+    # ---- Transit parameters: all-or-nothing (required 5), ecc/omega_peri
+    # only meaningful alongside them -------------------------------------
+    _transit_required = dict(t0=t0, period=period, a_over_rstar=a_over_rstar,
+                               inclination=inclination, k=k)
+    _transit_optional  = dict(ecc=ecc, omega_peri=omega_peri)
+    _transit_given = {name: v for name, v in {**_transit_required, **_transit_optional}.items()
+                       if v is not None}
+    if _transit_given:
+        _missing_required = [name for name, v in _transit_required.items() if v is None]
+        if _missing_required:
+            raise ValueError(
+                "make_lc: partial transit parameters given "
+                f"({sorted(_transit_given)}); missing {_missing_required}. Provide all "
+                f"of {list(_transit_required)} to evaluate a transit (ecc/omega_peri "
+                "are optional and default to the model's build-time values), or none "
+                "to leave the transit as-is."
+            )
+        if not model.get("has_transit", False):
+            raise ValueError(
+                "make_lc: transit parameters were given, but this model "
+                "has no transit attached. Build it with build_system(...) first."
+            )
+
+    # ---- Planet positions (if a transit model is present) ---------------
+    if _transit_given:
+        # Dynamic path: recompute positions from (possibly traced) orbital
+        # parameters every call, exactly like ar_cart is recomputed from
+        # ar_lat/ar_long every call. k_val is deliberately left as-is
+        # (not float()-cast) so gradients w.r.t. k propagate through
+        # _compute_planet_mask, which is written to accept a traced k.
+        _defaults  = model["transit_params"]
+        ecc_val        = ecc        if ecc        is not None else _defaults.get("ecc", 0.0)
+        omega_peri_val = omega_peri if omega_peri is not None else _defaults.get("omega_peri", 0.0)
+        planet_xyz_all = compute_planet_sky_positions(
+            model["times_oversampled"], t0, period, a_over_rstar, inclination,
+            ecc_val, omega_peri_val,
+        )
+        k_val = k
+    elif model.get("has_transit", False):
+        # Static, backwards-compatible path: positions baked at build time.
+        planet_xyz_all = model["planet_xyz"]    # (nphase_compute, 3)
+        k_val          = model["k"]             # scalar or (nwave,)
     else:
-       # Dummy: planet permanently behind the star, zero-radius disc.
-       nphase_compute = model["phases_rot"].shape[0]
-       planet_xyz_all = jnp.zeros((nphase_compute, 3)).at[:, 2].set(-1e10)
-       k_val          = 0.0
+        # Dummy: planet permanently behind the star, zero-radius disc.
+        nphase_compute = model["phases_rot"].shape[0]
+        planet_xyz_all = jnp.zeros((nphase_compute, 3)).at[:, 2].set(-1e10)
+        k_val          = 0.0
+
+    # ---- Broadcast k to (nwave,): a scalar means the same (achromatic)
+    # radius ratio at every wavelength; an array of shape (nwave,) gives a
+    # genuinely chromatic transit depth (the occultation mask is computed
+    # per wavelength -- see _flux_at_wavelength -- specifically to support this).
+    k_val = jnp.atleast_1d(jnp.asarray(k_val))
+    if k_val.size == 1:
+        k_val = jnp.broadcast_to(k_val, (nwave,))
+    elif k_val.shape != (nwave,):
+        raise ValueError(
+            f"k shape mismatch: got shape {k_val.shape} but expected scalar or ({nwave},)."
+        )
 
     # ---- All-phases computation ------------------------------------------
-    lc_raw, epsilon, star_maps = _compute_all_phases(
+    lc_raw, star_maps = _compute_all_phases(
         all_ar_carts,
         planet_xyz_all,
         wavelength          = model["wavelength"],
         flux_quiet          = model["flux_quiet"],
         flux_active         = flux_active,
-        ldc_coeffs_quiet    = model["ldc_coeffs"],
-        ldc_coeffs_active   = ldc_coeffs_active,
+        ld_coeffs_quiet    = ld_coeffs_quiet_val,
+        ld_coeffs_active   = ld_coeffs_active,
         I_profile_quiet     = model["I_profile"],
         I_profile_active    = I_profile_active,
         mu_profile_pts      = model["mu_profile_pts"],
@@ -1141,10 +1418,11 @@ def evaluate_light_curve(
         arsize_rads         = jnp.deg2rad(ar_size),
         ar_smoothness       = ar_smoothness,
         k                   = k_val,
-        ldc_mode            = model["ldc_mode"],
+        ld_mode            = model["ld_mode"],
         plot_map_wavelength = model["plot_map_wavelength"],
         n                   = model["n"],
         flat_indices        = model["flat_indices"],
+        transit_softness    = transit_softness,
     )
 
     # ---- Oversample averaging --------------------------------------------
@@ -1152,283 +1430,195 @@ def evaluate_light_curve(
         # lc_raw: (nphase_compute, nwave) → (nphase_original, oversample, nwave) → mean
         lc_raw = lc_raw.reshape(nphase_original, oversample, nwave).mean(axis=1)
 
-        # epsilon: (nphase_compute, nwave) → (nphase_original, oversample, nwave) → mean
-        epsilon = epsilon.reshape(nphase_original, oversample, nwave).mean(axis=1)
-
         # star_maps: take only the first sub-exposure per original phase
         # (averaging 2D maps is expensive and rarely useful)
         star_maps = star_maps[::oversample]
 
-    return {
-        "lc"        : lc_raw,
-        "epsilon"   : epsilon,
-        "star_maps" : star_maps,
-    }
+    # ---- Single-wavelength convenience: drop the now-degenerate nwave
+    # axis so single-channel callers get (nphase,) instead of (nphase, 1) ---
+    if nwave == 1:
+        lc_raw = lc_raw[..., 0]
+
+    return lc_raw, star_maps
 
 
-def compute_light_curve(
+def quick_lc(
     wavelength: np.ndarray,
     flux_quiet: np.ndarray,
     flux_active: np.ndarray,
-    params: dict,
     ar_lat: np.ndarray,
     ar_long: np.ndarray,
     ar_size: np.ndarray,
     ar_smoothness: np.ndarray,
-    phases_rot: np.ndarray,
-    stellar_grid_size: int,
-    ve: float,
-    ldc_mode: LdcMode = "quadratic",
-    ldc_coeffs_active: Optional[np.ndarray] = None,
+    times: np.ndarray,
+    P_rot: float,
+    stellar_grid_size: int = 100,
+    ve: float = 0.0,
+    ld_coeffs: Optional[list] = None,
+    inc_star: float = 90.0,
+    mu_profile: Optional[np.ndarray] = None,
+    I_profile: Optional[np.ndarray] = None,
+    ld_mode: LdMode = "quadratic",
+    ld_coeffs_active: Optional[np.ndarray] = None,
     I_profile_active: Optional[np.ndarray] = None,
     plot_map_wavelength: Optional[float] = None,
     oversample: int = 1,
-) -> dict:
+    t0: Optional[float] = None,
+    period: Optional[float] = None,
+    a_over_rstar: Optional[float] = None,
+    inclination: Optional[float] = None,
+    k: Optional[float | np.ndarray] = None,
+    ecc: float = 0.0,
+    omega_peri: float = 0.0,
+    verbose: bool = False,
+) -> tuple:
     """
     Convenience wrapper: build model and evaluate in one call.
 
     Equivalent to::
 
-        model  = build_model(wavelength, flux_quiet, params, phases_rot,
-                             stellar_grid_size, ve, ldc_mode,
-                             plot_map_wavelength, oversample)
-        result = evaluate_light_curve(model, flux_active, ar_lat, ar_long,
+        model  = build_system(wavelength, flux_quiet, times, P_rot,
+                             stellar_grid_size, ve, ld_coeffs, inc_star,
+                             mu_profile, I_profile, ld_mode,
+                             plot_map_wavelength, oversample,
+                             t0, period, a_over_rstar, inclination, k,
+                             ecc, omega_peri)
+        lc, star_maps = make_lc(model, flux_active, ar_lat, ar_long,
                                       ar_size, ar_smoothness,
-                                      ldc_coeffs_active, I_profile_active)
+                                      ld_coeffs_active, I_profile_active)
 
-    Use ``build_model`` + ``evaluate_light_curve`` directly when running
+    Use ``build_system`` + ``make_lc`` directly when running
     MCMC so the grid is built only once.
 
     Parameters
     ----------
     wavelength : array_like, shape (nwave,)
+        Wavelength value or array at which the quiet photosphere and active-region spectra are defined.
     flux_quiet : array_like, shape (nwave,)
-    flux_active : array_like, shape (nar, nwave) or (nwave,)
-    params : dict
-    ar_lat : array_like, shape (nar,)
-    ar_long : array_like, shape (nar,)
-    ar_size : array_like, shape (nar,)
-    ar_smoothness : array_like, shape (nar,) or scalar
-        Super-Gaussian order controlling AR boundary sharpness (see
-        ``evaluate_light_curve``). If scalar, it is shared across all ARs.
-    phases_rot : array_like, shape (nphase,)
+        Quiet-photosphere flux / spectrum.
+    flux_active : jnp.ndarray, shape (nar, nwave) or (nwave,), optional
+        Per-active-region flux / spectrum.
+        - If (nar, nwave): each active region gets its own spectrum.
+        - If (nwave,):     broadcasts to all active regions.
+    ar_lat : jnp.ndarray, shape (nar,), optional
+        active region latitudes in degrees. Must be in [-90, 90].
+    ar_long : jnp.ndarray, shape (nar,), optional
+        active region longitudes in degrees. Must be in [0, 360).
+    ar_size : jnp.ndarray, shape (nar,), optional
+        active region angular radii in degrees
+    ar_smoothness : jnp.ndarray, shape (nar,) or scalar, optional
+        Super-Gaussian order controlling the sharpness of each AR's
+        boundary (see ``_compute_ar_shape``). ``1`` is a true Gaussian;
+        larger values sharpen the edge, converging to a hard-edged cap as
+        ``ar_smoothness -> inf``. A scalar (or size-1 array) is broadcast
+        to all active regions.
+
+        ``flux_active``/``ar_lat``/``ar_long``/``ar_size``/``ar_smoothness``
+        are all-or-nothing: give every one of them to add active region(s),
+        or omit all five for a quiet star. Giving some but not all raises
+        ``ValueError``.
+    times : array_like, shape (ntime,)
+        Absolute observation times [days].
+    P_rot : float
+        Stellar rotation period [days].
     stellar_grid_size : int
+        Size of the stellar grid (number of pixels along one side of the square grid).
     ve : float
-    ldc_mode : str
-    ldc_coeffs_active : array_like, optional
-        Per-AR limb-darkening coefficients (see ``evaluate_light_curve``).
-    I_profile_active : array_like, optional
-        Per-AR specific-intensity profile (see ``evaluate_light_curve``).
+        Stellar equatorial rotational velocity [km/s].
+    ld_coeffs : list of float or list of array(nwave,), optional
+        Quiet-photosphere limb-darkening coefficients for the chosen
+        ``ld_mode``:
+        - ``"linear"``:     [u]
+        - ``"quadratic"``:  [u1, u2]
+        - ``"power2"``:     [c, alpha]
+        - ``"kipping3"``:   [c1, c2, c3]
+        - ``"nonlinear4"``: [c1, c2, c3, c4]
+        Each element may be a scalar (broadcast to all wavelengths) or an
+        array of length ``nwave``. Active regions carry their own,
+        independent coefficients -- see ``make_lc``. Not used
+        (and not required) when ``ld_mode="intensity_profile"``; its
+        required length for every other mode is checked against
+        ``ld_mode`` here.
+    inc_star : float, optional
+        Stellar inclination in degrees (default: 90.0).
+        90° = equator-on, 0° = pole-on.
+    mu_profile : array-like, optional
+        Monotonically increasing mu grid points for
+        ``ld_mode="intensity_profile"`` (default: [0, 1]).
+    I_profile : array-like, shape (nwave, n_mu_pts), optional
+        Quiet-photosphere specific intensity at each (wavelength, mu) grid
+        point. Required when ``ld_mode="intensity_profile"``.
+    ld_mode : str
+        Limb-darkening law, shared by the quiet photosphere and every
+        active region (each with its own coefficient values).
+    ld_coeffs_active : jnp.ndarray, shape (nar, nwave, n_coeffs) or (nwave, n_coeffs), optional
+        Per-active-region limb-darkening coefficients, same law as the
+        quiet photosphere (``model["ld_mode"]``) but independent values.
+        A (nwave, n_coeffs) array broadcasts to all active regions.
+        Defaults to the quiet photosphere's own coefficients if omitted.
+        Not used when ``ld_mode="intensity_profile"``.
+    I_profile_active : jnp.ndarray, shape (nar, nwave, n_mu_pts) or (nwave, n_mu_pts), optional
+        Per-active-region specific-intensity profile, used only when
+        ``ld_mode="intensity_profile"``. Defaults to the quiet
+        photosphere's own profile if omitted.
     plot_map_wavelength : float, optional
+        Wavelength at which to plot the stellar map (see ``build_system``).
     oversample : int, optional
-        Number of sub-exposures per phase point (default: 1).
+        Number of sub-exposures per phase point.  Each requested phase is
+        spread into ``oversample`` uniformly spaced sub-phases spanning one
+        phase step, and the resulting fluxes are averaged.  This mimics
+        finite-exposure integration and smooths limb-crossing artefacts.
+        Default: 1 (no oversampling).
+    t0, period, a_over_rstar, inclination : float, optional
+        Transit-geometry parameters: mid-transit epoch, orbital period [days],
+        semi-major axis/R*, and orbital inclination [rad]. All-or-nothing with
+        ``k``.
+    k : float or array-like, shape (nwave,), optional
+        Planet-to-star radius ratio Rp/R*. A scalar (achromatic) or an
+        array of length ``nwave`` (chromatic transit depth).
+    ecc, omega_peri : float, optional
+        Orbital eccentricity and argument of periastron [rad]. Only
+        meaningful together with a transit; default to 0.0 (circular,
+        non-precessing orbit).
+    verbose : bool, optional
+        If True, print informational messages (LDC broadcasting, phase
+        oversampling) while building the model. Default False.
 
     Returns
     -------
-    dict with keys ``lc``, ``epsilon``, ``star_maps`` as NumPy arrays.
+    (lc, star_maps) tuple
+    ~~~~~~~~~~~~~~~~~~~~~
+    ``lc``        - (ntimes, nwave) disc-integrated flux at each
+                    wavelength bin, in the same units as
+                    ``flux_quiet``/``flux_active`` (not normalised to the
+                    quiet-star baseline -- divide by that yourself if you
+                    want relative flux). If ``nwave == 1``, the wavelength
+                    axis is dropped and this is shape (ntimes,).
+    ``star_maps`` - (ntimes, n, n) stellar flux map per phase
+                    (maps are from the *first* sub-exposure of each phase
+                    when oversampling is active)
     """
-    model  = build_model(
-        wavelength, flux_quiet, params, phases_rot, stellar_grid_size,
-        ve, ldc_mode, plot_map_wavelength, oversample,
+    model  = build_system(
+        wavelength, flux_quiet, times=times, P_rot=P_rot,
+        stellar_grid_size=stellar_grid_size, ve=ve,
+        ld_coeffs=ld_coeffs, inc_star=inc_star, mu_profile=mu_profile,
+        I_profile=I_profile, ld_mode=ld_mode,
+        plot_map_wavelength=plot_map_wavelength, oversample=oversample,
+        t0=t0, period=period, a_over_rstar=a_over_rstar,
+        inclination=inclination, k=k, ecc=ecc, omega_peri=omega_peri,
+        verbose=verbose,
     )
 
     flux_active_arr = np.atleast_1d(np.asarray(flux_active, dtype=np.float32))
-    result = evaluate_light_curve(
+    lc, star_maps = make_lc(
         model,
         jnp.asarray(flux_active_arr),
         jnp.asarray(np.atleast_1d(np.asarray(ar_lat,  dtype=np.float32))),
         jnp.asarray(np.atleast_1d(np.asarray(ar_long, dtype=np.float32))),
         jnp.asarray(np.atleast_1d(np.asarray(ar_size, dtype=np.float32))),
         jnp.asarray(np.atleast_1d(np.asarray(ar_smoothness, dtype=np.float32))),
-        None if ldc_coeffs_active is None else jnp.asarray(np.asarray(ldc_coeffs_active, dtype=np.float32)),
+        None if ld_coeffs_active is None else jnp.asarray(np.asarray(ld_coeffs_active, dtype=np.float32)),
         None if I_profile_active  is None else jnp.asarray(np.asarray(I_profile_active,  dtype=np.float32)),
     )
-    return {
-        "lc"        : np.array(result["lc"]),
-        "epsilon"   : np.array(result["epsilon"]),
-        "star_maps" : np.array(result["star_maps"]),
-    }
+    return np.array(lc), np.array(star_maps)
 
-def build_combined_model(
-    wavelength:         np.ndarray,
-    flux_quiet:         np.ndarray,
-    params:             dict,
-    times:              np.ndarray,
-    P_rot:              float,
-    transit_params:     dict,
-    stellar_grid_size:  int,
-    ve:                 float,
-    ldc_mode:           LdcMode            = "quadratic",
-    plot_map_wavelength: Optional[float]   = None,
-    oversample:         int                = 1,
-) -> dict:
-    """
-    Build a combined stellar-activity + planetary-transit sajax model.
-
-    This is the entry point for modelling **active-region crossing events**:
-    the planet mask is applied at the individual pixel level, so if the planet
-    occults a starspot or facula the resulting anomaly in the light curve is
-    computed correctly.
-
-    Compared to multiplying independent stellar and transit light curves, this
-    function correctly handles:
-      • Planet occulting a spot (spot-crossing anomaly).
-      • Planet occulting a facula (facula-crossing anomaly).
-      • The varying limb-darkening depth of the transit as a function of
-        the stellar surface brightness profile.
-
-    Parameters
-    ----------
-    wavelength         : (nwave,)  wavelength array  [nm]
-    flux_quiet         : (nwave,)  quiet-star flux spectrum
-    params             : stellar model params dict (same as ``build_model``)
-    times              : (ntime,)  absolute observation times  [days]
-    P_rot              : stellar rotation period  [days]
-    transit_params     : dict with keys (all required unless noted):
-        ``t0``            - mid-transit epoch  [days]
-        ``period``        - orbital period  [days]
-        ``a_over_rstar``  - semi-major axis/R*  [dimensionless]
-        ``inclination``   - orbital inclination  [rad]
-        ``k``             - planet-to-star radius ratio  Rp/R* [dimensionless]
-        ``ecc``           - eccentricity  [dimensionless] (default 0.0)
-        ``omega_peri``    - argument of periastron  [rad]  (default 0.0)
-    stellar_grid_size  : stellar radius in pixels
-    ve                 : equatorial velocity  [km/s]
-    ldc_mode           : limb-darkening law  (same options as ``build_model``)
-    plot_map_wavelength: wavelength for 2D map output  [nm]
-    oversample         : sub-exposure count per phase point  (default 1)
-
-    Returns
-    -------
-    model dict - pass directly to ``evaluate_light_curve``
-
-    Notes
-    -----
-    The oversampling is applied *consistently* to both the stellar rotation
-    phase grid and the orbital time grid.  For each original time t_i with
-    phase step dt, ``oversample`` sub-times are generated spanning
-    [t_i - dt/2, t_i + dt/2), exactly mirroring ``_make_oversampled_phases``.
-    """
-    from .planet import build_transit_model   # local import avoids circular dep.
-
-    times_arr  = np.asarray(times, dtype=np.float64)
-    phases_rot = (times_arr / P_rot * 360.0) % 360.0
-
-    # ---- Build the base stellar model (handles phase oversampling) ----------
-    model = build_model(
-        wavelength, flux_quiet, params, phases_rot, stellar_grid_size,
-        ve, ldc_mode, plot_map_wavelength, oversample,
-    )
-
-    # ---- Compute oversampled TIMES to match the oversampled phases ----------
-    # We work in absolute time (not phases) so the planet's orbital position
-    # is computed correctly regardless of phase wrapping.
-    if oversample > 1:
-        n_t = len(times_arr)
-        dt  = (times_arr[1] - times_arr[0]) if n_t > 1 else P_rot
-        # Same offset scheme used in _make_oversampled_phases -- results align.
-        offsets = np.linspace(-dt / 2.0, dt / 2.0, oversample, endpoint=False)
-        offsets += dt / (2.0 * oversample)                          # centre sub-bins
-        times_oversampled = (
-            times_arr[:, None] + offsets[None, :]
-        ).ravel().astype(np.float32)
-    else:
-        times_oversampled = times_arr.astype(np.float32)
-
-    # ---- Build transit model (planet positions at oversampled times) ---------
-    tp = transit_params
-    transit = build_transit_model(
-        times      = times_oversampled,
-        t0         = float(tp["t0"]),
-        period     = float(tp["period"]),
-        a_over_rstar = float(tp["a_over_rstar"]),
-        inclination  = float(tp["inclination"]),
-        ecc          = float(tp.get("ecc",        0.0)),
-        omega_peri   = float(tp.get("omega_peri", 0.0)),
-        k            = float(tp["k"]),
-    )
-
-    # ---- Attach transit data to the model dict ------------------------------
-    model["planet_xyz"]  = transit["planet_xyz"]   # (nphase_compute, 3)
-    model["k"]           = transit["k"]
-    model["has_transit"] = True
-    model["P_rot"]       = P_rot
-    model["times"]       = times_arr
-
-    return model
-
-def compute_combined_light_curve(
-    wavelength:         np.ndarray,
-    flux_quiet:         np.ndarray,
-    flux_active:        np.ndarray,
-    params:             dict,
-    ar_lat:             np.ndarray,
-    ar_long:            np.ndarray,
-    ar_size:            np.ndarray,
-    ar_smoothness:      np.ndarray,
-    times:              np.ndarray,
-    P_rot:              float,
-    transit_params:     dict,
-    stellar_grid_size:  int,
-    ve:                 float,
-    ldc_mode:           LdcMode            = "quadratic",
-    ldc_coeffs_active:  Optional[np.ndarray] = None,
-    I_profile_active:   Optional[np.ndarray] = None,
-    plot_map_wavelength: Optional[float]   = None,
-    oversample:         int                = 1,
-) -> dict:
-    """
-    Convenience wrapper: build a combined stellar + transit model and
-    evaluate it in one call.
-
-    Equivalent to::
-
-        model  = build_combined_model(wavelength, flux_quiet, params, times, P_rot,
-                             transit_params, stellar_grid_size, ve, ldc_mode,
-                             plot_map_wavelength, oversample)
-
-        result = evaluate_light_curve(model, flux_active, ar_lat, ar_long,
-                                      ar_size, ar_smoothness,
-                                      ldc_coeffs_active, I_profile_active)
-
-    Use ``build_model`` + ``evaluate_light_curve`` directly when running
-    MCMC so the grid is built only once.
-
-    Parameters
-    ----------
-    (All parameters match ``build_combined_model`` and
-    ``evaluate_light_curve``.  See their docstrings for details.)
-
-    transit_params : dict
-        ``t0``, ``period``, ``a_over_rstar``, ``inclination``, ``k``,
-        and optionally ``ecc``, ``omega_peri``.
-
-    Returns
-    -------
-    dict with keys ``lc``, ``epsilon``, ``star_maps``  (same as
-    ``compute_light_curve``).
-
-    """
-
-    model = build_combined_model(
-        wavelength, flux_quiet, params, times, P_rot, transit_params,
-        stellar_grid_size, ve, ldc_mode,
-        plot_map_wavelength, oversample,
-    )
-
-    flux_active_arr = np.atleast_1d(np.asarray(flux_active, dtype=np.float32))
-    result = evaluate_light_curve(
-        model,
-        jnp.asarray(flux_active_arr),
-        jnp.asarray(np.atleast_1d(np.asarray(ar_lat,  dtype=np.float32))),
-        jnp.asarray(np.atleast_1d(np.asarray(ar_long, dtype=np.float32))),
-        jnp.asarray(np.atleast_1d(np.asarray(ar_size, dtype=np.float32))),
-        jnp.asarray(np.atleast_1d(np.asarray(ar_smoothness, dtype=np.float32))),
-        None if ldc_coeffs_active is None else jnp.asarray(np.asarray(ldc_coeffs_active, dtype=np.float32)),
-        None if I_profile_active  is None else jnp.asarray(np.asarray(I_profile_active,  dtype=np.float32)),
-    )
-    return {
-        "lc"        : np.array(result["lc"]),
-        "epsilon"   : np.array(result["epsilon"]),
-        "star_maps" : np.array(result["star_maps"]),
-    }
