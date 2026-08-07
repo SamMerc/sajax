@@ -98,7 +98,7 @@ is the hot path and is safe to JIT via:
     from jax import jit
     _compute_all_phases_jit = jit(_compute_all_phases, static_argnames=[
         "star_pixel_rad", "total_pixels", "ld_mode",
-        "plot_map_wavelength", "n",
+        "plot_map_wavelength", "n", "transit_softness"
     ])
 """
 
@@ -868,7 +868,7 @@ def build_system(
     P_rot : float
         Stellar rotation period [days].
     stellar_grid_size : int
-        Size of the stellar grid (number of pixels along one side of the square grid).
+        Radius of the stellar grid.
     ve : float
         Stellar equatorial rotational velocity [km/s].
     ld_coeffs : list of float or list of array(nwave,), optional
@@ -1522,7 +1522,7 @@ def quick_lc(
     P_rot : float
         Stellar rotation period [days].
     stellar_grid_size : int
-        Size of the stellar grid (number of pixels along one side of the square grid).
+        Radius of the stellar grid.
     ve : float
         Stellar equatorial rotational velocity [km/s].
     ld_coeffs : list of float or list of array(nwave,), optional
