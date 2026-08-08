@@ -310,18 +310,19 @@ def _compute_ar_shape(
 
     The AR is a spherical cap of angular radius ``arsize_rad`` (the distribution's
     "sigma"). The shape falls off from the AR's centre as a super-Gaussian
-    of order ``ar_smoothness``:
+    of order ``ar_smoothness``, in the great-circle angle ``theta`` from the AR centre:
 
       - ``ar_smoothness -> inf``  converges to a top-hat function.
-      - ``ar_smoothness == 1``    is a Gaussian.
+      - ``ar_smoothness == 1``    is a Gaussian in theta, with
+                                   sigma = arsize_rad / sqrt(2).
 
     This shape peaks at exactly 1 at the AR's centre and its amplitude within
     the light-curve formula is set separately by the AR's spectral contrast (see
     ``_flux_at_wavelength``). Thus, this function is purely geometric and
     carries no wavelength dependence.
 
-    Uses the exact spherical "distance" variable ``x = 1 - cos(theta)``, with theta 
-    the great circle distance, so this *holds even for large active regions*.
+    Uses the exact spherical "distance" variable ``x = 1 - cos(theta) = 2 sin^2(theta/2)``,
+    so this *holds even for large active regions*, unlike a flat-sky ``theta``.
 
     Parameters
     ----------
@@ -344,14 +345,17 @@ def _compute_ar_shape(
     r2     = x_disc ** 2 + y_disc ** 2
     z_disc = jnp.sqrt(jnp.maximum(star_pixel_rad ** 2 - r2, 0.0))
 
-    # Cosine of great-circle distance via dot product on the unit sphere.
-    cos_theta = (spx * x_disc + spy * y_disc + spz * z_disc) / (star_pixel_rad ** 2)
+    # Chord between the pixel and the AR centre, both normalised onto the
+    # unit sphere.
+    dx = x_disc / star_pixel_rad - spx / star_pixel_rad
+    dy = y_disc / star_pixel_rad - spy / star_pixel_rad
+    dz = z_disc / star_pixel_rad - spz / star_pixel_rad
 
-    # Exact spherical "distance" variable.
-    x  = 1.0 - cos_theta
-    x0 = jnp.maximum(1.0 - jnp.cos(arsize_rad), _AR_SHAPE_TINY)
+    # Exact spherical "distance" variable: x = 1 - cos(theta) = |chord|^2 / 2.
+    x  = 0.5 * (dx ** 2 + dy ** 2 + dz ** 2)
+    x0 = jnp.maximum(2.0 * jnp.sin(arsize_rad / 2.0) ** 2, _AR_SHAPE_TINY)
 
-    exponent = 2.0 * ar_smoothness
+    exponent = ar_smoothness
 
     # Computed in log-space and clipped before exponentiating: for large
     # ar_smoothness / small arsize_rad, (x/x0)**exponent overflows to inf
