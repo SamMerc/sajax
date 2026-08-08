@@ -568,6 +568,15 @@ class TestInputValidation:
                 ar_smoothness=jnp.array([1.0, 2.0, 3.0]),  # wrong size
             )
 
+    def test_ar_smoothness_below_one_raises(self, small_model):
+        nwave = small_model["nwave"]
+        with pytest.raises(ValueError, match="ar_smoothness"):
+            make_lc(
+                small_model, flux_active=jnp.ones(nwave),
+                ar_lat=jnp.array([0.0]), ar_long=jnp.array([0.0]),
+                ar_size=jnp.array([10.0]), ar_smoothness=jnp.array([0.5]),
+            )
+
     def test_ld_coeffs_active_shape_mismatch_raises(self, small_model):
         nwave = small_model["nwave"]
         with pytest.raises(ValueError, match="ld_coeffs_active"):

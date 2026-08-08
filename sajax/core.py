@@ -1252,6 +1252,13 @@ def make_lc(
             f"ar_smoothness shape mismatch: got shape {ar_smoothness.shape} "
             f"but expected a scalar or shape ({nar},)."
         )
+    if bool(jnp.any(ar_smoothness < 1)):
+        raise ValueError(
+            f"ar_smoothness must be >= 1 (got {ar_smoothness}); 1 is a "
+            "Gaussian AR boundary and larger values sharpen it towards a "
+            "top-hat, but values below 1 do not correspond to a physically "
+            "meaningful AR shape."
+        )
 
     ld_mode = model["ld_mode"]
     n_coeffs = 1 if ld_mode == "intensity_profile" else _N_COEFFS[ld_mode]
