@@ -108,6 +108,7 @@ import functools
 from typing import Literal, Optional
 
 import numpy as np
+import jax
 import jax.numpy as jnp
 from jax import vmap
 
@@ -1252,7 +1253,7 @@ def make_lc(
             f"ar_smoothness shape mismatch: got shape {ar_smoothness.shape} "
             f"but expected a scalar or shape ({nar},)."
         )
-    if bool(jnp.any(ar_smoothness < 1)):
+    if not isinstance(ar_smoothness, jax.core.Tracer) and bool(jnp.any(ar_smoothness < 1)):
         raise ValueError(
             f"ar_smoothness must be >= 1 (got {ar_smoothness}); 1 is a "
             "Gaussian AR boundary and larger values sharpen it towards a "
@@ -1414,8 +1415,8 @@ def make_lc(
         wavelength          = model["wavelength"],
         flux_quiet          = model["flux_quiet"],
         flux_active         = flux_active,
-        ld_coeffs_quiet    = ld_coeffs_quiet_val,
-        ld_coeffs_active   = ld_coeffs_active,
+        ld_coeffs_quiet     = ld_coeffs_quiet_val,
+        ld_coeffs_active    = ld_coeffs_active,
         I_profile_quiet     = model["I_profile"],
         I_profile_active    = I_profile_active,
         mu_profile_pts      = model["mu_profile_pts"],
@@ -1429,7 +1430,7 @@ def make_lc(
         arsize_rads         = jnp.deg2rad(ar_size),
         ar_smoothness       = ar_smoothness,
         k                   = k_val,
-        ld_mode            = model["ld_mode"],
+        ld_mode             = model["ld_mode"],
         plot_map_wavelength = model["plot_map_wavelength"],
         n                   = model["n"],
         flat_indices        = model["flat_indices"],

@@ -577,6 +577,25 @@ class TestInputValidation:
                 ar_size=jnp.array([10.0]), ar_smoothness=jnp.array([0.5]),
             )
 
+    def test_ar_smoothness_below_one_not_checked_under_jit(self, small_model):
+        """The ar_smoothness>=1 check must not break jit/grad-based fitting
+        (e.g. numpyro_ext), where ar_smoothness arrives as a Tracer with no
+        concrete value available at trace time -- even one that would be
+        rejected eagerly, like 0.5 here, must trace through untouched.
+        """
+        nwave = small_model["nwave"]
+
+        @jax.jit
+        def run(smoothness):
+            lc, _ = make_lc(
+                small_model, flux_active=jnp.ones(nwave),
+                ar_lat=jnp.array([0.0]), ar_long=jnp.array([0.0]),
+                ar_size=jnp.array([10.0]), ar_smoothness=jnp.array([smoothness]),
+            )
+            return lc
+
+        run(0.5)  # must not raise TracerBoolConversionError
+
     def test_ld_coeffs_active_shape_mismatch_raises(self, small_model):
         nwave = small_model["nwave"]
         with pytest.raises(ValueError, match="ld_coeffs_active"):
