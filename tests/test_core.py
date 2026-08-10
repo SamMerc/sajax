@@ -111,8 +111,8 @@ class TestBuildStellarGrid:
         assert len(grid["x"]) == grid["total_pixels"]
         assert len(grid["y"]) == grid["total_pixels"]
         assert len(grid["mu"]) == grid["total_pixels"]
-        assert len(grid["row_idx"]) == grid["total_pixels"]
-        assert len(grid["vel_row"]) == grid["n"]
+        assert len(grid["col_idx"]) == grid["total_pixels"]
+        assert len(grid["vel_col"]) == grid["n"]
 
     def test_mu_range(self):
         grid = build_stellar_grid(50, 2.0)
@@ -127,24 +127,24 @@ class TestBuildStellarGrid:
         assert np.any(centre_mask), "Centre pixel not found in grid"
         assert abs(float(grid["mu"][centre_mask][0]) - 1.0) < 1e-5
 
-    def test_vel_row_zero_when_ve_zero(self):
+    def test_vel_col_zero_when_ve_zero(self):
         """Doppler factor should be identically zero for non-rotating star."""
         grid = build_stellar_grid(50, ve=0.0)
-        assert np.allclose(grid["vel_row"], 0.0, atol=1e-10)
+        assert np.allclose(grid["vel_col"], 0.0, atol=1e-10)
 
-    def test_row_idx_within_bounds(self):
+    def test_col_idx_within_bounds(self):
         grid = build_stellar_grid(50, 2.0)
-        assert np.all(grid["row_idx"] >= 0)
-        assert np.all(grid["row_idx"] < grid["n"])
+        assert np.all(grid["col_idx"] >= 0)
+        assert np.all(grid["col_idx"] < grid["n"])
 
-    def test_row_idx_reconstructs_per_pixel_velocity(self):
-        """row_idx + vel_row must exactly reproduce y/spr*(ve/c) per pixel --
-        this is the row-based Doppler optimization's core correctness
+    def test_col_idx_reconstructs_per_pixel_velocity(self):
+        """col_idx + vel_col must exactly reproduce x/spr*(ve/c) per pixel --
+        this is the column-based Doppler optimization's core correctness
         property: it must be an exact reformulation, not an approximation."""
         ve = 30.0
         grid = build_stellar_grid(50, ve=ve)
-        expected = grid["y"] / grid["star_pixel_rad"] * (ve / C_KMS)
-        reconstructed = grid["vel_row"][grid["row_idx"]]
+        expected = grid["x"] / grid["star_pixel_rad"] * (ve / C_KMS)
+        reconstructed = grid["vel_col"][grid["col_idx"]]
         np.testing.assert_allclose(reconstructed, expected, atol=1e-6)
 
     def test_flat_indices_within_bounds(self):
@@ -1040,7 +1040,7 @@ class TestBuildCombinedModel:
 
     def test_all_stellar_keys_preserved(self, combined_model):
         required = [
-            "x_disc", "y_disc", "mu_disc", "row_idx", "vel_row",
+            "x_disc", "y_disc", "mu_disc", "col_idx", "vel_col",
             "star_pixel_rad", "total_pixels", "wavelength",
             "phases_rot", "ld_coeffs", "flat_indices", "n",
         ]
@@ -1447,8 +1447,8 @@ class TestARShapeGradients:
                 x_disc              = model["x_disc"],
                 y_disc              = model["y_disc"],
                 mu_disc             = model["mu_disc"],
-                row_idx             = model["row_idx"],
-                vel_row             = model["vel_row"],
+                col_idx             = model["col_idx"],
+                vel_col             = model["vel_col"],
                 star_pixel_rad      = spr,
                 total_pixels        = model["total_pixels"],
                 arsize_rads         = jnp.array([arsize]),
@@ -1603,7 +1603,7 @@ class TestStellarParamGradientsFD:
     These parameters are baked into the model dict at build time (NumPy),
     so tests call _compute_single_phase directly with the parameter as a
     JAX-traced input, constructing whichever piece of the model that
-    parameter feeds into (e.g. ld_coeffs_quiet for u1/u2, vel_row for ve).
+    parameter feeds into (e.g. ld_coeffs_quiet for u1/u2, vel_col for ve).
     """
 
     _SPR    = 50
@@ -1634,7 +1634,7 @@ class TestStellarParamGradientsFD:
         ]])  # (1, 3)
 
     def _call_single_phase(self, model, ar_cart_rotated,
-                           vel_row=None, ld_coeffs_quiet=None):
+                           vel_col=None, ld_coeffs_quiet=None):
         nwave    = 1
         n_coeffs = 2
         n_mu     = model["mu_profile_pts"].shape[0]
@@ -1653,8 +1653,8 @@ class TestStellarParamGradientsFD:
             x_disc              = model["x_disc"],
             y_disc              = model["y_disc"],
             mu_disc             = model["mu_disc"],
-            row_idx             = model["row_idx"],
-            vel_row             = vel_row if vel_row is not None else model["vel_row"],
+            col_idx             = model["col_idx"],
+            vel_col             = vel_col if vel_col is not None else model["vel_col"],
             star_pixel_rad      = model["star_pixel_rad"],
             total_pixels        = model["total_pixels"],
             arsize_rads         = jnp.array([jnp.deg2rad(jnp.float32(self._ARSIZE))]),
@@ -1788,8 +1788,8 @@ class TestStellarParamGradientsFD:
         )(self._ar_cart(spr))
 
         def lc(ve):
-            vel_row = coords / spr * (ve / self._C)
-            return self._call_single_phase(grad_model, rotated, vel_row=vel_row)
+            vel_col = coords / spr * (ve / self._C)
+            return self._call_single_phase(grad_model, rotated, vel_col=vel_col)
 
         g = float(jax.grad(lc)(jnp.float32(2.0)))
         assert np.isfinite(g)
@@ -1820,7 +1820,7 @@ class TestStellarParamGradientsFD:
         )(self._ar_cart(spr))
 
         def lc(ve):
-            vel_row = coords / spr * (ve / self._C)
+            vel_col = coords / spr * (ve / self._C)
             fval, _ = _compute_single_phase(
                 rotated, jnp.array([0.0, 0.0, -1e10]),
                 wavelength=model["wavelength"], flux_quiet=model["flux_quiet"],
@@ -1831,7 +1831,7 @@ class TestStellarParamGradientsFD:
                 I_profile_active=jnp.broadcast_to(model["I_profile"][None, :, :], (1, nwave, n_mu)),
                 mu_profile_pts=model["mu_profile_pts"],
                 x_disc=model["x_disc"], y_disc=model["y_disc"], mu_disc=model["mu_disc"],
-                row_idx=model["row_idx"], vel_row=vel_row,
+                col_idx=model["col_idx"], vel_col=vel_col,
                 star_pixel_rad=spr, total_pixels=model["total_pixels"],
                 arsize_rads=jnp.array([jnp.deg2rad(jnp.float32(self._ARSIZE))]),
                 ar_smoothness=jnp.array([_SM]),

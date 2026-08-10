@@ -44,11 +44,13 @@ Key differences from the original NumPy/SciPy implementation
    local radial velocity Doppler-shifts the spectrum itself before the
    contrast at the requested wavelength bin is extracted -- i.e. the
    spectrum is resampled at ``lambda * (1 - v/c)`` for that pixel's own
-   velocity v. Because the stellar rotation axis is the y-axis in Carthesian
-   coordinates, the velocity depends only on a pixel's y-coordinate, so all
-   pixels in the same grid row share one velocity -- the (expensive) spectral
-   resampling is done once per row (``n`` rows) rather than once per pixel
-   (``~n^2``), then broadcast back out to pixels.
+   velocity v. The stellar rotation axis is the y-axis in Carthesian
+   coordinates, so the sky-projected line-of-sight velocity is
+   ``v_z = -omega * sin(i_star) * x``: it depends only on a pixel's
+   x-coordinate, and all pixels in the same grid column share one velocity --
+   the (expensive) spectral resampling is done once per column (``n``
+   columns) rather than once per pixel (``~n^2``), then broadcast back out to
+   pixels.
 
 6. **No scatter-index active region placement.**
    The original code located active region pixels via integer scatter indices
@@ -155,6 +157,7 @@ _FLUX_RATIO_EPS = 1e-12
 def build_stellar_grid(
     stellar_grid_size: int,
     ve: float,
+    inc_star: float = 90.0,
 ) -> dict:
     """
     Pre-compute the static stellar pixel grid, masked to the stellar disc.
@@ -170,7 +173,11 @@ def build_stellar_grid(
         higher values give a finer grid at the cost of n^2 memory and
         compute.  Values of 100-300 are typical.
     ve : float
-        Stellar equatorial velocity [km/s].
+        Stellar **equatorial** velocity [km/s] -- v, not v*sin(i); the
+        projected field applies its own ``sin(inc_star)``.
+    inc_star : float, optional
+        Stellar inclination in degrees (90 = equator-on, 0 = pole-on).
+        Enters only through the ``sin(i)`` projection of the velocity field.
 
     Returns
     -------
@@ -184,13 +191,14 @@ def build_stellar_grid(
     ``x``             - (total_pixels,) x pixel coordinates       [in-disc only]
     ``y``             - (total_pixels,) y pixel coordinates       [in-disc only]
     ``mu``            - (total_pixels,) limb-darkening cos(theta) [in-disc only]
-    ``row_idx``       - (total_pixels,) int, 0..n-1 -- which grid row each
+    ``col_idx``       - (total_pixels,) int, 0..n-1 -- which grid column each
                         in-disc pixel belongs to.
-    ``vel_row``       - (n,) Doppler factor Δv/c for each possible row.
-                        The stellar rotation axis is the y-axis, so
-                        rotational velocity depends only on a pixel's row
-                        (its y-coordinate) -- every pixel in a row shares
-                        one velocity, so it is never materialised per-pixel.
+    ``vel_col``       - (n,) Doppler factor Δv/c for each possible column.
+                        The sky-projected rotation axis lies in the y-z
+                        plane, so the line-of-sight velocity depends only on
+                        a pixel's column (its x-coordinate) -- every pixel in
+                        a column shares one velocity, so it is never
+                        materialised per-pixel.
     """
     C = 299_792.458  # speed of light [km/s]
 
@@ -216,16 +224,13 @@ def build_stellar_grid(
         np.clip(1.0 - (r_disc / star_pixel_rad) ** 2, 0.0, 1.0)
     ).astype(np.float32)
 
-    # Row index: which of the n possible y-coordinates this pixel has.
-    # coords[0] = -n//2, so row_idx = y + n//2 maps y in {-n//2, ..., n//2}
-    # onto {0, ..., n-1}.
-    row_idx = (y_disc + n // 2).astype(np.int32)
+    # coords[0] = -n//2, so col_idx = x + n//2 maps x onto {0, ..., n-1}.
+    col_idx = (x_disc + n // 2).astype(np.int32)
 
-    # Per-row Doppler velocity factor:  Δv/c = (y / R_star) * (ve / c).
-    # y increases upward → redshift on the receding limb. Computed once per
-    # possible row (n values) rather than once per pixel: every pixel in a
-    # row shares this velocity, since the rotation axis is the y-axis.
-    vel_row = (coords / star_pixel_rad * (ve / C)).astype(np.float32)
+    # Sky-frame spin axis (0, sin i, cos i) → v_z = -omega*sin(i)*x, a function of x alone; +x recedes.
+    vel_col = (
+        coords / star_pixel_rad * (ve / C) * np.sin(np.deg2rad(inc_star))
+    ).astype(np.float32)
 
     return dict(
         n             = n,
@@ -235,8 +240,8 @@ def build_stellar_grid(
         x             = x_disc,
         y             = y_disc,
         mu            = mu_disc,
-        row_idx       = row_idx,
-        vel_row       = vel_row,
+        col_idx       = col_idx,
+        vel_col       = vel_col,
     )
 
 
@@ -453,8 +458,8 @@ def _flux_at_wavelength(
     planet_xyz:      jnp.ndarray, # (3,) planet sky position, shared across wavelengths
     transit_softness: float,
     mu_profile_pts:  jnp.ndarray, # (n_mu_pts,)
-    row_idx:         jnp.ndarray, # (total_pixels,) int
-    vel_row:         jnp.ndarray, # (n,)
+    col_idx:         jnp.ndarray, # (total_pixels,) int
+    vel_col:         jnp.ndarray, # (n,)
     ld_mode:        LdMode,
 ) -> tuple[float, jnp.ndarray]:
     """
@@ -493,19 +498,17 @@ def _flux_at_wavelength(
         transit_softness,
     )
 
-    # ---- Per-row Doppler-shifted spectral lookup -------------------------
-    # The rotation axis is the y-axis, so velocity depends only on grid row
-    # (see build_stellar_grid): resample each spectrum once per row (n
-    # values), not once per pixel, then broadcast out via row_idx.
-    query_wavelength_row = wavelength_target * (1.0 - vel_row)  # (n,)
+    # ---- Per-column Doppler-shifted spectral lookup ----------------------
+    # Velocity depends on x alone (see build_stellar_grid), so resample once per column, not per pixel.
+    query_wavelength_col = wavelength_target * (1.0 - vel_col)  # (n,)
 
-    F_quiet_row   = jnp.interp(query_wavelength_row, wavelength_grid, flux_quiet)  # (n,)
-    F_quiet_local = F_quiet_row[row_idx]                                          # (total_pixels,)
+    F_quiet_col   = jnp.interp(query_wavelength_col, wavelength_grid, flux_quiet)  # (n,)
+    F_quiet_local = F_quiet_col[col_idx]                                          # (total_pixels,)
 
-    F_active_row = vmap(
-        lambda spec: jnp.interp(query_wavelength_row, wavelength_grid, spec)
+    F_active_col = vmap(
+        lambda spec: jnp.interp(query_wavelength_col, wavelength_grid, spec)
     )(flux_active)                                   # (nar, n)
-    F_active_local = F_active_row[:, row_idx]        # (nar, total_pixels)
+    F_active_local = F_active_col[:, col_idx]        # (nar, total_pixels)
 
     # ---- Limb darkening (own law coefficients per AR and for quiet) -----
     ldc_quiet = _evaluate_ldc(
@@ -559,8 +562,8 @@ def _compute_single_phase(
     x_disc:              jnp.ndarray,  # (total_pixels,)
     y_disc:              jnp.ndarray,  # (total_pixels,)
     mu_disc:             jnp.ndarray,  # (total_pixels,)
-    row_idx:             jnp.ndarray,  # (total_pixels,)
-    vel_row:             jnp.ndarray,  # (n_grid,)
+    col_idx:             jnp.ndarray,  # (total_pixels,)
+    vel_col:             jnp.ndarray,  # (n_grid,)
     star_pixel_rad:      float,
     total_pixels:        int,
     arsize_rads:         jnp.ndarray,  # (nar,)
@@ -621,8 +624,8 @@ def _compute_single_phase(
             planet_xyz       = planet_xyz,
             transit_softness = transit_softness,
             mu_profile_pts   = mu_profile_pts,
-            row_idx          = row_idx,
-            vel_row          = vel_row,
+            col_idx          = col_idx,
+            vel_col          = vel_col,
             ld_mode         = ld_mode,
         ),
         in_axes=(0, 0, 1, 0, 1, 0),
@@ -664,8 +667,8 @@ def _compute_all_phases(
     x_disc:              jnp.ndarray,
     y_disc:              jnp.ndarray,
     mu_disc:             jnp.ndarray,
-    row_idx:             jnp.ndarray,
-    vel_row:             jnp.ndarray,
+    col_idx:             jnp.ndarray,
+    vel_col:             jnp.ndarray,
     star_pixel_rad:      float,
     total_pixels:        int,
     arsize_rads:         jnp.ndarray,
@@ -704,8 +707,8 @@ def _compute_all_phases(
             x_disc              = x_disc,
             y_disc              = y_disc,
             mu_disc             = mu_disc,
-            row_idx             = row_idx,
-            vel_row             = vel_row,
+            col_idx             = col_idx,
+            vel_col             = vel_col,
             star_pixel_rad      = star_pixel_rad,
             total_pixels        = total_pixels,
             arsize_rads         = arsize_rads,
@@ -971,7 +974,7 @@ def build_system(
     ld_coeffs = _prepare_ld_coeffs(ld_coeffs, ld_mode, nwave, label="build_system: quiet ld_coeffs",
                                    verbose=verbose)
 
-    grid = build_stellar_grid(stellar_grid_size, ve)
+    grid = build_stellar_grid(stellar_grid_size, ve, inc_star)
 
     if plot_map_wavelength is None:
         plot_map_wavelength = float(wavelength[nwave // 2])
@@ -987,8 +990,8 @@ def build_system(
         x_disc              = jnp.asarray(grid["x"]),
         y_disc              = jnp.asarray(grid["y"]),
         mu_disc             = jnp.asarray(grid["mu"]),
-        row_idx             = jnp.asarray(grid["row_idx"]),
-        vel_row             = jnp.asarray(grid["vel_row"]),
+        col_idx             = jnp.asarray(grid["col_idx"]),
+        vel_col             = jnp.asarray(grid["vel_col"]),
         star_pixel_rad      = grid["star_pixel_rad"],
         total_pixels        = grid["total_pixels"],
         n                   = grid["n"],
@@ -1411,8 +1414,8 @@ def make_lc(
         x_disc              = model["x_disc"],
         y_disc              = model["y_disc"],
         mu_disc             = model["mu_disc"],
-        row_idx             = model["row_idx"],
-        vel_row             = model["vel_row"],
+        col_idx             = model["col_idx"],
+        vel_col             = model["vel_col"],
         star_pixel_rad      = spr,
         total_pixels        = model["total_pixels"],
         arsize_rads         = jnp.deg2rad(ar_size),
