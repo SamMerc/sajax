@@ -16,7 +16,6 @@ from sajax.planet import (
     a_over_rstar_to_stellar_density,
     _compute_planet_mask,
 )
-from sajax import build_stellar_grid
 
 
 # ---------------------------------------------------------------------------
@@ -555,65 +554,9 @@ class TestPlanetGradients:
 
     # ---- Planet mask gradient sign test -----------------------------------
 
-    def test_planet_mask_grad_k_positive_at_boundary(self):
-        """
-        A pixel at the transit edge (distance from planet = k) should have a
-        positive gradient w.r.t. k: enlarging the planet captures that pixel.
-        d(mask_sum)/dk > 0.
-        """
-        k_val = jnp.float32(0.1)
-        # Pixel at the boundary: xn = k (in R★), so pixel coordinate = k * spr
-        px = jnp.array([float(k_val) * self._spr], dtype=jnp.float32)
-        py = jnp.array([0.0], dtype=jnp.float32)
-
-        def f(k):
-            return jnp.sum(_compute_planet_mask(
-                px, py, self._spr,
-                jnp.float32(0.0), jnp.float32(0.0), jnp.float32(1.0), k,
-            ))
-
-        grad = float(jax.grad(f)(k_val))
-        assert grad > 0, (
-            f"d(mask)/dk = {grad:.4g} at transit boundary; "
-            "expected > 0 (larger planet covers boundary pixel)"
-        )
-
-    def test_planet_mask_grad_k_fd_agreement_with_small_h(self):
-        """
-        JAX autodiff agrees with central FD at h = 1 % of the transit-edge
-        transition width (softness_transit = 1 / (10 · spr) ≈ 0.002 R★).
-
-        Using h=0.1 would be ~50× the transition width — the same regime that
-        produces sign-flipped FD estimates in external test suites.
-        """
-        k_val = jnp.float32(0.1)
-        h = jnp.float32(0.01 * self._softness_transit)
-
-        px = jnp.array([float(k_val) * self._spr], dtype=jnp.float32)
-        py = jnp.array([0.0], dtype=jnp.float32)
-
-        def f(k):
-            return jnp.sum(_compute_planet_mask(
-                px, py, self._spr,
-                jnp.float32(0.0), jnp.float32(0.0), jnp.float32(1.0), k,
-            ))
-
-        grad_jax = float(jax.grad(f)(k_val))
-        fd = float((f(k_val + h) - f(k_val - h)) / (2.0 * h))
-
-        assert abs(fd) > 0.1 * abs(grad_jax), (
-            f"FD is numerically degenerate (fd={fd:.3g}, jax={grad_jax:.3g}). "
-            f"h={float(h):.2e} may be too small for float32 at spr={self._spr}."
-        )
-        ratio = grad_jax / fd
-        assert 0.5 <= ratio <= 2.0, (
-            f"JAX ({grad_jax:.4g}) disagrees with FD ({fd:.4g}), ratio={ratio:.3f}. "
-            f"softness_transit={self._softness_transit:.4g}, h={float(h):.4g}."
-        )
-
     def test_planet_mask_large_h_gives_wrong_result(self):
         """
-        Documents that h=0.1 R★ — ~50× the transit transition width — yields a
+        Documents that h=0.1 R★ — ~50x the transit transition width — yields a
         FD estimate that is unreliable, explaining sign/value mismatches in
         external test suites that use h=0.1 in unconstrained parameter space.
         """
@@ -621,7 +564,7 @@ class TestPlanetGradients:
         h_large = jnp.float32(0.1)
 
         assert float(h_large) > 5.0 * self._softness_transit, (
-            "Precondition: h_large must exceed 5× softness_transit."
+            "Precondition: h_large must exceed 5x softness_transit."
         )
 
         px = jnp.array([float(k_val) * self._spr], dtype=jnp.float32)
@@ -646,6 +589,43 @@ class TestPlanetGradients:
             "Transition may be wider than expected — check spr."
         )
 
+    def test_default_softness_is_exact_hard_edge(self):
+        """softness=0.0 (the default) reproduces the old boolean threshold."""
+        xn = jnp.array([0.05, 0.15], dtype=jnp.float32)  # inside / outside k=0.1
+        px = xn * self._spr
+        py = jnp.zeros_like(px)
+        mask = _compute_planet_mask(
+            px, py, self._spr,
+            jnp.float32(0.0), jnp.float32(0.0), jnp.float32(1.0), jnp.float32(0.1),
+        )
+        np.testing.assert_array_equal(np.array(mask), [1.0, 0.0])
+
+    def test_soft_mask_grad_wrt_k_matches_fd(self):
+        """
+        With softness = softness_transit (the opt-in path used for
+        gradient-based transit retrieval), jax.grad through
+        _compute_planet_mask must be finite, non-zero, and agree with a
+        finite-difference estimate taken at h = 1% of the transition width.
+        """
+        k_val    = jnp.float32(0.1)
+        softness = jnp.float32(self._softness_transit)
+        h        = 0.01 * self._softness_transit
+
+        px = jnp.array([float(k_val) * self._spr], dtype=jnp.float32)
+        py = jnp.array([0.0], dtype=jnp.float32)
+
+        def f(k):
+            return jnp.sum(_compute_planet_mask(
+                px, py, self._spr,
+                jnp.float32(0.0), jnp.float32(0.0), jnp.float32(1.0), k, softness,
+            ))
+
+        grad_jax = float(jax.grad(f)(k_val))
+        fd = float((f(k_val + h) - f(k_val - h)) / (2.0 * h))
+
+        assert np.isfinite(grad_jax) and grad_jax != 0.0
+        np.testing.assert_allclose(grad_jax, fd, rtol=0.05)
+
 
 # ===================================================================
 # FD-agreement tests for the six Keplerian orbital parameters
@@ -654,20 +634,15 @@ class TestPlanetGradients:
 class TestOrbitalParamGradientsFD:
     """
     Verify that JAX autodiff agrees with calibrated finite differences for
-    all six Keplerian orbital parameters: a/R★, period, k, orbital
-    inclination, eccentricity, and argument of periastron.
+    five Keplerian orbital parameters: a/R★, period, orbital inclination,
+    eccentricity, and argument of periastron.
 
     Strategy
     --------
     a/R★, period, inclination, ecc, omega_peri:
-        Tested through planet_sky_position (pure trig / Kepler solver —
-        no sigmoid).  The output scalar X+Y+Z is smooth in all parameters,
-        so a standard h = 0.01 in natural units is safe everywhere.
-
-    k (planet radius ratio):
-        Tested through _compute_planet_mask, where the transit-edge sigmoid
-        has softness = 1/(10·spr).  Uses the same calibrated h as
-        TestPlanetGradients.
+        Tested through planet_sky_position (pure trig / Kepler solver).
+        The output scalar X+Y+Z is smooth in all parameters, so a standard
+        h = 0.01 in natural units is safe everywhere.
 
     Orbit geometry: inc=89° so impact parameter b = a·cos(i) ≈ 0.26 R★
     is non-zero, making gradients w.r.t. inclination and a/R★ non-trivial.
@@ -681,19 +656,6 @@ class TestOrbitalParamGradientsFD:
     _ECC = 0.0
     _OMG = 0.0
     _T0  = 0.0
-    _K   = 0.1
-    _SPR = 50.0
-
-    @property
-    def _softness(self):
-        return 1.0 / (10.0 * self._SPR)
-
-    @pytest.fixture(autouse=True)
-    def _grid(self):
-        g = build_stellar_grid(int(self._SPR), 0.0)
-        self._x   = jnp.asarray(g["x"])
-        self._y   = jnp.asarray(g["y"])
-        self._spr = float(g["star_pixel_rad"])
 
     def _xyz(self, t=0.0, **kw):
         """planet_sky_position with class defaults, keyword overrides."""
@@ -705,12 +667,6 @@ class TestOrbitalParamGradientsFD:
     def _scalar(self, xyz):
         X, Y, Z = xyz
         return X + Y + Z
-
-    def _mask_sum(self, X, Y, Z, k=None):
-        k = jnp.float32(self._K) if k is None else k
-        return jnp.sum(_compute_planet_mask(
-            self._x, self._y, self._spr, X, Y, Z, k,
-        ))
 
     def _fd(self, f, x, h):
         return float((f(x + h) - f(x - h)) / (2.0 * h))
@@ -779,35 +735,6 @@ class TestOrbitalParamGradientsFD:
             self._P, h,
         )
         self._check_tight("period", jax_g, fd, rtol=1e-3)
-
-    # ---- k (planet radius ratio) --------------------------------------------
-
-    def test_k_gradient_positive_at_transit_boundary(self):
-        """
-        At mid-transit a pixel at distance k from the planet centre is on
-        the boundary; enlarging the planet must increase its mask value:
-        d(mask_sum)/dk > 0.
-        """
-        X, Y, Z = self._xyz()
-        k0 = jnp.float32(self._K)
-        g  = float(jax.grad(lambda k: self._mask_sum(X, Y, Z, k=k))(k0))
-        assert g > 0, f"d(mask)/dk = {g:.4g}; expected > 0"
-
-    def test_k_gradient_fd_agreement(self):
-        """
-        FD at h = 0.01·softness_transit = 1/(10·spr)·0.01 ≈ 2×10⁻⁴ R★,
-        keeping the step well inside the sigmoid linear regime.
-        """
-        X, Y, Z = self._xyz()
-        k0 = jnp.float32(self._K)
-        h  = jnp.float32(0.01 * self._softness)
-
-        jax_g = float(jax.grad(lambda k: self._mask_sum(X, Y, Z, k=k))(k0))
-        fd    = self._fd(
-            lambda k: float(self._mask_sum(X, Y, Z, k=jnp.float32(k))),
-            float(k0), float(h),
-        )
-        self._check("k", jax_g, fd, float(h))
 
     # ---- orbital inclination ------------------------------------------------
 

@@ -3,9 +3,9 @@ planet.py — Keplerian planet orbit and pixel-level transit geometry for sajax.
 
 This module is a standalone companion to sajax/core.py.  It can be used
 independently to compute transit light curves, or integrated with sajax
-via ``build_combined_model`` / ``compute_combined_light_curve`` (defined in
-core.py) to correctly model active-region crossing events — i.e. cases where
-the planet occultes a starspot or facula during transit.
+via ``build_system`` / ``quick_lc`` (defined in core.py, transit
+parameters optional) to correctly model active-region crossing events —
+i.e. cases where the planet occultes a starspot or facula during transit.
 
 Architecture
 ------------
@@ -57,8 +57,9 @@ Public API
 from __future__ import annotations
 
 import numpy as np
+import jax
 import jax.numpy as jnp
-from jax import vmap, nn as jax_nn
+from jax import vmap
 
 
 # ---------------------------------------------------------------------------
@@ -241,6 +242,10 @@ def compute_planet_sky_positions(
 # 4. Per-pixel transit mask on the sajax stellar grid
 # ---------------------------------------------------------------------------
 
+_MASK_D_TINY = 1e-12  # floor under the sqrt so d(sqrt)/d(d2) doesn't blow up
+                       # for a pixel landing exactly at the planet's centre.
+
+
 def _compute_planet_mask(
     x_disc: jnp.ndarray,   # (total_pixels,)  pixel x coordinates
     y_disc: jnp.ndarray,   # (total_pixels,)  pixel y coordinates
@@ -249,15 +254,34 @@ def _compute_planet_mask(
     Y: jnp.ndarray,        # planet sky-plane y  [R*]
     Z: jnp.ndarray,        # planet line-of-sight  [R*]  — Z > 0 ⟹ transit
     k: float,              # Rp / R*
+    softness: float = 0.0, # transition width [R*]; 0.0 = exact hard edge
 ) -> jnp.ndarray:
     """
-    Boolean mask over in-disc pixels: ``True`` where the pixel is occulted
-    by the planet at this epoch.
+    Mask over in-disc pixels: non-zero where the pixel is occulted by the
+    planet at this epoch.
 
     The mask is non-zero only when Z > 0 (planet in front of the star).
     Pixels inside the planet disc contribute zero flux; if those pixels
     coincide with an active region, the spot-crossing anomaly emerges
     automatically.
+
+    By default (``softness=0.0``) this is the exact hard-edged disc used for
+    physical light-curve simulation: on the fixed pixel grid, occulted flux
+    is a function of ``k``/``X``/``Y`` (flat between the
+    instants a pixel boundary crosses the disc edge), so its analytic
+    derivative w.r.t. those parameters -- hence w.r.t. every transit-geometry
+    parameter that moves the mask (``a_over_rstar``, ``inclination``, ``t0``,
+    ``period``, ``ecc``, ``omega_peri``) -- is exactly 0 almost everywhere.
+    This means that jax.grad gives NUTS/HMC no likelihood signal at all in
+    those directions.
+
+    Passing ``softness > 0`` replaces the hard threshold with a sigmoid of
+    that transition width (in stellar radii), giving a smooth, non-zero
+    gradient w.r.t. every transit-geometry parameter -- for gradient-based
+    retrieval only. It biases the effective transit depth/duration slightly
+    (a soft edge occults less than a hard one right at the boundary), so it
+    is opt-in and defaults off; ``quick_lc`` / physical simulation
+    is unaffected unless requested.
 
     Parameters
     ----------
@@ -266,10 +290,12 @@ def _compute_planet_mask(
     X, Y            : planet sky position  [R*]
     Z               : planet line-of-sight position  [R*]
     k               : planet-to-star radius ratio
+    softness        : sigmoid transition width [R*] (default 0.0: hard edge)
 
     Returns
     -------
-    jnp.ndarray, shape (total_pixels,), dtype bool_
+    jnp.ndarray, shape (total_pixels,), dtype float32, values in [0, 1]
+    (exactly {0, 1} when softness == 0.0)
     """
     # Normalise pixel coordinates to stellar radii
     xn = x_disc / star_pixel_rad
@@ -278,13 +304,12 @@ def _compute_planet_mask(
     # Squared sky-plane distance from planet centre to each pixel
     d2 = (xn - X) ** 2 + (yn - Y) ** 2
 
-    # Soft disc mask: sigmoid boundary so gradients flow w.r.t. k and planet position.
-    # Transition width fixed at 1/10 pixel (matching _compute_ar_mask convention).
-    # Using 0.1*k instead caused a +~330 ppm systematic bias in transit depth for k~0.1
-    # because the ε²/r curvature correction is non-negligible when ε/r ~ 10%.
-    d = jnp.sqrt(d2 + 1e-8)
-    softness = 1.0 / (10.0 * star_pixel_rad)
-    disc_mask = jax_nn.sigmoid((k - d) / softness)
+    if softness > 0.0:
+        d = jnp.sqrt(jnp.maximum(d2, _MASK_D_TINY))
+        disc_mask = jax.nn.sigmoid((k - d) / softness)
+    else:
+        # Hard disc mask: pixel is occulted iff it lies within the planet disc.
+        disc_mask = (d2 < k ** 2).astype(jnp.float32)
 
     # Hard Z gate: planet in front of the star is topologically binary.
     z_gate = jnp.where(Z > 0.0, 1.0, 0.0)
@@ -305,35 +330,40 @@ def build_transit_model(
     inclination: float,
     ecc: float          = 0.0,
     omega_peri: float   = 0.0,
-    k: float            = 0.1,
+    k: float | np.ndarray = 0.1,
 ) -> dict:
     """
     Pre-compute the planet's sky-plane position at every epoch in ``times``.
 
     The returned dict should be stored in the sajax model dict under the key
-    ``"transit"``.  The combined model builder ``build_combined_model()``
-    (in core.py) does this automatically — end users typically do not need
+    ``"transit"``.  ``build_system()`` (in core.py) does this automatically
+    when its transit parameters are given — end users typically do not need
     to call this function directly.
 
     Parameters
     ----------
     times         : (ntime,) array of observation epochs  [days]
                     Must be the **oversampled** time array when oversampling
-                    is active (see ``build_combined_model``).
+                    is active (see ``build_system``).
     t0            : mid-transit epoch  [days]
     period        : orbital period  [days]
     a_over_rstar  : semimajor axis / R*  (dimensionless)
     inclination   : orbital inclination  [rad]
     ecc           : eccentricity  (default: 0.0 = circular)
     omega_peri    : argument of periastron  [rad]  (default: 0.0)
-    k             : planet-to-star radius ratio  Rp / R*  (default: 0.1)
+    k             : planet-to-star radius ratio  Rp / R*  (default: 0.1).
+                    A scalar (achromatic transit depth) or an array of shape
+                    (nwave,) (a chromatic transit depth, one value per
+                    wavelength bin) -- the orbital position doesn't depend on
+                    k at all, so this is stored as-is for later use by the
+                    per-wavelength occultation mask in core.py.
 
     Returns
     -------
     dict with keys
     ~~~~~~~~~~~~~~
     ``planet_xyz`` : (ntime, 3) jnp.ndarray — planet (X, Y, Z) per epoch
-    ``k``          : float — planet-to-star radius ratio
+    ``k``          : jnp.ndarray, scalar or (nwave,) — planet-to-star radius ratio
     """
     times_jax = jnp.asarray(times, dtype=jnp.float32)
 
@@ -343,7 +373,7 @@ def build_transit_model(
 
     return dict(
         planet_xyz = xyz,
-        k          = float(k),
+        k          = jnp.asarray(k, dtype=jnp.float32),
     )
 
 
