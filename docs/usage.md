@@ -149,6 +149,36 @@ lc, star_maps = quick_lc(
 
 By default the occultation mask has a hard edge, which gives `jax.grad` (almost) zero gradient with respect to the transit-geometry parameters. For gradient-based retrieval of `t0`/`period`/`a_over_rstar`/`inclination`/`k`/`ecc`/`omega_peri` (_e.g._, a gradient-descent MAP approach), pass `transit_softness > 0` to `make_lc` (not exposed on `quick_lc`) — see the `inference.ipynb` example notebook for a full walkthrough.
 
+### Case 4: Time-evolving active regions
+
+`flux_active`/`ar_lat`/`ar_long`/`ar_size`/`ar_smoothness` may each independently carry an extra leading time axis (length = the number of `times` the model was built with) instead of their usual per-AR shape, to let that property evolve over the observations — a spot growing/decaying, drifting in latitude/longitude, or changing contrast:
+
+```python
+import numpy as np
+
+ntime = len(times)
+ar_size_evolving = np.linspace(5.0, 15.0, ntime)[:, None]   # (ntime, nar=1): a growing spot
+
+lc, star_maps = quick_lc(
+    wavelength         = wavelength,
+    flux_quiet         = flux_quiet,
+    flux_active        = flux_active,
+    ld_coeffs          = [0.3, 0.1],
+    inc_star           = 90.0,
+    ar_lat             = 20.0,             # static: same shape as before
+    ar_long            = 0.0,
+    ar_size            = ar_size_evolving, # time-varying: (ntime, nar)
+    ar_smoothness      = 4.0,
+    times              = times,
+    P_rot              = P_ROT,
+    stellar_grid_size  = 100,
+    ve                 = 2.0,
+    ld_mode            = "quadratic",
+)
+```
+
+Only the parameters you want to evolve need the extra axis — the rest keep their usual constant-in-time shape. Values are given per `times` entry, *not* per oversampled sub-exposure (`oversample` expansion is handled internally). `ld_coeffs_active`/`I_profile_active` don't support time evolution and always stay fixed. Importanty, if none of the five parameters are given a time axis, `make_lc` takes the exact same code path as the static case, such that this feature adds no computational cost unless activated.
+
 ## Next Steps
 
 - 💾 **[Explore Tutorials](https://sajax.readthedocs.io/en/latest/examples/quickstart.html)** — Check out full working examples with colorful plots, interesting use cases, and the full implementation of both an MCMC and a gradient-based retrieval!
