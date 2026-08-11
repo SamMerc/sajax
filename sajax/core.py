@@ -111,6 +111,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 from jax import vmap
+import interpax
 
 from .geometry import rotate_active_region
 from .planet import _compute_planet_mask, compute_planet_sky_positions
@@ -132,6 +133,16 @@ _N_COEFFS: dict[str, int] = {
     "power2":     2,
     "kipping3":   3,
     "nonlinear4": 4,
+}
+
+# Interpolation method for time-varying active-region parameters.
+# Maps to interpax.interp1d's `method`:
+#   "linear" -> "linear"  (piecewise-linear between the given times)
+#   "cubic"  -> "cubic2"  (C2 natural cubic spline)
+ArTimeInterp = Literal["linear", "cubic"]
+_AR_TIME_INTERP_METHOD: dict[str, str] = {
+    "linear": "linear", 
+    "cubic": "cubic2"
 }
 
 # Numerical safeguards for the super-Gaussian AR shape (see _compute_ar_shape):
@@ -899,6 +910,7 @@ def build_system(
     ld_mode: LdMode = "quadratic",
     plot_map_wavelength: Optional[float] = None,
     oversample: int = 1,
+    ar_time_interp: ArTimeInterp = "linear",
     t0: Optional[float] = None,
     period: Optional[float] = None,
     a_over_rstar: Optional[float] = None,
@@ -976,7 +988,7 @@ def build_system(
     I_profile : array-like, shape (nwave, n_mu_pts), optional
         Quiet-photosphere specific intensity at each (wavelength, mu) grid
         point. Required when ``ld_mode="intensity_profile"``.
-    ld_mode : str
+    ld_mode : str (default "quadratic")
         Limb-darkening law, shared by the quiet photosphere and every
         active region (each with its own coefficient values).
     plot_map_wavelength : float, optional
@@ -987,6 +999,11 @@ def build_system(
         phase step, and the resulting fluxes are averaged.  This mimics
         finite-exposure integration and smooths limb-crossing artefacts.
         Default: 1 (no oversampling).
+    ar_time_interp : "linear" or "cubic", optional (default "linear")
+        Interpolation method for when time-varying active-region parameters
+        need to be interpolated onto ``oversample``'d sub-exposures.
+        Only matters when ``oversample > 1`` and at least one AR parameter
+        is time-varying -- see ``make_lc`` for the full description.
     t0, period, a_over_rstar, inclination : float, optional
         Transit-geometry parameters: mid-transit epoch, orbital period [days],
         semi-major axis/R*, and orbital inclination [rad]. All-or-nothing with
@@ -1023,10 +1040,17 @@ def build_system(
     nwave  = len(wavelength)
     nphase = len(phases_rot)  # original number of phases (before oversampling)
 
-    # ---- Phase oversampling -------------------------------------------------
+    # ---- Phase and absolute time oversampling -------------------------------------------------
     if oversample > 1:
         phases_oversampled = _make_oversampled_phases(phases_rot, oversample)
         nphase_compute = len(phases_oversampled)
+        n_t = len(times_arr_full)
+        dt  = (times_arr_full[1] - times_arr_full[0]) if n_t > 1 else P_rot
+        offsets = np.linspace(-dt / 2.0, dt / 2.0, oversample, endpoint=False)
+        offsets += dt / (2.0 * oversample)                          # centre sub-bins
+        times_oversampled = (
+            times_arr_full[:, None] + offsets[None, :]
+        ).ravel().astype(np.float32)
         if verbose:
             print(
                 f"build_system: oversampling enabled - {oversample} sub-exposures "
@@ -1035,6 +1059,7 @@ def build_system(
     else:
         phases_oversampled = phases_rot
         nphase_compute = nphase
+        times_oversampled = times_arr_full.astype(np.float32)
 
     inc_star       = float(inc_star)
     mu_profile_pts = np.asarray(mu_profile if mu_profile is not None else [0.0, 1.0],
@@ -1077,12 +1102,16 @@ def build_system(
         flat_indices        = jnp.asarray(grid["flat_indices"]),
         phases_rot          = jnp.asarray(phases_oversampled),
         oversample          = oversample,
+        ar_time_interp      = ar_time_interp,
         nphase_original     = nphase,
+        times               = times_arr_full,
+        times_oversampled   = jnp.asarray(times_oversampled),
         inc_star            = inc_star,
         ld_mode            = ld_mode,
         plot_map_wavelength = float(plot_map_wavelength),
         nwave               = nwave,
         nphase              = nphase_compute,
+        verbose             = verbose,
     )
 
     # ---- Optional transit ----------------------------------------------------
@@ -1097,21 +1126,6 @@ def build_system(
         )
     if all(given):
         from .planet import build_transit_model   # local import avoids circular dep.
-
-        # ---- Compute oversampled TIMES to match the oversampled phases ------
-        # We work in absolute time (not phases) so the planet's orbital
-        # position is computed correctly regardless of phase wrapping.
-        if oversample > 1:
-            n_t = len(times_arr_full)
-            dt  = (times_arr_full[1] - times_arr_full[0]) if n_t > 1 else P_rot
-            # Same offset scheme used in _make_oversampled_phases -- results align.
-            offsets = np.linspace(-dt / 2.0, dt / 2.0, oversample, endpoint=False)
-            offsets += dt / (2.0 * oversample)                          # centre sub-bins
-            times_oversampled = (
-                times_arr_full[:, None] + offsets[None, :]
-            ).ravel().astype(np.float32)
-        else:
-            times_oversampled = times_arr_full.astype(np.float32)
 
         # ---- Validate k against the wavelength grid (scalar or per-wavelength)
         k_arr = np.atleast_1d(np.asarray(k, dtype=np.float32))
@@ -1140,8 +1154,6 @@ def build_system(
         model["k"]           = transit["k"]
         model["has_transit"] = True
         model["P_rot"]       = P_rot
-        model["times"]       = times_arr_full
-        model["times_oversampled"] = jnp.asarray(times_oversampled)
         # Defaults for make_lc's dynamic path: t0/period/a_over_rstar/
         # inclination/k must all be given together (as individual keyword args,
         # possibly traced) to override these; ecc/omega_peri may be overridden
@@ -1212,19 +1224,19 @@ def make_lc(
         ``ValueError``.
 
         **Time-varying active regions.** Any of the above five properties may
-        ndependently carry an extra leading axis of length ``ntime`` instead
-        of its usual shape, to let that property evolve over the observation, 
+        independently carry an extra leading axis of length ``ntime`` instead
+        of its usual shape, to let that property evolve over the observation,
         e.g. a spot that grows/decays (``ar_size``), drifts in latitude/longitude
         (``ar_lat``/``ar_long``), or changes contrast (``flux_active``).
-        Values are given per original time and expanded internally across
-        ``oversample`` sub-exposures. Mixing is allowed: only the
-        parameters you want to evolve need the extra axis, the rest keep
-        their usual constant-in-time shape. Using none of them (the
-        default) is exactly as fast as before this capability existed --
-        it's a genuinely separate, opt-in code path, not a more general
-        but slower one applied unconditionally. ``ld_coeffs_active``/
-        ``I_profile_active`` do not support time evolution and always stay
-        fixed across the observation.
+        Values are given per original time and interpolated internally onto
+        ``oversample`` sub-exposures when oversampling is active, using the
+        model's ``ar_time_interp`` law (set at ``build_system`` time, like
+        ``ld_mode`` -- see there for the "linear"/"cubic" choice). Mixing is
+        allowed: only the parameters you want to evolve need the extra axis,
+        the rest keep their usual constant-in-time shape. Using none of them
+        (the default) is exactly as fast as before this capability existed.
+        ``ld_coeffs_active``/``I_profile_active`` do not support time evolution
+        and always stay fixed across the observation.
     ld_coeffs_active : jnp.ndarray, shape (nar, nwave, n_coeffs) or (nwave, n_coeffs), optional
         Per-active-region limb-darkening coefficients, same law as the
         quiet photosphere (``model["ld_mode"]``) but independent values.
@@ -1380,6 +1392,15 @@ def make_lc(
         # time-varying ones (one extra leading axis) are validated as-is.
         ntime = nphase_original
 
+        ar_time_interp_val = model["ar_time_interp"]
+
+        if ar_time_interp_val == "cubic" and ntime < 2:
+            raise ValueError(
+                "make_lc: ar_time_interp='cubic' needs at least 2 distinct "
+                f"times to fit a spline, but the model was built with "
+                f"{ntime}. Use ar_time_interp='linear' instead."
+            )
+
         #Expands static properties over time axis and raise warnings
         def _expand_position(name, arr):
             if arr.ndim == 1:
@@ -1446,16 +1467,23 @@ def make_lc(
                 f"expected (nwave,), ({nar}, {nwave}), or ({ntime}, {nar}, {nwave})."
             )
 
-        # ---- Expand from the original per-cadence grid to the oversampled
-        # grid the same way phases_rot already is (_make_oversampled_phases):
-        # each original time's value is simply repeated across its
-        # `oversample` sub-exposures -- AR properties don't meaningfully
-        # change within a single exposure.
-        ar_lat        = jnp.repeat(ar_lat, oversample, axis=0)
-        ar_long       = jnp.repeat(ar_long, oversample, axis=0)
-        ar_size       = jnp.repeat(ar_size, oversample, axis=0)
-        ar_smoothness = jnp.repeat(ar_smoothness, oversample, axis=0)
-        flux_active   = jnp.repeat(flux_active, oversample, axis=0)
+        # ---- Resolve from the original per-cadence grid onto the exact
+        # oversampled sub-exposure times already used for the planet's
+        # position (model["times_oversampled"]), via interpolation ----
+        _interp_method = _AR_TIME_INTERP_METHOD[ar_time_interp_val]
+        if model.get("verbose", False) and oversample > 1:
+            print(
+                f"make_lc: time-varying active-region parameter(s) detected "
+                f"with oversample={oversample} -- resolving onto sub-exposure "
+                f"times using ar_time_interp='{ar_time_interp_val}' interpolation."
+            )
+        _times_orig = model["times"]
+        _times_over = model["times_oversampled"]
+        ar_lat        = interpax.interp1d(_times_over, _times_orig, ar_lat, method=_interp_method, extrap=True)
+        ar_long       = interpax.interp1d(_times_over, _times_orig, ar_long, method=_interp_method, extrap=True)
+        ar_size       = interpax.interp1d(_times_over, _times_orig, ar_size, method=_interp_method, extrap=True)
+        ar_smoothness = interpax.interp1d(_times_over, _times_orig, ar_smoothness, method=_interp_method, extrap=True)
+        flux_active   = interpax.interp1d(_times_over, _times_orig, flux_active, method=_interp_method, extrap=True)
 
     ld_mode = model["ld_mode"]
     n_coeffs = 1 if ld_mode == "intensity_profile" else _N_COEFFS[ld_mode]
@@ -1704,6 +1732,7 @@ def quick_lc(
     k: Optional[float | np.ndarray] = None,
     ecc: float = 0.0,
     omega_peri: float = 0.0,
+    ar_time_interp: ArTimeInterp = "linear",
     verbose: bool = False,
 ) -> tuple:
     """
@@ -1730,17 +1759,18 @@ def quick_lc(
         Wavelength value or array at which the quiet photosphere and active-region spectra are defined.
     flux_quiet : array_like, shape (nwave,)
         Quiet-photosphere flux / spectrum.
-    flux_active : jnp.ndarray, shape (nar, nwave) or (nwave,), optional
+    flux_active : jnp.ndarray, shape (nar, nwave), (nwave,), or (ntime, nar, nwave), optional
         Per-active-region flux / spectrum.
-        - If (nar, nwave): each active region gets its own spectrum.
         - If (nwave,):     broadcasts to all active regions.
-    ar_lat : jnp.ndarray, shape (nar,), optional
+        - If (nar, nwave): each active region gets its own spectrum.
+        - If (ntime, nar, nwave): each active region gets its own time-varying spectrum.
+    ar_lat : jnp.ndarray, shape (nar,) or (ntime, nar), optional
         active region latitudes in degrees. Must be in [-90, 90].
-    ar_long : jnp.ndarray, shape (nar,), optional
+    ar_long : jnp.ndarray, shape (nar,) or (ntime, nar), optional
         active region longitudes in degrees. Must be in [0, 360).
-    ar_size : jnp.ndarray, shape (nar,), optional
+    ar_size : jnp.ndarray, shape (nar,) or (ntime, nar), optional
         active region angular radii in degrees
-    ar_smoothness : jnp.ndarray, shape (nar,) or scalar, optional
+    ar_smoothness : jnp.ndarray, shape (nar,), scalar, or (ntime, nar), optional
         Super-Gaussian order controlling the sharpness of each AR's
         boundary (see ``_compute_ar_shape``). ``1`` is a true Gaussian;
         larger values sharpen the edge, converging to a hard-edged cap as
@@ -1750,22 +1780,22 @@ def quick_lc(
         ``flux_active``/``ar_lat``/``ar_long``/``ar_size``/``ar_smoothness``
         are all-or-nothing: give every one of them to add active region(s),
         or omit all five for a quiet star. Giving some but not all raises
-        ``ValueError``. 
+        ``ValueError``.
 
         **Time-varying active regions.** Any of the above five properties may
         independently carry an extra leading axis of length ``ntime`` instead
-        of its usual shape, to let that property evolve over the observation, 
+        of its usual shape, to let that property evolve over the observation,
         e.g. a spot that grows/decays (``ar_size``), drifts in latitude/longitude
         (``ar_lat``/``ar_long``), or changes contrast (``flux_active``).
-        Values are given per original time and expanded internally across
-        ``oversample`` sub-exposures. Mixing is allowed: only the
-        parameters you want to evolve need the extra axis, the rest keep
-        their usual constant-in-time shape. Using none of them (the
-        default) is exactly as fast as before this capability existed --
-        it's a genuinely separate, opt-in code path, not a more general
-        but slower one applied unconditionally. ``ld_coeffs_active``/
-        ``I_profile_active`` do not support time evolution and always stay
-        fixed across the observation.
+        Values are given per original time and interpolated internally onto
+        ``oversample`` sub-exposures when oversampling is active, using the
+        model's ``ar_time_interp`` law (set at ``build_system`` time, like
+        ``ld_mode`` -- see there for the "linear"/"cubic" choice). Mixing is
+        allowed: only the parameters you want to evolve need the extra axis,
+        the rest keep their usual constant-in-time shape. Using none of them
+        (the default) is exactly as fast as before this capability existed.
+        ``ld_coeffs_active``/``I_profile_active`` do not support time evolution
+        and always stay fixed across the observation.
     times : array_like, shape (ntime,)
         Absolute observation times [days].
     P_rot : float
@@ -1797,7 +1827,7 @@ def quick_lc(
     I_profile : array-like, shape (nwave, n_mu_pts), optional
         Quiet-photosphere specific intensity at each (wavelength, mu) grid
         point. Required when ``ld_mode="intensity_profile"``.
-    ld_mode : str
+    ld_mode : str (default "quadratic")
         Limb-darkening law, shared by the quiet photosphere and every
         active region (each with its own coefficient values).
     ld_coeffs_active : jnp.ndarray, shape (nar, nwave, n_coeffs) or (nwave, n_coeffs), optional
@@ -1829,6 +1859,11 @@ def quick_lc(
         Orbital eccentricity and argument of periastron [rad]. Only
         meaningful together with a transit; default to 0.0 (circular,
         non-precessing orbit).
+    ar_time_interp : "linear" or "cubic", optional (default "linear")
+        Interpolation method for when time-varying active-region parameters
+        need to be interpolated onto ``oversample``'d sub-exposures.
+        Only matters when ``oversample > 1`` and at least one AR parameter
+        is time-varying -- see ``make_lc`` for the full description.
     verbose : bool, optional
         If True, print informational messages (LDC broadcasting, phase
         oversampling) while building the model. Default False.
@@ -1853,6 +1888,7 @@ def quick_lc(
         ld_coeffs=ld_coeffs, inc_star=inc_star, mu_profile=mu_profile,
         I_profile=I_profile, ld_mode=ld_mode,
         plot_map_wavelength=plot_map_wavelength, oversample=oversample,
+        ar_time_interp=ar_time_interp,
         t0=t0, period=period, a_over_rstar=a_over_rstar,
         inclination=inclination, k=k, ecc=ecc, omega_peri=omega_peri,
         verbose=verbose,

@@ -174,10 +174,11 @@ lc, star_maps = quick_lc(
     stellar_grid_size  = 100,
     ve                 = 2.0,
     ld_mode            = "quadratic",
+    ar_time_interp     = "linear",         # or "cubic" -- see below
 )
 ```
 
-Only the parameters you want to evolve need the extra axis — the rest keep their usual constant-in-time shape. Values are given per `times` entry, *not* per oversampled sub-exposure (`oversample` expansion is handled internally). `ld_coeffs_active`/`I_profile_active` don't support time evolution and always stay fixed. Importanty, if none of the five parameters are given a time axis, `make_lc` takes the exact same code path as the static case, such that this feature adds no computational cost unless activated.
+Only the parameters you want to evolve need the extra axis — the rest keep their usual constant-in-time shape. Values are given per `times` entry, *not* per oversampled sub-exposure. When `oversample > 1`, each evolving property is resolved onto the exact sub-exposure times through interpolation: `ar_time_interp="linear"` (the default) for piecewise-linear, or `"cubic"` for a C2 natural cubic spline (matching `scipy.interpolate.CubicSpline(bc_type="natural")`, but implemented in JAX via [`interpax`](https://github.com/f0uriest/interpax) so it stays differentiable). `ar_time_interp` is fixed at `build_system`/`quick_lc` time, like `ld_mode`. `ld_coeffs_active`/`I_profile_active` don't support time evolution and always stay fixed. Importantly, if none of the five parameters are given a time axis, `make_lc` takes the exact same code path as the static case, such that this feature adds no computational cost unless activated.
 
 ## Next Steps
 

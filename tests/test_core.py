@@ -2185,6 +2185,28 @@ class TestTimeVaryingAR:
             stellar_grid_size=50, ve=0.0, ld_mode="quadratic", oversample=3,
         )
 
+    @pytest.fixture(scope="class")
+    def evolving_model_oversampled_cubic(self):
+        """Same as evolving_model_oversampled, but ar_time_interp='cubic'
+        -- a build_system-level setting, like ld_mode, so it needs its own
+        model rather than being choosable per make_lc call."""
+        return build_system(
+            wavelength=WAVELENGTH, flux_quiet=FLUX_QUIET, **BASE_PARAMS,
+            times=np.linspace(0, 8.0, self._NTIME, endpoint=False), P_rot=10.0,
+            stellar_grid_size=50, ve=0.0, ld_mode="quadratic", oversample=3,
+            ar_time_interp="cubic",
+        )
+
+    @pytest.fixture(scope="class")
+    def evolving_model_cubic(self):
+        """Same as evolving_model (oversample=1), but ar_time_interp='cubic'."""
+        return build_system(
+            wavelength=WAVELENGTH, flux_quiet=FLUX_QUIET, **BASE_PARAMS,
+            times=np.linspace(0, 8.0, self._NTIME, endpoint=False), P_rot=10.0,
+            stellar_grid_size=50, ve=0.0, ld_mode="quadratic",
+            ar_time_interp="cubic",
+        )
+
     # ---- Correctness: a time-varying array holding a constant value must
     # reproduce the static-shape call exactly (same kernel, different vmap
     # structure) --------------------------------------------------------
@@ -2323,6 +2345,121 @@ class TestTimeVaryingAR:
         assert np.array(lc).shape == (self._NTIME,)  # nwave == 1: axis already dropped
         assert star_maps.shape[0] == self._NTIME
         assert np.all(np.isfinite(np.array(lc)))
+
+    # ---- Interpolation (ar_time_interp) ----------------------------------
+
+    def test_oversample_interpolation_matches_manual_reference(self, evolving_model_oversampled):
+        """
+        Ground-truth cross-check for oversample>1: make_lc's output for an
+        (ntime, nar) time-varying ar_size must match manually
+        linear-interpolating ar_size onto the model's exact sub-exposure
+        times (model["times_oversampled"]), evaluating each sub-exposure
+        independently, and averaging per block -- i.e. genuine
+        interpolation is what happens internally, not a step-function
+        repeat (which would instead match evaluating only at the nearest
+        original cadence point, not this interpolated reference).
+        """
+        ar_size_vals = np.linspace(5.0, 15.0, self._NTIME)
+        ar_size_t = jnp.asarray(ar_size_vals)[:, None]
+
+        # evolving_model_oversampled defaults to ar_time_interp="linear"
+        # (build_system's own default, like ld_mode).
+        lc_interp, _ = make_lc(
+            evolving_model_oversampled, flux_active=jnp.array(FLUX_SPOT),
+            ar_lat=jnp.array([0.0]), ar_long=jnp.array([0.0]), ar_size=ar_size_t,
+            ar_smoothness=jnp.array([_SM]),
+        )
+        lc_interp = np.array(lc_interp)
+
+        times_orig = np.asarray(evolving_model_oversampled["times"])
+        times_over = np.asarray(evolving_model_oversampled["times_oversampled"])
+        # np.interp clamps outside [times_orig[0], times_orig[-1]]; interpax's
+        # extrap=True (needed since sub-exposure times spill slightly past
+        # the first/last cadence point) instead extends the boundary slope,
+        # so the reference must match that, not plain clamped np.interp.
+        ar_size_over = np.interp(times_over, times_orig, ar_size_vals)
+        slope_left  = (ar_size_vals[1] - ar_size_vals[0]) / (times_orig[1] - times_orig[0])
+        slope_right = (ar_size_vals[-1] - ar_size_vals[-2]) / (times_orig[-1] - times_orig[-2])
+        ar_size_over = np.where(
+            times_over < times_orig[0],
+            ar_size_vals[0] + slope_left * (times_over - times_orig[0]),
+            ar_size_over,
+        )
+        ar_size_over = np.where(
+            times_over > times_orig[-1],
+            ar_size_vals[-1] + slope_right * (times_over - times_orig[-1]),
+            ar_size_over,
+        )
+
+        ref_model = build_system(
+            wavelength=WAVELENGTH, flux_quiet=FLUX_QUIET, **BASE_PARAMS,
+            times=times_over, P_rot=10.0, stellar_grid_size=50, ve=0.0, ld_mode="quadratic",
+        )
+        lc_ref, _ = make_lc(
+            ref_model, flux_active=jnp.array(FLUX_SPOT), ar_lat=jnp.array([0.0]),
+            ar_long=jnp.array([0.0]), ar_size=jnp.asarray(ar_size_over)[:, None],
+            ar_smoothness=jnp.array([_SM]),
+        )
+        oversample = evolving_model_oversampled["oversample"]
+        lc_ref_avg = np.array(lc_ref).reshape(self._NTIME, oversample).mean(axis=1)
+
+        np.testing.assert_allclose(lc_interp, lc_ref_avg, atol=1e-5)
+
+    def test_linear_vs_cubic_differ_for_nonlinear_evolution(
+        self, evolving_model_oversampled, evolving_model_oversampled_cubic,
+    ):
+        """
+        linear and cubic interpolation must give different sub-exposure
+        values for a genuinely nonlinear (not just non-constant) evolution.
+        ar_time_interp is fixed at build_system time (like ld_mode), so
+        comparing the two methods means comparing two separately-built
+        models, not one model with a per-call override.
+        """
+        assert evolving_model_oversampled["ar_time_interp"] == "linear"
+        assert evolving_model_oversampled_cubic["ar_time_interp"] == "cubic"
+
+        times_orig = np.asarray(evolving_model_oversampled["times"])
+        ar_size_t = jnp.asarray(5.0 + 1.5 * (times_orig - times_orig[0]) ** 2)[:, None]
+        kwargs = dict(
+            flux_active=jnp.array(FLUX_SPOT), ar_lat=jnp.array([0.0]),
+            ar_long=jnp.array([0.0]), ar_size=ar_size_t, ar_smoothness=jnp.array([_SM]),
+        )
+        lc_linear = np.array(make_lc(evolving_model_oversampled, **kwargs)[0])
+        lc_cubic  = np.array(make_lc(evolving_model_oversampled_cubic, **kwargs)[0])
+        assert np.all(np.isfinite(lc_linear))
+        assert np.all(np.isfinite(lc_cubic))
+        # An explicit magnitude threshold rather than np.allclose's default
+        # tolerance, which was loose enough to call a genuine (if small)
+        # difference "close" -- both curves are finite and physically
+        # sensible, but must not be the *same* curve.
+        assert np.max(np.abs(lc_linear - lc_cubic)) > 1e-6
+
+    def test_cubic_matches_linear_when_oversample_is_one(self, evolving_model, evolving_model_cubic):
+        """With oversample == 1, the sub-exposure grid equals the original
+        cadence grid exactly, so both interpolation laws reproduce the
+        given knots exactly and must agree bit-for-bit."""
+        ar_size_t = jnp.linspace(5.0, 15.0, self._NTIME)[:, None]
+        kwargs = dict(
+            flux_active=jnp.array(FLUX_SPOT), ar_lat=jnp.array([0.0]),
+            ar_long=jnp.array([0.0]), ar_size=ar_size_t, ar_smoothness=jnp.array([_SM]),
+        )
+        lc_linear = make_lc(evolving_model, **kwargs)[0]
+        lc_cubic  = make_lc(evolving_model_cubic, **kwargs)[0]
+        np.testing.assert_array_equal(np.array(lc_linear), np.array(lc_cubic))
+
+    def test_cubic_requires_at_least_two_times(self):
+        single_time_model = build_system(
+            wavelength=WAVELENGTH, flux_quiet=FLUX_QUIET, **BASE_PARAMS,
+            times=np.array([0.0]), P_rot=10.0,
+            stellar_grid_size=50, ve=0.0, ld_mode="quadratic",
+            ar_time_interp="cubic",
+        )
+        with pytest.raises(ValueError, match="ar_time_interp='cubic'"):
+            make_lc(
+                single_time_model, flux_active=jnp.array(FLUX_SPOT),
+                ar_lat=jnp.zeros((1, 1)), ar_long=jnp.array([0.0]),
+                ar_size=jnp.array([10.0]), ar_smoothness=jnp.array([_SM]),
+            )
 
     # ---- Shape validation -----------------------------------------------
 
