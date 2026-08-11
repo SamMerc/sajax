@@ -149,6 +149,22 @@ lc, star_maps = quick_lc(
 
 By default the occultation mask has a hard edge, which gives `jax.grad` (almost) zero gradient with respect to the transit-geometry parameters. For gradient-based retrieval of `t0`/`period`/`a_over_rstar`/`inclination`/`k`/`ecc`/`omega_peri` (_e.g._, a gradient-descent MAP approach), pass `transit_softness > 0` to `make_lc` (not exposed on `quick_lc`) — see the `inference.ipynb` example notebook for a full walkthrough.
 
+### Numerical precision for long baselines (absolute BJD times)
+
+JAX defaults to `float32`. That's fine for `times` measured relative to the start of an observation, but if you pass absolute epochs in BJD (e.g. `2460123.45`), `float32`'s 24 mantissa bits leave a rounding error (on the order of hours) significant enough to blur or bias the transit shape. If this applies to your data, SAJAX will emit a warning from `build_system`/`build_transit_model` when it detects the rounding error is a meaningful fraction of your sampling cadence.
+
+To fix it, enable double precision **before** doing anything else with JAX or SAJAX (`jax_enable_x64` must be set before any JAX array is created):
+
+```python
+import jax
+jax.config.update("jax_enable_x64", True)
+
+from sajax import build_system, make_lc   # import sajax only after this
+...
+```
+
+With `jax_enable_x64` on, `times`/`t0`/orbital positions carry full `float64` precision end-to-end, so absolute BJD-scale times are safe to use directly. Alternatively, you can keep `jax_enable_x64` off and instead subtract a reference epoch from both `times` and `t0` (e.g. `t_ref = np.floor(times.min())`) so that everything reaching JAX is a small offset rather than a raw BJD.
+
 ## Next Steps
 
 - 💾 **[Explore Tutorials](https://sajax.readthedocs.io/en/latest/examples/quickstart.html)** — Check out full working examples with colorful plots, interesting use cases, and the full implementation of both an MCMC and a gradient-based retrieval!

@@ -1032,9 +1032,9 @@ def build_system(
             offsets += dt / (2.0 * oversample)                          # centre sub-bins
             times_oversampled = (
                 times_arr_full[:, None] + offsets[None, :]
-            ).ravel().astype(np.float32)
+            ).ravel()
         else:
-            times_oversampled = times_arr_full.astype(np.float32)
+            times_oversampled = times_arr_full
 
         # ---- Validate k against the wavelength grid (scalar or per-wavelength)
         k_arr = np.atleast_1d(np.asarray(k, dtype=np.float32))

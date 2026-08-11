@@ -2,6 +2,8 @@
 tests/test_planet.py — Tests for the planet.py orbital module.
 """
 
+import warnings
+
 import numpy as np
 import pytest
 import jax
@@ -382,6 +384,112 @@ class TestBuildTransitModel:
             inclination=np.pi / 2.0, k=0.1, ecc=0.3, omega_peri=np.pi / 2.0,
         )
         assert np.all(np.isfinite(np.array(tm["planet_xyz"])))
+
+
+# ===================================================================
+# 4b.  Time precision (float32 vs. jax_enable_x64)
+#      BJD-scale times can induce signifcant rouding errors when processed
+#      in float32. In this scenario, users should manually swap to float64
+# ===================================================================
+
+@pytest.fixture
+def _x64_enabled():
+    """Toggle jax_enable_x64 on for the test, then restore the prior value."""
+    prior = jax.config.jax_enable_x64
+    jax.config.update("jax_enable_x64", True)
+    try:
+        yield
+    finally:
+        jax.config.update("jax_enable_x64", prior)
+
+
+class TestTimePrecision:
+
+    # A BJD-like epoch: far enough from 0 that float32's 24 mantissa bits
+    # leave a rounding error of a large fraction of a day (~0.1-0.25 d here).
+    _t0_bjd   = 2_460_123.456789
+    _period   = 3.14159265
+    _pos_kw   = dict(period=_period, a_over_rstar=15.0, inclination=1.55,
+                      ecc=0.0, omega_peri=0.0)
+    _kw       = dict(period=_period, a_over_rstar=15.0, inclination=1.55, k=0.1)
+
+    def _bjd_times(self, n=50, half_width=0.1):
+        return self._t0_bjd + np.linspace(-half_width, half_width, n)
+
+    # --- No hardcoded downcast: dtype should follow the ambient JAX config ---
+
+    def test_default_mode_stays_float32(self):
+        """Without jax_enable_x64, times/positions stay float32 (JAX default)."""
+        times = self._bjd_times()
+        xyz = compute_planet_sky_positions(times, t0=self._t0_bjd, **self._pos_kw)
+        assert xyz.dtype == jnp.float32
+
+    def test_x64_enabled_preserves_float64(self, _x64_enabled):
+        """With jax_enable_x64, float64 times must not be silently downcast."""
+        times = self._bjd_times()
+        xyz = compute_planet_sky_positions(times, t0=self._t0_bjd, **self._pos_kw)
+        assert xyz.dtype == jnp.float64
+
+    def test_x64_enabled_resolves_close_times(self, _x64_enabled):
+        """
+        At BJD scale, float32 collapses closely-spaced times onto the same
+        value (ULP ~ 0.25 days there). float64 must keep them distinct.
+        """
+        times = self._bjd_times(n=50, half_width=0.1)
+        tm = build_transit_model(times=times, t0=self._t0_bjd, **self._kw)
+        xyz = np.array(tm["planet_xyz"])
+        assert len(np.unique(xyz[:, 0])) == len(times)
+
+    def test_x64_build_transit_model_matches_reduced_time_reference(self, _x64_enabled):
+        """
+        float64 positions at BJD-scale times should match positions computed
+        after manually subtracting a reference epoch (the numerically-safe
+        approach even in plain float32) -- i.e. x64 removes the need for it.
+        """
+        times = self._bjd_times()
+        tm_absolute = build_transit_model(times=times, t0=self._t0_bjd, **self._kw)
+
+        t_ref = np.floor(times.min())
+        tm_reduced = build_transit_model(
+            times=times - t_ref, t0=self._t0_bjd - t_ref, **self._kw
+        )
+        np.testing.assert_allclose(
+            np.array(tm_absolute["planet_xyz"]),
+            np.array(tm_reduced["planet_xyz"]),
+            atol=1e-9,
+        )
+
+    # --- Precision warning ---------------------------------------------------
+
+    def test_warns_for_bjd_scale_times_without_x64(self):
+        times = self._bjd_times()
+        with pytest.warns(UserWarning, match="float32 rounding"):
+            build_transit_model(times=times, t0=self._t0_bjd, **self._kw)
+
+    def test_no_warning_for_small_times_without_x64(self):
+        """Ordinary short-baseline, near-zero times should not trigger it."""
+        times = np.linspace(-0.1, 0.1, 50)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            build_transit_model(times=times, t0=0.0, **self._kw)
+
+    def test_no_warning_for_bjd_scale_times_with_x64(self, _x64_enabled):
+        """x64 removes the precision concern, so the warning must not fire."""
+        times = self._bjd_times()
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            build_transit_model(times=times, t0=self._t0_bjd, **self._kw)
+
+    def test_no_crash_on_duplicate_timestamps(self):
+        """
+        All-identical times collapse to a single point under np.unique, which
+        used to make the cadence computation raise on an empty np.diff.
+        """
+        times = np.full(5, self._t0_bjd)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            tm = build_transit_model(times=times, t0=self._t0_bjd, **self._kw)
+        assert tm["planet_xyz"].shape == (5, 3)
 
 
 # ===================================================================
