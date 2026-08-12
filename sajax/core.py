@@ -959,6 +959,26 @@ def build_system(
         phases_oversampled = phases_rot
         nphase_compute = nphase
 
+    # ---- Reference epoch -----------------------------------------------------
+    # Subtracted from times and, for a transit, t0, before either is cast to
+    # a (possibly float32) JAX array, so downstream numerical work operates
+    # on small numbers regardless of jax_enable_x64 -- e.g. the mean-anomaly
+    # cancellation `time - t_peri` in planet.py, but also anything else that
+    # might consume model["times"]/model["times_oversampled"] at BJD scale.
+    t_ref = float(np.floor(np.min(times_arr_full)))
+    times_arr_shifted = times_arr_full - t_ref
+    if oversample > 1:
+        n_t = len(times_arr_full)
+        dt  = (times_arr_full[1] - times_arr_full[0]) if n_t > 1 else P_rot
+        # Same offset scheme used in _make_oversampled_phases -- results align.
+        offsets = np.linspace(-dt / 2.0, dt / 2.0, oversample, endpoint=False)
+        offsets += dt / (2.0 * oversample)                          # centre sub-bins
+        times_oversampled = (
+            times_arr_shifted[:, None] + offsets[None, :]
+        ).ravel()
+    else:
+        times_oversampled = times_arr_shifted
+
     inc_star       = float(inc_star)
     mu_profile_pts = np.asarray(mu_profile if mu_profile is not None else [0.0, 1.0],
                                 dtype=np.float32)
@@ -1001,6 +1021,9 @@ def build_system(
         phases_rot          = jnp.asarray(phases_oversampled),
         oversample          = oversample,
         nphase_original     = nphase,
+        t_ref               = t_ref,
+        times               = times_arr_full,               # original, unshifted
+        times_oversampled   = jnp.asarray(times_oversampled), # shifted -- safe to cast
         inc_star            = inc_star,
         ld_mode            = ld_mode,
         plot_map_wavelength = float(plot_map_wavelength),
@@ -1021,20 +1044,6 @@ def build_system(
     if all(given):
         from .planet import build_transit_model   # local import avoids circular dep.
 
-        # ---- Compute oversampled TIMES to match the oversampled phases ------
-        # We work in absolute time (not phases) so the planet's orbital
-        # position is computed correctly regardless of phase wrapping.
-        if oversample > 1:
-            n_t = len(times_arr_full)
-            dt  = (times_arr_full[1] - times_arr_full[0]) if n_t > 1 else P_rot
-            # Same offset scheme used in _make_oversampled_phases -- results align.
-            offsets = np.linspace(-dt / 2.0, dt / 2.0, oversample, endpoint=False)
-            offsets += dt / (2.0 * oversample)                          # centre sub-bins
-            times_oversampled = (
-                times_arr_full[:, None] + offsets[None, :]
-            ).ravel()
-        else:
-            times_oversampled = times_arr_full
 
         # ---- Validate k against the wavelength grid (scalar or per-wavelength)
         k_arr = np.atleast_1d(np.asarray(k, dtype=np.float32))
@@ -1048,7 +1057,7 @@ def build_system(
         # ---- Build transit model (planet positions at oversampled times) ---
         transit = build_transit_model(
             times        = times_oversampled,
-            t0           = float(t0),
+            t0           = float(t0) - t_ref,
             period       = float(period),
             a_over_rstar = float(a_over_rstar),
             inclination  = float(inclination),
@@ -1063,8 +1072,6 @@ def build_system(
         model["k"]           = transit["k"]
         model["has_transit"] = True
         model["P_rot"]       = P_rot
-        model["times"]       = times_arr_full
-        model["times_oversampled"] = jnp.asarray(times_oversampled)
         # Defaults for make_lc's dynamic path: t0/period/a_over_rstar/
         # inclination/k must all be given together (as individual keyword args,
         # possibly traced) to override these; ecc/omega_peri may be overridden
@@ -1381,8 +1388,11 @@ def make_lc(
         _defaults  = model["transit_params"]
         ecc_val        = ecc        if ecc        is not None else _defaults.get("ecc", 0.0)
         omega_peri_val = omega_peri if omega_peri is not None else _defaults.get("omega_peri", 0.0)
+        # model["times_oversampled"] was already shifted by model["t_ref"] in
+        # build_system; t0 (possibly traced/sampled here) must be shifted by
+        # the same constant so time - t_peri still cancels correctly.
         planet_xyz_all = compute_planet_sky_positions(
-            model["times_oversampled"], t0, period, a_over_rstar, inclination,
+            model["times_oversampled"], t0 - model["t_ref"], period, a_over_rstar, inclination,
             ecc_val, omega_peri_val,
         )
         k_val = k

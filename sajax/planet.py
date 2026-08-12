@@ -332,13 +332,21 @@ def _warn_if_precision_insufficient(times: np.ndarray) -> None:
     subtraction ``time - t_peri``: at BJD scales (~2.4e6) float32's 24
     mantissa bits leave an absolute rounding error of a large fraction of a
     day, which can be comparable to or larger than the sampling cadence.
+    ``build_transit_model`` does not shift ``times``/``t0`` itself i.e. this 
+    warning fires whenever the *given* ``times`` are risky, regardless of whether
+    the caller has already reduced them.
     """
     if jax.config.jax_enable_x64:
+        return
+    if isinstance(times, jax.core.Tracer):
+        # Can't concretize a traced times array to diagnose it -- skip
+        # rather than error, so build_transit_model stays traceable under
+        # jit/vmap. This warning is advisory, not correctness-critical.
         return
     times64 = np.asarray(times, dtype=np.float64)
     unique_times = np.unique(times64)
     if unique_times.size < 2: # no two distinct epochs -- no cadence to compare against
-        return   
+        return
     cadence = np.min(np.diff(unique_times))
     rounding_error = np.max(np.abs(times64.astype(np.float32).astype(np.float64) - times64))
     if rounding_error > 0.1 * cadence: # warn if rounding error is 10% of mininum cadence
@@ -351,7 +359,8 @@ def _warn_if_precision_insufficient(times: np.ndarray) -> None:
             "with `jax.config.update(\"jax_enable_x64\", True)` before "
             "using SAJAX, or subtract a reference epoch (e.g. "
             "`times - times.min()`, adjusting `t0` to match) before calling "
-            "build_system/build_transit_model. See SAJAX documentation for more info.",
+            "build_transit_model directly. Note that build_system already "
+            "does this for you. See SAJAX documentation for more info.",
             stacklevel=3,
         )
 
@@ -391,6 +400,17 @@ def build_transit_model(
                     wavelength bin) -- the orbital position doesn't depend on
                     k at all, so this is stored as-is for later use by the
                     per-wavelength occultation mask in core.py.
+
+    Numerical precision
+    --------------------
+    This function does **not** shift ``times``/``t0`` itself -- ``build_system`` 
+    (in core.py) already subtracts a common reference epoch (``model["t_ref"]``) 
+    from both before ever casting either to a JAX array, so absolute BJD-scale
+    epochs reaching this function via the normal two-stage API are already small. 
+    Direct/standalone callers passing raw BJD-scale ``times``/``t0`` are
+    responsible for doing the same reduction themselves -- a warning fires
+    (see ``_warn_if_precision_insufficient``) when this hasn't been done
+    and float32 rounding is a meaningful fraction of the sampling cadence.
 
     Returns
     -------

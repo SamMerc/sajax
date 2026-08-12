@@ -459,9 +459,97 @@ class TestTimePrecision:
             atol=1e-9,
         )
 
+    # --- Manual reference-epoch reduction ---------------------------------
+    # build_transit_model itself does not shift times/t0 (see its
+    # docstring) -- build_system does that automatically before calling
+    # it; a direct/standalone caller must reduce both themselves.
+
+    def test_raw_bjd_times_still_lose_precision_in_build_transit_model(self):
+        """
+        Passed straight through, raw BJD-scale times/t0 still produce the
+        original float32 cancellation error in build_transit_model itself
+        -- exactly why build_system reduces them before ever calling it.
+        """
+        times = self._bjd_times()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # the precision warning is expected here
+            tm_f32 = build_transit_model(times=times, t0=self._t0_bjd, **self._kw)
+        try:
+            jax.config.update("jax_enable_x64", True)
+            tm_f64 = build_transit_model(times=times, t0=self._t0_bjd, **self._kw)
+        finally:
+            jax.config.update("jax_enable_x64", False)
+        assert not np.allclose(
+            np.array(tm_f32["planet_xyz"]), np.array(tm_f64["planet_xyz"]), atol=1e-2,
+        )
+
+    def test_manual_reduction_matches_float64_without_x64(self):
+        """
+        Manually subtracting a reference epoch from times and t0 before
+        calling build_transit_model -- what build_system now does for you
+        -- recovers full precision without needing x64.
+        """
+        times = self._bjd_times()
+        t_ref = np.floor(times.min())
+        tm_reduced_f32 = build_transit_model(
+            times=times - t_ref, t0=self._t0_bjd - t_ref, **self._kw
+        )
+        try:
+            jax.config.update("jax_enable_x64", True)
+            tm_f64 = build_transit_model(times=times, t0=self._t0_bjd, **self._kw)
+        finally:
+            jax.config.update("jax_enable_x64", False)
+        np.testing.assert_allclose(
+            np.array(tm_reduced_f32["planet_xyz"]), np.array(tm_f64["planet_xyz"]),
+            atol=1e-4,
+        )
+
+    def test_build_transit_model_traceable_under_jit_over_times(self):
+        """
+        _warn_if_precision_insufficient must not break jit/vmap over
+        `times` itself -- e.g. a standalone planet.py user jitting
+        build_transit_model directly. Before the isinstance Tracer guard,
+        this raised TracerArrayConversionError.
+        """
+        times = self._bjd_times()
+
+        def f(times_arg, t0_val):
+            tm = build_transit_model(times=times_arg, t0=t0_val, **self._kw)
+            return jnp.sum(tm["planet_xyz"])
+
+        val = jax.jit(f)(jnp.asarray(times), self._t0_bjd)
+        assert jnp.isfinite(val)
+
+    def test_compute_planet_sky_positions_differentiable_wrt_t0_under_jit(self):
+        """
+        Mirrors make_lc's dynamic transit-override path: times pre-shifted
+        (as core.py now does via model["t_ref"]), t0 traced under jit/grad.
+        """
+        times = self._bjd_times()
+        t_ref = np.floor(times.min())
+        times_shifted = jnp.asarray(times - t_ref)
+
+        def f(t0_shifted):
+            xyz = compute_planet_sky_positions(
+                times_shifted, t0_shifted, **self._pos_kw
+            )
+            return jnp.sum(xyz)
+
+        jitted = jax.jit(f)
+        val = jitted(self._t0_bjd - t_ref)
+        g = jax.grad(jitted)(self._t0_bjd - t_ref)
+        assert jnp.isfinite(val)
+        assert jnp.isfinite(g)
+
     # --- Precision warning ---------------------------------------------------
 
     def test_warns_for_bjd_scale_times_without_x64(self):
+        """
+        build_transit_model doesn't shift times/t0 itself, so raw BJD-scale
+        values passed directly to it still trigger the warning -- see
+        tests/test_core.py's TestBjdReferenceEpoch for confirmation that
+        build_system's automatic reduction avoids this in normal usage.
+        """
         times = self._bjd_times()
         with pytest.warns(UserWarning, match="float32 rounding"):
             build_transit_model(times=times, t0=self._t0_bjd, **self._kw)
