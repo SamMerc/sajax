@@ -1201,6 +1201,90 @@ class TestTransitPhysics:
         np.testing.assert_allclose(lc, baseline, atol=0.005)
 
 
+class TestObliquity:
+    """
+    Integration tests for the ``sp_orb`` transit parameter through
+    build_system/make_lc/quick_lc. The stellar spin axis is fixed along
+    sky-Y (see geometry.py / core.py's ``vel_col``), so an aligned
+    (sp_orb=0) transit chord runs along the projected stellar equator,
+    while a polar (sp_orb=pi/2) chord runs along the spin axis instead
+    -- see the module-level ``TRANSIT_PARAMS`` for the shared edge-on,
+    b~0 orbit these tests build on.
+    """
+
+    # A spot sitting at normalized sky-X ~ 0.3 at t=0 (see ar_long below)
+    # sits squarely on the aligned (sp_orb=0) chord, which sweeps X
+    # through that value, but off the polar (sp_orb=pi/2) chord, which
+    # stays pinned near X~0 for this b~0 orbit (see TestObliquity in
+    # test_planet.py's test_polar_obliquity_swaps_null_axis_at_central_transit).
+    _AR_LONG = float(np.rad2deg(np.arcsin(0.3)))
+
+    def test_default_obliquity_matches_omitted_argument(self):
+        """Omitting spin-orbit angle must give the identical light curve to sp_orb=0.0."""
+        lc_omitted = _combined_lc()[0]
+        lc_explicit = _combined_lc({**TRANSIT_PARAMS, "sp_orb": 0.0})[0]
+        np.testing.assert_allclose(lc_omitted, lc_explicit, rtol=1e-6)
+
+    def test_zero_obliquity_matches_pre_obliquity_transit(self, stellar_only_model):
+        """sp_orb=0 must reproduce the plain (pre-spin-orbit angle) transit depth."""
+        lc = _combined_lc({**TRANSIT_PARAMS, "sp_orb": 0.0})[0]
+        baseline = float(np.min(np.array(make_lc(stellar_only_model)[0])))
+        depth_no_obliquity = 1.0 - float(np.min(_combined_lc()[0]))
+        depth_zero_obliquity = 1.0 - float(np.min(lc))
+        np.testing.assert_allclose(depth_zero_obliquity, depth_no_obliquity, rtol=1e-6)
+        assert float(np.min(lc)) < baseline
+
+    def test_polar_obliquity_suppresses_spot_crossing_bump(self):
+        """
+        A spot placed on the aligned transit chord produces a pronounced
+        spot-crossing bump at sp_orb=0 (planet occults it), but the
+        bump should nearly vanish at sp_orb=pi/2 (polar chord misses
+        the spot's latitude band for this b~0 orbit) -- the same physical
+        effect discussed for stellar sp_orb: the transit chord, not the
+        spot itself, determines whether a crossing happens.
+        """
+        def bump(sp_orb):
+            tp = {**TRANSIT_PARAMS, "sp_orb": sp_orb}
+            lc_spot = _combined_lc(
+                tp, ar_lat=[0.0], ar_long=[self._AR_LONG], ar_size=[8.0],
+                flux_active=FLUX_SPOT,
+            )[0]
+            lc_clean = _combined_lc(
+                tp, ar_lat=[0.0], ar_long=[180.0], ar_size=[8.0],
+                flux_active=FLUX_SPOT,
+            )[0]
+            oot = np.abs(TIMES) > 0.12
+            lc_spot_norm  = lc_spot  / np.median(lc_spot[oot])
+            lc_clean_norm = lc_clean / np.median(lc_clean[oot])
+            in_transit = np.abs(TIMES) < 0.05
+            return float(np.max(np.abs(lc_spot_norm[in_transit] - lc_clean_norm[in_transit])))
+
+        bump_aligned = bump(0.0)
+        bump_polar   = bump(np.pi / 2.0)
+
+        assert bump_aligned > 5e-4, (
+            f"Aligned spot-crossing bump should be clearly resolved, got {bump_aligned:.2e}"
+        )
+        assert bump_polar < 0.1 * bump_aligned, (
+            f"Polar transit should largely miss the spot: bump_polar={bump_polar:.2e} "
+            f"vs bump_aligned={bump_aligned:.2e}"
+        )
+
+    def test_obliquity_leaves_out_of_transit_flux_unchanged(self):
+        """Spin-orbit angle only rotates the planet's trajectory, so it must not
+        affect the (planet-independent) out-of-transit stellar flux."""
+        lc_aligned = _combined_lc(
+            {**TRANSIT_PARAMS, "sp_orb": 0.0},
+            ar_lat=[0.0], ar_long=[self._AR_LONG], ar_size=[8.0], flux_active=FLUX_SPOT,
+        )[0]
+        lc_polar = _combined_lc(
+            {**TRANSIT_PARAMS, "sp_orb": np.pi / 2.0},
+            ar_lat=[0.0], ar_long=[self._AR_LONG], ar_size=[8.0], flux_active=FLUX_SPOT,
+        )[0]
+        oot = np.abs(TIMES) > 0.12
+        np.testing.assert_allclose(lc_aligned[oot], lc_polar[oot], rtol=1e-5)
+
+
 # ===================================================================
 # 4.  Oversampling — transit path
 # ===================================================================
