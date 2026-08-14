@@ -1204,17 +1204,19 @@ class TestTransitPhysics:
 class TestObliquity:
     """
     Integration tests for the ``sp_orb`` transit parameter through
-    build_system/make_lc/quick_lc. The stellar spin axis is fixed along
-    sky-Y (see geometry.py / core.py's ``vel_col``), so an aligned
-    (sp_orb=0) transit chord runs along the projected stellar equator,
-    while a polar (sp_orb=pi/2) chord runs along the spin axis instead
-    -- see the module-level ``TRANSIT_PARAMS`` for the shared edge-on,
-    b~0 orbit these tests build on.
+    build_system/make_lc/quick_lc. ``sp_orb`` is given in degrees here
+    (converted to radians internally, before reaching sajax.planet, which
+    takes radians). The stellar spin axis is fixed along sky-Y (see
+    geometry.py / core.py's ``vel_col``), so an aligned (sp_orb=0) transit
+    chord runs along the projected stellar equator, while a polar
+    (sp_orb=90) chord runs along the spin axis instead -- see the
+    module-level ``TRANSIT_PARAMS`` for the shared edge-on, b~0 orbit
+    these tests build on.
     """
 
     # A spot sitting at normalized sky-X ~ 0.3 at t=0 (see ar_long below)
     # sits squarely on the aligned (sp_orb=0) chord, which sweeps X
-    # through that value, but off the polar (sp_orb=pi/2) chord, which
+    # through that value, but off the polar (sp_orb=90) chord, which
     # stays pinned near X~0 for this b~0 orbit (see TestObliquity in
     # test_planet.py's test_polar_obliquity_swaps_null_axis_at_central_transit).
     _AR_LONG = float(np.rad2deg(np.arcsin(0.3)))
@@ -1238,7 +1240,7 @@ class TestObliquity:
         """
         A spot placed on the aligned transit chord produces a pronounced
         spot-crossing bump at sp_orb=0 (planet occults it), but the
-        bump should nearly vanish at sp_orb=pi/2 (polar chord misses
+        bump should nearly vanish at sp_orb=90 (polar chord misses
         the spot's latitude band for this b~0 orbit) -- the same physical
         effect discussed for stellar sp_orb: the transit chord, not the
         spot itself, determines whether a crossing happens.
@@ -1260,7 +1262,7 @@ class TestObliquity:
             return float(np.max(np.abs(lc_spot_norm[in_transit] - lc_clean_norm[in_transit])))
 
         bump_aligned = bump(0.0)
-        bump_polar   = bump(np.pi / 2.0)
+        bump_polar   = bump(90.0)
 
         assert bump_aligned > 5e-4, (
             f"Aligned spot-crossing bump should be clearly resolved, got {bump_aligned:.2e}"
@@ -1278,7 +1280,7 @@ class TestObliquity:
             ar_lat=[0.0], ar_long=[self._AR_LONG], ar_size=[8.0], flux_active=FLUX_SPOT,
         )[0]
         lc_polar = _combined_lc(
-            {**TRANSIT_PARAMS, "sp_orb": np.pi / 2.0},
+            {**TRANSIT_PARAMS, "sp_orb": 90.0},
             ar_lat=[0.0], ar_long=[self._AR_LONG], ar_size=[8.0], flux_active=FLUX_SPOT,
         )[0]
         oot = np.abs(TIMES) > 0.12

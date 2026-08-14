@@ -922,11 +922,12 @@ def build_system(
         Orbital eccentricity and argument of periastron [rad]. Only
         meaningful together with a transit; default to 0.0 (circular,
         non-precessing orbit).
-    sp_orb : sky-projected spin-orbit angle, λ  [rad]
+    sp_orb : sky-projected spin-orbit angle, λ  [deg]
         Rotates the transit chord about the stellar
-        centre, in the sky plane. Angle is relative to the 
+        centre, in the sky plane. Angle is relative to the
         star's spin axis. Only meaningful together with a transit.
-        See ``sajax.planet.planet_sky_position``.
+        Converted to radians internally before use --
+        ``sajax.planet.planet_sky_position`` itself takes radians.
     verbose : bool, optional
         If True, print informational messages (LDC broadcasting, phase
         oversampling) while building the model. Default False.
@@ -1061,7 +1062,7 @@ def build_system(
             ecc          = float(ecc),
             omega_peri   = float(omega_peri),
             k            = k_arr,
-            sp_orb    = float(sp_orb),
+            sp_orb       = float(np.deg2rad(sp_orb)),   # sp_orb is given in degrees; planet.py takes radians
         )
 
         # ---- Attach transit data to the model dict --------------------------
@@ -1181,10 +1182,11 @@ def make_lc(
         also raises ``ValueError``). Default to the values ``model``'s transit
         was built with.
     sp_orb : float, optional
-        Sky-projected spin-orbit angle λ [rad]. Same all-or-nothing-with-
+        Sky-projected spin-orbit angle λ [deg]. Same all-or-nothing-with-
         ``ecc``/``omega_peri`` treatment: only used together with a
-        transit, defaults to the value ``model``'s transit was built with.
-        See ``sajax.planet.planet_sky_position``.
+        transit, defaults to the value ``model``'s transit was built with
+        (also in degrees). Converted to radians internally before use --
+        ``sajax.planet.planet_sky_position`` itself takes radians.
     transit_softness : float, optional
         Sigmoid transition width [R*] for the planet occultation mask
         (default 0.0: exact hard edge, matching the physical simulation).
@@ -1395,7 +1397,8 @@ def make_lc(
         _defaults  = model["transit_params"]
         ecc_val        = ecc        if ecc        is not None else _defaults.get("ecc", 0.0)
         omega_peri_val = omega_peri if omega_peri is not None else _defaults.get("omega_peri", 0.0)
-        sp_orb_val     = sp_orb     if sp_orb     is not None else _defaults.get("sp_orb", 0.0)
+        sp_orb_deg     = sp_orb     if sp_orb     is not None else _defaults.get("sp_orb", 0.0)
+        sp_orb_val     = jnp.deg2rad(sp_orb_deg)   # sp_orb is given in degrees; planet.py takes radians
         planet_xyz_all = compute_planet_sky_positions(
             model["times_oversampled"], t0, period, a_over_rstar, inclination,
             ecc_val, omega_peri_val, sp_orb_val,
@@ -1608,11 +1611,12 @@ def quick_lc(
         Orbital eccentricity and argument of periastron [rad]. Only
         meaningful together with a transit; default to 0.0 (circular,
         non-precessing orbit).
-    sp_orb : sky-projected spin-orbit angle, λ  [rad]
+    sp_orb : sky-projected spin-orbit angle, λ  [deg]
         Rotates the transit chord about the stellar
-        centre, in the sky plane. Angle is relative to the 
+        centre, in the sky plane. Angle is relative to the
         star's spin axis. Only meaningful together with a transit.
-        See ``sajax.planet.planet_sky_position``.
+        Converted to radians internally before use --
+        ``sajax.planet.planet_sky_position`` itself takes radians.
     verbose : bool, optional
         If True, print informational messages (LDC broadcasting, phase
         oversampling) while building the model. Default False.
