@@ -2151,3 +2151,117 @@ class TestQuietLdcOverride:
         g = jax.grad(f)(jnp.float32(0.4))
         assert jnp.isfinite(g)
         assert jnp.abs(g) > 0
+
+
+# ===================================================================
+# 9.  BJD-scale reference-epoch shift (numerical precision)
+#
+# build_system now subtracts a reference epoch (model["t_ref"]) from
+# times/t0 internally, before either reaches a JAX array, so absolute
+# BJD-scale transit epochs don't need jax_enable_x64 to stay precise.
+# See sajax/planet.py's build_transit_model docstring.
+# ===================================================================
+
+class TestBjdReferenceEpoch:
+
+    _T0_BJD  = 2_460_123.456789
+    _PERIOD  = 3.14159265
+    _TRANSIT_PARAMS = dict(
+        t0=_T0_BJD, period=_PERIOD, a_over_rstar=15.0,
+        inclination=np.pi / 2.0, k=0.1,
+    )
+
+    @pytest.fixture(scope="class")
+    def bjd_model(self):
+        times = self._T0_BJD + np.linspace(-0.1, 0.1, 20)
+        return build_system(
+            wavelength=WAVELENGTH, flux_quiet=FLUX_QUIET, **BASE_PARAMS,
+            times=times, P_rot=25.0, stellar_grid_size=STELLAR_GRID, ve=VE,
+            ld_mode="quadratic", **self._TRANSIT_PARAMS,
+        )
+
+    def test_t_ref_is_stored_and_matches_floor_of_times_min(self, bjd_model):
+        expected = float(np.floor(bjd_model["times"].min()))
+        assert bjd_model["t_ref"] == pytest.approx(expected)
+
+    def test_quiet_star_model_also_has_t_ref(self, stellar_only_model):
+        """
+        t_ref/times/times_oversampled are computed unconditionally, not
+        just when a transit is attached -- a long enough baseline benefits
+        from the reduction for any downstream numerical work, not only the
+        transit-position computation.
+        """
+        assert "t_ref" in stellar_only_model
+        expected = float(np.floor(stellar_only_model["times"].min()))
+        assert stellar_only_model["t_ref"] == pytest.approx(expected)
+        # times_oversampled must be shifted relative to the reference
+        # epoch: within one day of the (already-small, here near-zero)
+        # times span, not a BJD-scale (~2.46e6) magnitude.
+        max_shifted = float(jnp.max(jnp.abs(stellar_only_model["times_oversampled"])))
+        assert max_shifted < 2.0
+        assert max_shifted == pytest.approx(
+            float(np.max(np.abs(stellar_only_model["times"] - stellar_only_model["t_ref"]))),
+            abs=1e-3,
+        )
+
+    def test_still_warns_for_long_baseline_high_cadence_after_reduction(self):
+        """
+        build_system's automatic reduction handles the common case, but not
+        the fundamental float32 precision limit: a genuinely long baseline
+        (here ~10 years) combined with a fine cadence (~1 second) anywhere
+        in it leaves a large enough *post-reduction* magnitude (~thousands
+        of days) that float32 rounding is still a significant fraction of
+        that cadence, so the warning must still fire even after reduction.
+        """
+        span_days = 3650.0  # ~10 years
+        times = self._T0_BJD + np.concatenate([
+            np.linspace(0.0, span_days, 20),
+            [span_days / 2, span_days / 2 + 1.0 / 86400.0],  # a 1-second-spaced pair
+        ])
+        with pytest.warns(UserWarning, match="float32 rounding"):
+            build_system(
+                wavelength=WAVELENGTH, flux_quiet=FLUX_QUIET, **BASE_PARAMS,
+                times=times, P_rot=25.0, stellar_grid_size=STELLAR_GRID, ve=VE,
+                ld_mode="quadratic", **self._TRANSIT_PARAMS,
+            )
+
+    def test_static_and_dynamic_paths_agree_at_bjd_scale(self, bjd_model):
+        """
+        The static (build-time-baked) and dynamic (make_lc-level override,
+        possibly traced t0) transit-position paths must agree when given
+        the *same* BJD-scale t0 -- both now go through the reference-epoch
+        shift (statically inside build_transit_model, dynamically via
+        make_lc subtracting model["t_ref"]), and should be numerically
+        indistinguishable at typical float32 precision.
+        """
+        kwargs = dict(
+            flux_active=jnp.array(FLUX_SPOT), ar_lat=jnp.array([5.0]),
+            ar_long=jnp.array([0.0]), ar_size=jnp.array([8.0]),
+            ar_smoothness=jnp.array([_SM]),
+        )
+        lc_static = make_lc(bjd_model, **kwargs)[0]
+        lc_dynamic = make_lc(bjd_model, **kwargs, **self._TRANSIT_PARAMS)[0]
+        np.testing.assert_allclose(
+            np.array(lc_static), np.array(lc_dynamic), rtol=1e-4,
+        )
+
+    def test_grad_wrt_bjd_scale_t0_is_finite_without_x64(self, bjd_model):
+        """
+        The whole point of the fix: gradient-based retrieval of an
+        absolute BJD-scale t0 must give a finite, informative gradient
+        without needing jax_enable_x64.
+        """
+        assert not jax.config.jax_enable_x64
+
+        def f(t0):
+            lc, _ = make_lc(
+                bjd_model, flux_active=jnp.array(FLUX_SPOT),
+                ar_lat=jnp.array([5.0]), ar_long=jnp.array([0.0]),
+                ar_size=jnp.array([8.0]), ar_smoothness=jnp.array([_SM]),
+                t0=t0, period=self._PERIOD, a_over_rstar=15.0,
+                inclination=np.pi / 2.0, k=0.1,
+            )
+            return jnp.sum(lc)
+
+        g = jax.grad(f)(self._T0_BJD)
+        assert jnp.isfinite(g)
