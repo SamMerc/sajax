@@ -46,7 +46,7 @@ Key differences from the original NumPy/SciPy implementation
    spectrum is resampled at ``lambda * (1 - v/c)`` for that pixel's own
    velocity v. The stellar rotation axis is the y-axis in Carthesian
    coordinates, so the sky-projected line-of-sight velocity is
-   ``v_z = -omega * sin(i_star) * x``: it depends only on a pixel's
+   ``v_z = -(ve/R) * sin(i_star) * x``: it depends only on a pixel's
    x-coordinate, and all pixels in the same grid column share one velocity --
    the (expensive) spectral resampling is done once per column (``n``
    columns) rather than once per pixel (``~n^2``), then broadcast back out to
@@ -193,7 +193,8 @@ def build_stellar_grid(
     ``mu``            - (total_pixels,) limb-darkening cos(theta) [in-disc only]
     ``col_idx``       - (total_pixels,) int, 0..n-1 -- which grid column each
                         in-disc pixel belongs to.
-    ``vel_col``       - (n,) Doppler factor Δv/c for each possible column.
+    ``vel_col``       - (n,) line-of-sight velocity in units of c (v/c) for
+                        each possible column.
                         The sky-projected rotation axis lies in the y-z
                         plane, so the line-of-sight velocity depends only on
                         a pixel's column (its x-coordinate) -- every pixel in
@@ -227,7 +228,7 @@ def build_stellar_grid(
     # coords[0] = -n//2, so col_idx = x + n//2 maps x onto {0, ..., n-1}.
     col_idx = (x_disc + n // 2).astype(np.int32)
 
-    # Sky-frame spin axis (0, sin i, cos i) → v_z = -omega*sin(i)*x, a function of x alone; +x recedes.
+    # Sky-frame spin axis (0, sin i, cos i) → v_z = -(ve/R)*sin(i)*x, a function of x alone; +x recedes.
     vel_col = (
         coords / star_pixel_rad * (ve / C) * np.sin(np.deg2rad(inc_star))
     ).astype(np.float32)

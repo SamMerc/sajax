@@ -128,7 +128,7 @@ class TestBuildStellarGrid:
         assert abs(float(grid["mu"][centre_mask][0]) - 1.0) < 1e-5
 
     def test_vel_col_zero_when_ve_zero(self):
-        """Doppler factor should be identically zero for non-rotating star."""
+        """Line-of-sight velocity should be identically zero for non-rotating star."""
         grid = build_stellar_grid(50, ve=0.0)
         assert np.allclose(grid["vel_col"], 0.0, atol=1e-10)
 
