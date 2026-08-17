@@ -568,6 +568,34 @@ class TestInputValidation:
                 ar_smoothness=jnp.array([1.0, 2.0, 3.0]),  # wrong size
             )
 
+    def test_ar_smoothness_below_one_raises(self, small_model):
+        nwave = small_model["nwave"]
+        with pytest.raises(ValueError, match="ar_smoothness"):
+            make_lc(
+                small_model, flux_active=jnp.ones(nwave),
+                ar_lat=jnp.array([0.0]), ar_long=jnp.array([0.0]),
+                ar_size=jnp.array([10.0]), ar_smoothness=jnp.array([0.5]),
+            )
+
+    def test_ar_smoothness_below_one_not_checked_under_jit(self, small_model):
+        """The ar_smoothness>=1 check must not break jit/grad-based fitting
+        (e.g. numpyro_ext), where ar_smoothness arrives as a Tracer with no
+        concrete value available at trace time -- even one that would be
+        rejected eagerly, like 0.5 here, must trace through untouched.
+        """
+        nwave = small_model["nwave"]
+
+        @jax.jit
+        def run(smoothness):
+            lc, _ = make_lc(
+                small_model, flux_active=jnp.ones(nwave),
+                ar_lat=jnp.array([0.0]), ar_long=jnp.array([0.0]),
+                ar_size=jnp.array([10.0]), ar_smoothness=jnp.array([smoothness]),
+            )
+            return lc
+
+        run(0.5)  # must not raise TracerBoolConversionError
+
     def test_ld_coeffs_active_shape_mismatch_raises(self, small_model):
         nwave = small_model["nwave"]
         with pytest.raises(ValueError, match="ld_coeffs_active"):
@@ -1565,7 +1593,7 @@ class TestARShapeGradients:
 
     Background
     ----------
-    At ar_smoothness=20 the boundary transition is narrow enough that a
+    At ar_smoothness=40 the boundary transition is narrow enough that a
     finite-difference step of h=0.1 rad overshoots it, so the FD chord no
     longer approximates the local derivative (JAX's infinitesimal-limit
     gradient is correct; the FD estimate is not). h=1e-4 rad stays well
@@ -1574,7 +1602,7 @@ class TestARShapeGradients:
 
     _spr        = 50.0
     _arsize_deg = 20.0
-    _smoothness = 20.0
+    _smoothness = 40.0
 
     @property
     def _arsize_rad(self):
@@ -1634,18 +1662,25 @@ class TestARShapeGradients:
 
     def test_spz_gradient_positive_at_boundary_pixel(self):
         """
-        Place the AR centre on the z-axis at spz = cos(arsize) * spr so that
-        the disc-centre pixel sits exactly on the AR boundary. Increasing
-        spz moves the AR toward the observer, raising cos_theta at the
-        disc-centre pixel -> shape increases -> d(shape)/d(spz) > 0.
+        Place the AR centre on the sphere at spz = cos(arsize) * spr,
+        spy = sin(arsize) * spr (spx = 0) so that the disc-centre pixel sits
+        exactly on the AR boundary. Since _compute_ar_shape computes the
+        chord length directly, the AR-centre vector must actually lie on the sphere.
+        Move spz along the sphere (spy = sqrt(spr^2 - spz^2)
+        keeps it on-sphere) toward the observer: cos_theta at the disc-centre
+        pixel rises -> shape increases -> d(shape)/d(spz) > 0.
         """
         cos_a = float(jnp.cos(jnp.float32(self._arsize_rad)))
         spz0  = jnp.float32(cos_a * self._spr)
 
-        grad = float(jax.grad(lambda sz: self._shape_sum(
-            jnp.float32(self._arsize_rad),
-            spx=0.0, spy=0.0, spz=sz, px=0.0, py=0.0,
-        ))(spz0))
+        def _shape_at_spz(sz):
+            sy = jnp.sqrt(self._spr ** 2 - sz ** 2)
+            return self._shape_sum(
+                jnp.float32(self._arsize_rad),
+                spx=0.0, spy=sy, spz=sz, px=0.0, py=0.0,
+            )
+
+        grad = float(jax.grad(_shape_at_spz)(spz0))
         assert grad > 0
 
     def test_dark_spot_flux_decreases_as_spot_grows(self, flat_spectra, base_params):

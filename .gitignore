@@ -20,6 +20,10 @@ env/
 # Jupyter checkpoints
 .ipynb_checkpoints/
 
+# Sphinx build output and autoapi-generated pages
+docs/_build/
+docs/generated/
+
 # macOS metadata
 .DS_Store
 
