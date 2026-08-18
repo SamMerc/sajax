@@ -56,6 +56,8 @@ Public API
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -234,7 +236,7 @@ def compute_planet_sky_positions(
                 t, t0, period, a_over_rstar, inclination, ecc, omega_peri,
             )
         )
-    )(jnp.asarray(times, dtype=jnp.float32))   # (ntime, 3)
+    )(jnp.asarray(times))   # (ntime, 3)
     return _pos
 
 
@@ -322,6 +324,47 @@ def _compute_planet_mask(
 # 5. build_transit_model — pre-compute positions for all (oversampled) epochs
 # ---------------------------------------------------------------------------
 
+def _warn_if_precision_insufficient(times: np.ndarray) -> None:
+    """
+    Warn when float32 rounding of ``times`` could blur the sampling cadence.
+
+    The mean anomaly (``planet_sky_position``) is formed from a cancelling
+    subtraction ``time - t_peri``: at BJD scales (~2.4e6) float32's 24
+    mantissa bits leave an absolute rounding error of a large fraction of a
+    day, which can be comparable to or larger than the sampling cadence.
+    ``build_transit_model`` does not shift ``times``/``t0`` itself i.e. this 
+    warning fires whenever the *given* ``times`` are risky, regardless of whether
+    the caller has already reduced them.
+    """
+    if jax.config.jax_enable_x64:
+        return
+    if isinstance(times, jax.core.Tracer):
+        # Can't concretize a traced times array to diagnose it -- skip
+        # rather than error, so build_transit_model stays traceable under
+        # jit/vmap. This warning is advisory, not correctness-critical.
+        return
+    times64 = np.asarray(times, dtype=np.float64)
+    unique_times = np.unique(times64)
+    if unique_times.size < 2: # no two distinct epochs -- no cadence to compare against
+        return
+    cadence = np.min(np.diff(unique_times))
+    rounding_error = np.max(np.abs(times64.astype(np.float32).astype(np.float64) - times64))
+    if rounding_error > 0.1 * cadence: # warn if rounding error is 10% of mininum cadence
+        warnings.warn(
+            "SAJAX: `times` span values large enough (max |t| = "
+            f"{np.max(np.abs(times64)):.6g}) that float32 rounding "
+            f"(~{rounding_error:.3g} time units) is a significant fraction "
+            f"of the minimum sampling cadence (~{cadence:.3g} time units). This can "
+            "bias or wash out the transit shape. Enable double precision "
+            "with `jax.config.update(\"jax_enable_x64\", True)` before "
+            "using SAJAX, or subtract a reference epoch (e.g. "
+            "`times - times.min()`, adjusting `t0` to match) before calling "
+            "build_transit_model directly. Note that build_system already "
+            "does this for you. See SAJAX documentation for more info.",
+            stacklevel=3,
+        )
+
+
 def build_transit_model(
     times: np.ndarray,
     t0: float,
@@ -358,6 +401,17 @@ def build_transit_model(
                     k at all, so this is stored as-is for later use by the
                     per-wavelength occultation mask in core.py.
 
+    Numerical precision
+    --------------------
+    This function does **not** shift ``times``/``t0`` itself -- ``build_system`` 
+    (in core.py) already subtracts a common reference epoch (``model["t_ref"]``) 
+    from both before ever casting either to a JAX array, so absolute BJD-scale
+    epochs reaching this function via the normal two-stage API are already small. 
+    Direct/standalone callers passing raw BJD-scale ``times``/``t0`` are
+    responsible for doing the same reduction themselves -- a warning fires
+    (see ``_warn_if_precision_insufficient``) when this hasn't been done
+    and float32 rounding is a meaningful fraction of the sampling cadence.
+
     Returns
     -------
     dict with keys
@@ -365,7 +419,8 @@ def build_transit_model(
     ``planet_xyz`` : (ntime, 3) jnp.ndarray — planet (X, Y, Z) per epoch
     ``k``          : jnp.ndarray, scalar or (nwave,) — planet-to-star radius ratio
     """
-    times_jax = jnp.asarray(times, dtype=jnp.float32)
+    _warn_if_precision_insufficient(times)
+    times_jax = jnp.asarray(times)
 
     xyz = compute_planet_sky_positions(
         times_jax, t0, period, a_over_rstar, inclination, ecc, omega_peri,

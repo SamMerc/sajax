@@ -111,8 +111,8 @@ class TestBuildStellarGrid:
         assert len(grid["x"]) == grid["total_pixels"]
         assert len(grid["y"]) == grid["total_pixels"]
         assert len(grid["mu"]) == grid["total_pixels"]
-        assert len(grid["row_idx"]) == grid["total_pixels"]
-        assert len(grid["vel_row"]) == grid["n"]
+        assert len(grid["col_idx"]) == grid["total_pixels"]
+        assert len(grid["vel_col"]) == grid["n"]
 
     def test_mu_range(self):
         grid = build_stellar_grid(50, 2.0)
@@ -127,24 +127,24 @@ class TestBuildStellarGrid:
         assert np.any(centre_mask), "Centre pixel not found in grid"
         assert abs(float(grid["mu"][centre_mask][0]) - 1.0) < 1e-5
 
-    def test_vel_row_zero_when_ve_zero(self):
-        """Doppler factor should be identically zero for non-rotating star."""
+    def test_vel_col_zero_when_ve_zero(self):
+        """Line-of-sight velocity should be identically zero for non-rotating star."""
         grid = build_stellar_grid(50, ve=0.0)
-        assert np.allclose(grid["vel_row"], 0.0, atol=1e-10)
+        assert np.allclose(grid["vel_col"], 0.0, atol=1e-10)
 
-    def test_row_idx_within_bounds(self):
+    def test_col_idx_within_bounds(self):
         grid = build_stellar_grid(50, 2.0)
-        assert np.all(grid["row_idx"] >= 0)
-        assert np.all(grid["row_idx"] < grid["n"])
+        assert np.all(grid["col_idx"] >= 0)
+        assert np.all(grid["col_idx"] < grid["n"])
 
-    def test_row_idx_reconstructs_per_pixel_velocity(self):
-        """row_idx + vel_row must exactly reproduce y/spr*(ve/c) per pixel --
-        this is the row-based Doppler optimization's core correctness
+    def test_col_idx_reconstructs_per_pixel_velocity(self):
+        """col_idx + vel_col must exactly reproduce x/spr*(ve/c) per pixel --
+        this is the column-based Doppler optimization's core correctness
         property: it must be an exact reformulation, not an approximation."""
         ve = 30.0
         grid = build_stellar_grid(50, ve=ve)
-        expected = grid["y"] / grid["star_pixel_rad"] * (ve / C_KMS)
-        reconstructed = grid["vel_row"][grid["row_idx"]]
+        expected = grid["x"] / grid["star_pixel_rad"] * (ve / C_KMS)
+        reconstructed = grid["vel_col"][grid["col_idx"]]
         np.testing.assert_allclose(reconstructed, expected, atol=1e-6)
 
     def test_flat_indices_within_bounds(self):
@@ -906,6 +906,242 @@ class TestSymmetry:
         )
 
 
+# ===================================================================
+# Orientation and sign of the rotational Doppler field
+#
+# The stellar spin axis is the body-frame y-axis (rotate_active_region
+# applies rotation_matrix_y; make_lc places latitude on y). For a rigid
+# rotator with sky-frame angular velocity omega = w (0, sin i, cos i), the
+# line-of-sight component of v = omega x r is
+#
+#     v_z = -w * sin(i) * x
+#
+# so the radial velocity varies along the sky x axis, is independent of both
+# y and the pixel's depth z, and vanishes pole-on.
+#
+# The tests below pin down the orientation and sign of that field, which the
+# disc-integrated tests above cannot see: the stellar disc is circularly
+# symmetric, so the rotationally broadened profile of the quiet star is
+# identical whether the velocity is keyed on x or on y. The signature only
+# appears in the resolved star map and in wavelength-resolved AR signals.
+# ===================================================================
+
+# A rotation fast enough that the limb shift dwarfs the line width, so a pixel
+# on the approaching/receding limb moves the line clean out of the channel.
+_DOPPLER_VE   = 300.0   # equatorial velocity [km/s] -> limb shift ~5 A at 5005 A
+_DOPPLER_LAM0 = 5005.0  # line centre [A]
+_DOPPLER_SIG  = 0.3     # line 1-sigma width [A]  << limb shift
+
+
+def _line_spectrum(wl, depth=0.9, lam0=_DOPPLER_LAM0, sigma=_DOPPLER_SIG):
+    """Flat continuum at 1.0 with a single narrow Gaussian absorption line."""
+    return 1.0 - depth * np.exp(-0.5 * ((wl - lam0) / sigma) ** 2)
+
+
+def _quiet_star_map(grid_size, wavelength_target, ve=_DOPPLER_VE, inc_star=90.0):
+    """Star map of a bare quiet star (contrast identically 1) at one wavelength.
+
+    ``flux_active = flux_quiet`` makes every active-region contrast exactly 1,
+    so the AR arguments are inert and the map is the pure quiet photosphere;
+    ``ld_coeffs=[0, 0]`` removes limb darkening so the only structure left in
+    the map is the Doppler field itself.
+    """
+    wl   = np.linspace(4985.0, 5025.0, 801, dtype=np.float64)
+    spec = _line_spectrum(wl)
+
+    _, maps = quick_lc(
+        wavelength=wl, flux_quiet=spec, flux_active=spec,
+        ar_lat=[0.0], ar_long=[0.0], ar_size=[1.0], ar_smoothness=[1.0],
+        times=np.array([0.0]), P_rot=1.0,
+        stellar_grid_size=grid_size, ve=ve, ld_coeffs=[0.0, 0.0],
+        inc_star=inc_star, plot_map_wavelength=wavelength_target,
+    )
+    # star_maps is (ntimes, n, n) reshaped from meshgrid(..., indexing='xy'):
+    # axis 0 is the y (row) coordinate, axis 1 is x (column), both running
+    # from -n//2 to +n//2, so index n//2 is the disc centre.
+    return np.asarray(maps[0])
+
+
+class TestDopplerFieldAxis:
+    """The field varies along x, not along y."""
+
+    def test_line_core_map_varies_along_x_and_is_flat_along_y(self):
+        """Read the map at the rest wavelength of a narrow line.
+
+        Pixels near x = +/-R are Doppler-shifted out of the line and stay
+        bright; pixels along the y axis (x = 0) have zero radial velocity and
+        must all sit at the same line-core depth as the disc centre.
+        """
+        G = 20
+        m = _quiet_star_map(G, wavelength_target=_DOPPLER_LAM0)
+        c = m.shape[0] // 2
+        d = int(0.8 * G)
+
+        core = m[c, c]
+        # Line depth is 0.9, so shifting out of the core is a ~0.9 swing;
+        # 0.05 is far above any interpolation/pixelation noise.
+        assert m[c, c + d] > core + 0.05, (
+            f"+x limb should be shifted out of the line core: "
+            f"map[+0.8R, 0]={m[c, c + d]:.5f} vs centre {core:.5f}"
+        )
+        assert m[c, c - d] > core + 0.05, (
+            f"-x limb should be shifted out of the line core: "
+            f"map[-0.8R, 0]={m[c, c - d]:.5f} vs centre {core:.5f}"
+        )
+
+        # The x = 0 column is the zero-velocity meridian: no variation at all.
+        assert abs(m[c + d, c] - core) < 1e-4, (
+            f"x=0 column must have zero radial velocity, but map[0, +0.8R]="
+            f"{m[c + d, c]:.5f} differs from centre {core:.5f}"
+        )
+        assert abs(m[c - d, c] - core) < 1e-4, (
+            f"x=0 column must have zero radial velocity, but map[0, -0.8R]="
+            f"{m[c - d, c]:.5f} differs from centre {core:.5f}"
+        )
+
+    def test_velocity_field_is_independent_of_y(self):
+        """Every pixel sharing an x must share a velocity, at all y.
+
+        Stronger than the axis check above: the full in-disc map at the line
+        core must be constant down each column, since v_z depends on x alone.
+        """
+        G = 20
+        m = _quiet_star_map(G, wavelength_target=_DOPPLER_LAM0)
+        n = m.shape[0]
+        c = n // 2
+
+        coords = np.arange(n) - c
+        xg, yg = np.meshgrid(coords, coords)
+        in_disc = (xg ** 2 + yg ** 2) <= G ** 2
+
+        for col in range(n):
+            vals = m[in_disc[:, col], col]
+            if vals.size < 2:
+                continue
+            assert np.ptp(vals) < 1e-4, (
+                f"column x={coords[col]} spans {np.ptp(vals):.5f} in flux; "
+                f"pixels at the same x must share one velocity"
+            )
+
+
+class TestDopplerFieldSign:
+    """+x is the receding (redshifted) limb."""
+
+    def test_features_rotate_toward_positive_x(self):
+        """Rotation sense: a disc-centre feature moves toward +x with phase.
+
+        This is the geometric half of the sign convention; the Doppler test
+        below is the spectroscopic half. They must agree, or spots would be
+        blueshifted while setting.
+        """
+        spr = 1.0
+        centre = jnp.array([0.0, 0.0, spr])           # lat=0, long=0
+        rotated = np.asarray(rotate_active_region(centre, 10.0, 90.0))
+        assert rotated[0] > 0.0, (
+            f"increasing phase must carry a disc-centre feature toward +x, "
+            f"got x={rotated[0]:.5f}"
+        )
+        # ...and it is on its way out of view, not toward the observer.
+        assert rotated[2] < spr
+
+    def test_positive_x_is_redshifted(self):
+        """Read the map redward of the line by the shift of the x = +0.5R
+        column. The absorbed (dark) pixels must be the receding ones at
+        x = +0.5R, not the approaching ones at x = -0.5R.
+        """
+        G = 20
+        delta = _DOPPLER_LAM0 * (0.5 * _DOPPLER_VE / C_KMS)   # ~2.5 A
+        m = _quiet_star_map(G, wavelength_target=_DOPPLER_LAM0 + delta)
+        c = m.shape[0] // 2
+        d = int(round(0.5 * G))
+
+        assert m[c, c + d] < m[c, c - d] - 0.05, (
+            f"at lambda0+{delta:.2f} A the dark pixels must sit on the "
+            f"receding +x side: map[+0.5R]={m[c, c + d]:.5f}, "
+            f"map[-0.5R]={m[c, c - d]:.5f}"
+        )
+        # The redshifted column should be near the line core.
+        assert m[c, c + d] < 0.2
+
+
+class TestEquatorialSpotLineAsymmetry:
+    """A spot on the equator is carried across the disc in x, so its spectral
+    imprint sweeps from blue to red. Keying the velocity on y instead pins an
+    equatorial spot at zero velocity for its whole disc passage, making the
+    blue and red channels bit-identical at every phase.
+
+    The quiet photosphere is a featureless continuum here, so every wavelength
+    structure in the light curve comes from the spot alone.
+    """
+
+    _G       = 12
+    _NPHASE  = 21
+    _PHI_MAX = 70.0    # degrees either side of meridian crossing (spot on-disc)
+
+    def _blue_red_curves(self):
+        wl   = np.linspace(4985.0, 5025.0, 801, dtype=np.float64)
+        quiet  = np.ones_like(wl)          # no lines in the quiet photosphere
+        active = _line_spectrum(wl)        # the spot carries the line
+
+        # Phases symmetric about the spot's meridian crossing (long=0, phase=0).
+        phases = np.linspace(-self._PHI_MAX, self._PHI_MAX, self._NPHASE)
+        times  = phases / 360.0            # P_rot = 1 day
+
+        lc, _ = quick_lc(
+            wavelength=wl, flux_quiet=quiet, flux_active=active,
+            ar_lat=[0.0], ar_long=[0.0], ar_size=[20.0], ar_smoothness=[20.0],
+            times=times, P_rot=1.0,
+            stellar_grid_size=self._G, ve=_DOPPLER_VE, ld_coeffs=[0.0, 0.0],
+            inc_star=90.0,
+        )
+        lc = np.asarray(lc)                # (nphase, nwave)
+
+        delta   = _DOPPLER_LAM0 * (0.5 * _DOPPLER_VE / C_KMS)
+        i_blue  = int(np.argmin(np.abs(wl - (_DOPPLER_LAM0 - delta))))
+        i_red   = int(np.argmin(np.abs(wl - (_DOPPLER_LAM0 + delta))))
+        return lc[:, i_blue], lc[:, i_red]
+
+    def test_blue_and_red_channels_differ(self):
+        """The discriminator: with the velocity keyed on y an equatorial spot
+        never acquires any radial velocity, so the two channels are identical.
+        """
+        blue, red = self._blue_red_curves()
+        # The spot covers ~3% of the disc and carries a 0.9-deep line, so each
+        # wing dips by ~0.03 at its own half of the passage while the other
+        # wing sits at the continuum. 5e-3 is well below that and well above
+        # the ~3e-6 far-wing leakage that is all a zero-velocity spot produces.
+        assert np.max(np.abs(blue - red)) > 5e-3, (
+            "an equatorial spot must imprint different signals on the blue and "
+            f"red wings; max|blue-red|={np.max(np.abs(blue - red)):.3e}"
+        )
+
+    def test_blue_channel_is_the_time_reverse_of_the_red(self):
+        """Sign check at the observable level: about the meridian crossing the
+        spot is approaching before and receding after, so with a symmetric line
+        profile and a phase grid symmetric about phase 0 the blue-wing curve is
+        the red-wing curve run backwards.
+        """
+        blue, red = self._blue_red_curves()
+        # Tolerance is set by float32 spectral interpolation, which breaks the
+        # exact x -> -x symmetry of the pixel grid at the ~3e-3 level relative
+        # to the dip depth.
+        scale = max(np.ptp(blue), np.ptp(red))
+        np.testing.assert_allclose(
+            blue, red[::-1], atol=5e-3 * scale, rtol=0,
+            err_msg="blue wing should mirror the red wing about phase 0",
+        )
+
+    def test_blue_leads_red(self):
+        """And the ordering is fixed, not merely mirrored: the blue-wing
+        absorption peaks while the spot is still approaching (negative phase).
+        """
+        blue, red = self._blue_red_curves()
+        assert np.argmin(blue) < np.argmin(red), (
+            f"blue-wing dip must precede the red-wing dip, got "
+            f"argmin(blue)={np.argmin(blue)}, argmin(red)={np.argmin(red)}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Shared test configuration
 # ---------------------------------------------------------------------------
@@ -1068,7 +1304,7 @@ class TestBuildCombinedModel:
 
     def test_all_stellar_keys_preserved(self, combined_model):
         required = [
-            "x_disc", "y_disc", "mu_disc", "row_idx", "vel_row",
+            "x_disc", "y_disc", "mu_disc", "col_idx", "vel_col",
             "star_pixel_rad", "total_pixels", "wavelength",
             "phases_rot", "ld_coeffs", "flat_indices", "n",
         ]
@@ -1482,8 +1718,8 @@ class TestARShapeGradients:
                 x_disc              = model["x_disc"],
                 y_disc              = model["y_disc"],
                 mu_disc             = model["mu_disc"],
-                row_idx             = model["row_idx"],
-                vel_row             = model["vel_row"],
+                col_idx             = model["col_idx"],
+                vel_col             = model["vel_col"],
                 star_pixel_rad      = spr,
                 total_pixels        = model["total_pixels"],
                 arsize_rads         = jnp.array([arsize]),
@@ -1638,7 +1874,7 @@ class TestStellarParamGradientsFD:
     These parameters are baked into the model dict at build time (NumPy),
     so tests call _compute_single_phase directly with the parameter as a
     JAX-traced input, constructing whichever piece of the model that
-    parameter feeds into (e.g. ld_coeffs_quiet for u1/u2, vel_row for ve).
+    parameter feeds into (e.g. ld_coeffs_quiet for u1/u2, vel_col for ve).
     """
 
     _SPR    = 50
@@ -1669,7 +1905,7 @@ class TestStellarParamGradientsFD:
         ]])  # (1, 3)
 
     def _call_single_phase(self, model, ar_cart_rotated,
-                           vel_row=None, ld_coeffs_quiet=None):
+                           vel_col=None, ld_coeffs_quiet=None):
         nwave    = 1
         n_coeffs = 2
         n_mu     = model["mu_profile_pts"].shape[0]
@@ -1688,8 +1924,8 @@ class TestStellarParamGradientsFD:
             x_disc              = model["x_disc"],
             y_disc              = model["y_disc"],
             mu_disc             = model["mu_disc"],
-            row_idx             = model["row_idx"],
-            vel_row             = vel_row if vel_row is not None else model["vel_row"],
+            col_idx             = model["col_idx"],
+            vel_col             = vel_col if vel_col is not None else model["vel_col"],
             star_pixel_rad      = model["star_pixel_rad"],
             total_pixels        = model["total_pixels"],
             arsize_rads         = jnp.array([jnp.deg2rad(jnp.float32(self._ARSIZE))]),
@@ -1823,8 +2059,8 @@ class TestStellarParamGradientsFD:
         )(self._ar_cart(spr))
 
         def lc(ve):
-            vel_row = coords / spr * (ve / self._C)
-            return self._call_single_phase(grad_model, rotated, vel_row=vel_row)
+            vel_col = coords / spr * (ve / self._C)
+            return self._call_single_phase(grad_model, rotated, vel_col=vel_col)
 
         g = float(jax.grad(lc)(jnp.float32(2.0)))
         assert np.isfinite(g)
@@ -1855,7 +2091,7 @@ class TestStellarParamGradientsFD:
         )(self._ar_cart(spr))
 
         def lc(ve):
-            vel_row = coords / spr * (ve / self._C)
+            vel_col = coords / spr * (ve / self._C)
             fval, _ = _compute_single_phase(
                 rotated, jnp.array([0.0, 0.0, -1e10]),
                 wavelength=model["wavelength"], flux_quiet=model["flux_quiet"],
@@ -1866,7 +2102,7 @@ class TestStellarParamGradientsFD:
                 I_profile_active=jnp.broadcast_to(model["I_profile"][None, :, :], (1, nwave, n_mu)),
                 mu_profile_pts=model["mu_profile_pts"],
                 x_disc=model["x_disc"], y_disc=model["y_disc"], mu_disc=model["mu_disc"],
-                row_idx=model["row_idx"], vel_row=vel_row,
+                col_idx=model["col_idx"], vel_col=vel_col,
                 star_pixel_rad=spr, total_pixels=model["total_pixels"],
                 arsize_rads=jnp.array([jnp.deg2rad(jnp.float32(self._ARSIZE))]),
                 ar_smoothness=jnp.array([_SM]),
@@ -2535,3 +2771,117 @@ class TestTimeVaryingAR:
         g = jax.grad(f)(jnp.float32(8.0))
         assert jnp.isfinite(g)
         assert jnp.abs(g) > 0
+
+
+# ===================================================================
+# 10.  BJD-scale reference-epoch shift (numerical precision)
+#
+# build_system now subtracts a reference epoch (model["t_ref"]) from
+# times/t0 internally, before either reaches a JAX array, so absolute
+# BJD-scale transit epochs don't need jax_enable_x64 to stay precise.
+# See sajax/planet.py's build_transit_model docstring.
+# ===================================================================
+
+class TestBjdReferenceEpoch:
+
+    _T0_BJD  = 2_460_123.456789
+    _PERIOD  = 3.14159265
+    _TRANSIT_PARAMS = dict(
+        t0=_T0_BJD, period=_PERIOD, a_over_rstar=15.0,
+        inclination=np.pi / 2.0, k=0.1,
+    )
+
+    @pytest.fixture(scope="class")
+    def bjd_model(self):
+        times = self._T0_BJD + np.linspace(-0.1, 0.1, 20)
+        return build_system(
+            wavelength=WAVELENGTH, flux_quiet=FLUX_QUIET, **BASE_PARAMS,
+            times=times, P_rot=25.0, stellar_grid_size=STELLAR_GRID, ve=VE,
+            ld_mode="quadratic", **self._TRANSIT_PARAMS,
+        )
+
+    def test_t_ref_is_stored_and_matches_floor_of_times_min(self, bjd_model):
+        expected = float(np.floor(bjd_model["times"].min()))
+        assert bjd_model["t_ref"] == pytest.approx(expected)
+
+    def test_quiet_star_model_also_has_t_ref(self, stellar_only_model):
+        """
+        t_ref/times/times_oversampled are computed unconditionally, not
+        just when a transit is attached -- a long enough baseline benefits
+        from the reduction for any downstream numerical work, not only the
+        transit-position computation.
+        """
+        assert "t_ref" in stellar_only_model
+        expected = float(np.floor(stellar_only_model["times"].min()))
+        assert stellar_only_model["t_ref"] == pytest.approx(expected)
+        # times_oversampled must be shifted relative to the reference
+        # epoch: within one day of the (already-small, here near-zero)
+        # times span, not a BJD-scale (~2.46e6) magnitude.
+        max_shifted = float(jnp.max(jnp.abs(stellar_only_model["times_oversampled"])))
+        assert max_shifted < 2.0
+        assert max_shifted == pytest.approx(
+            float(np.max(np.abs(stellar_only_model["times"] - stellar_only_model["t_ref"]))),
+            abs=1e-3,
+        )
+
+    def test_still_warns_for_long_baseline_high_cadence_after_reduction(self):
+        """
+        build_system's automatic reduction handles the common case, but not
+        the fundamental float32 precision limit: a genuinely long baseline
+        (here ~10 years) combined with a fine cadence (~1 second) anywhere
+        in it leaves a large enough *post-reduction* magnitude (~thousands
+        of days) that float32 rounding is still a significant fraction of
+        that cadence, so the warning must still fire even after reduction.
+        """
+        span_days = 3650.0  # ~10 years
+        times = self._T0_BJD + np.concatenate([
+            np.linspace(0.0, span_days, 20),
+            [span_days / 2, span_days / 2 + 1.0 / 86400.0],  # a 1-second-spaced pair
+        ])
+        with pytest.warns(UserWarning, match="float32 rounding"):
+            build_system(
+                wavelength=WAVELENGTH, flux_quiet=FLUX_QUIET, **BASE_PARAMS,
+                times=times, P_rot=25.0, stellar_grid_size=STELLAR_GRID, ve=VE,
+                ld_mode="quadratic", **self._TRANSIT_PARAMS,
+            )
+
+    def test_static_and_dynamic_paths_agree_at_bjd_scale(self, bjd_model):
+        """
+        The static (build-time-baked) and dynamic (make_lc-level override,
+        possibly traced t0) transit-position paths must agree when given
+        the *same* BJD-scale t0 -- both now go through the reference-epoch
+        shift (statically inside build_transit_model, dynamically via
+        make_lc subtracting model["t_ref"]), and should be numerically
+        indistinguishable at typical float32 precision.
+        """
+        kwargs = dict(
+            flux_active=jnp.array(FLUX_SPOT), ar_lat=jnp.array([5.0]),
+            ar_long=jnp.array([0.0]), ar_size=jnp.array([8.0]),
+            ar_smoothness=jnp.array([_SM]),
+        )
+        lc_static = make_lc(bjd_model, **kwargs)[0]
+        lc_dynamic = make_lc(bjd_model, **kwargs, **self._TRANSIT_PARAMS)[0]
+        np.testing.assert_allclose(
+            np.array(lc_static), np.array(lc_dynamic), rtol=1e-4,
+        )
+
+    def test_grad_wrt_bjd_scale_t0_is_finite_without_x64(self, bjd_model):
+        """
+        The whole point of the fix: gradient-based retrieval of an
+        absolute BJD-scale t0 must give a finite, informative gradient
+        without needing jax_enable_x64.
+        """
+        assert not jax.config.jax_enable_x64
+
+        def f(t0):
+            lc, _ = make_lc(
+                bjd_model, flux_active=jnp.array(FLUX_SPOT),
+                ar_lat=jnp.array([5.0]), ar_long=jnp.array([0.0]),
+                ar_size=jnp.array([8.0]), ar_smoothness=jnp.array([_SM]),
+                t0=t0, period=self._PERIOD, a_over_rstar=15.0,
+                inclination=np.pi / 2.0, k=0.1,
+            )
+            return jnp.sum(lc)
+
+        g = jax.grad(f)(self._T0_BJD)
+        assert jnp.isfinite(g)
