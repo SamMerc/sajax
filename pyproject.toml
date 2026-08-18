@@ -46,6 +46,7 @@ examples = [
     "spotter",
     "batman-package",
     "jaxoplanet",
+    "jaxopt",
 ]
 
 [tool.uv]
