@@ -181,6 +181,18 @@ lc, star_maps = quick_lc(
 
 Since the active region's latitude/longitude are unaffected by `sp_orb` — only the planet's trajectory rotates — a spot that produces a clear crossing anomaly at `sp_orb=0` can end up entirely missed by a polar (`sp_orb≈90`) chord, even though the transit depth and duration are unchanged. See `quickstart.ipynb`'s Case 6 for a full side-by-side comparison (light curve + stellar-disc animation) of an aligned vs. polar transit of the same spot.
 
+### Numerical precision for long baselines (absolute BJD times)
+
+JAX defaults to `float32`. If you pass absolute epochs in BJD (e.g. `2460123.45`) `float32`'s 24 mantissa bits leave a rounding error (on the order of hours) significant enough to blur or bias the transit shape. To avoid this issue, `build_system` **automatically** subtracts a reference epoch (`model["t_ref"] = floor(times.min())`) so any downstream numerical work benefits from the smaller magnitude. If the rounding error is still a meaningful fraction of your sampling cadence *after* this automatic shift, SAJAX emits a warning, and `jax_enable_x64` remains available as a fallback for that case:
+
+```python
+import jax
+jax.config.update("jax_enable_x64", True)
+
+from sajax import build_system, make_lc   # import sajax only after this
+...
+```
+
 ## Next Steps
 
 - 💾 **[Explore Tutorials](https://sajax.readthedocs.io/en/latest/examples/quickstart.html)** — Check out full working examples with colorful plots, interesting use cases, and the full implementation of both an MCMC and a gradient-based retrieval!
