@@ -31,6 +31,30 @@ dev = ["pytest>=7", "pytest-cov", "jupyter", "ipykernel"]
 docs = ["sphinx>=7.0", "sphinx-book-theme", "myst-nb", "sphinx-copybutton", "sphinx-autoapi", "ipykernel"]
 cuda = ["jax[cuda12]>=0.4; sys_platform == 'linux' and platform_machine == 'x86_64'"]
 
+[dependency-groups]
+examples = [
+    "speclib; python_version >= '3.11' and python_version < '3.14'",
+    "exotic-ld",
+    "setuptools<81",
+    "astropy>=5",
+    "pillow",
+    "numpyro",
+    "numpyro-ext",
+    "arviz",
+    "corner",
+    "fleck>=1.1.3",
+    "spotter",
+    "batman-package",
+    "jaxoplanet",
+    "jaxopt",
+]
+
+[tool.uv]
+override-dependencies = ["numpy>=1.24"]
+
+[tool.uv.sources]
+speclib = { git = "https://github.com/brackham/speclib.git" }
+
 [project.urls]
 Repository = "https://github.com/SamMerc/sajax"
 
