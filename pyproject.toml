@@ -1,12 +1,12 @@
 [build-system]
 # setuptools>=77 is required for the PEP 639 SPDX `license = "MIT"` string below;
 # earlier versions reject it and demand a {file}/{text} table.
-requires = ["setuptools>=77", "wheel"]
+requires = ["setuptools>=77", "setuptools_scm>=8", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "sajax"
-version = "0.3.2"
+dynamic = ["version"]
 description = "Stellar Activity Grid for Exoplanets — JAX implementation"
 authors = [
     { name = "Samson Mercier", email = "merci228@mit.edu" },
@@ -61,6 +61,8 @@ Repository = "https://github.com/SamMerc/sajax"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["sajax*"]
+
+[tool.setuptools_scm]
 
 [tool.pytest.ini_options]
 addopts = "--cov=sajax --cov-report=xml --cov-report=term-missing"
