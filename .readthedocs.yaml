@@ -16,5 +16,5 @@ build:
     - curl -LsSf https://astral.sh/uv/install.sh | sh
     # --locked fails the build if uv.lock is out of date with pyproject.toml,
     # matching the check in .github/workflows/tests.yml.
-    - $HOME/.local/bin/uv sync --locked --extra docs
+    - $HOME/.local/bin/uv sync --locked --extra docs --group examples
     - $HOME/.local/bin/uv run --no-sync sphinx-build -b html docs $READTHEDOCS_OUTPUT/html
