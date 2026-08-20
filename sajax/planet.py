@@ -158,7 +158,7 @@ def planet_sky_position(
     sp_orb        : sky-projected spin-orbit angle, λ  [rad]
                     Rotates the transit chord about the stellar
                     centre, in the sky plane. Angle is relative to the 
-                    star's spin axis.
+                    stellar equator.
 
     Returns
     -------
@@ -186,6 +186,7 @@ def planet_sky_position(
     λ = π/2 (polar transit) swaps the roles of X and Y, so a central
     (b = 0) transit chord that used to sweep through X = 0 now sweeps
     through Y = 0 instead.
+    Positive λ rotates the orbit counterclockwise on the sky as seen by the observer.
     """
     # ---- True anomaly at mid-transit ----------------------------------------
     # At inferior conjunction (transit centre): ω + f_transit = π/2

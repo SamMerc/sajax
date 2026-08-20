@@ -929,7 +929,7 @@ def build_system(
     sp_orb : sky-projected spin-orbit angle, λ  [deg]
         Rotates the transit chord about the stellar
         centre, in the sky plane. Angle is relative to the
-        star's spin axis. Only meaningful together with a transit.
+        stellar equator. Only meaningful together with a transit.
         Converted to radians internally before use --
         ``sajax.planet.planet_sky_position`` itself takes radians.
     verbose : bool, optional
