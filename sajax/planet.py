@@ -31,12 +31,16 @@ Minimum parameter set
   a_over_rstar  : semimajor axis / R*  (dimensionless)
                   May be derived from stellar density via
                   ``stellar_density_to_a_over_rstar()``.
-  inclination   : orbital inclination  [rad]   (90 / π/2 = perfect edge-on)
+  inclination   : orbital inclination  [rad]   (90deg / pi/2 = perfect edge-on)
   ecc           : orbital eccentricity  [0, 1)
   omega_peri    : argument of periastron  [rad]
-                  (ω = 0° → periapsis at ascending node;
-                   ω = 90° → periapsis at inferior conjunction /
+                  (ω = 0deg → periapsis at ascending node;
+                   ω = 90deg → periapsis at inferior conjunction /
                    transit centre for a circular orbit)
+  sp_orb        : sky-projected spin-orbit angle, λ  [rad]
+                  ``sp_orb`` rotates the transit chord about the stellar
+                  centre, in the sky plane. Angle is relative to the 
+                  star's spin axis.
   k             : planet-to-star radius ratio  Rp / R*
 
 Limb darkening
@@ -136,6 +140,7 @@ def planet_sky_position(
     inclination: float,
     ecc: float,
     omega_peri: float,
+    sp_orb: float = 0.0,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
     Compute the planet's sky-plane position (X, Y, Z) in units of R*.
@@ -150,19 +155,38 @@ def planet_sky_position(
     ecc           : eccentricity  [0, 1)
     omega_peri    : argument of periastron  [rad]
                     Measured from the ascending node to periapsis.
+    sp_orb        : sky-projected spin-orbit angle, λ  [rad]
+                    Rotates the transit chord about the stellar
+                    centre, in the sky plane. Angle is relative to the 
+                    stellar equator.
 
     Returns
     -------
     X, Y, Z : sky-plane coordinates in units of R*
-        X  — east-west (positive east)
-        Y  — north-south projected  (= r sin(ω+f) cos i)
+        X  — east-west (positive east) at sp_orb = 0
+        Y  — north-south projected  (= r sin(ω+f) cos i) at sp_orb = 0
         Z  — toward observer  (Z > 0 ⟹ transit;  Z < 0 ⟹ occultation)
+        For nonzero sp_orb, (X, Y) are the sp_orb = 0 values rotated
+        by λ.
 
     Notes
     -----
-    The sky-plane separation from the stellar centre is sqrt(X^2 + Y^2).
+    The sky-plane separation from the stellar centre is sqrt(X^2 + Y^2)
+    (rotation-invariant, so unaffected by spin-orbit angle).
     A transit (or occultation) event occurs when sqrt(X^2 + Y^2) < 1 + k,
     where k = Rp / R*.
+
+    The spin-orbit angle rotation is applied last, after the orbital-mechanics
+    (X, Y):
+
+        X' = X cos(λ) - Y sin(λ)
+        Y' = X sin(λ) + Y cos(λ)
+
+    λ = 0 leaves (X, Y) untouched.
+    λ = π/2 (polar transit) swaps the roles of X and Y, so a central
+    (b = 0) transit chord that used to sweep through X = 0 now sweeps
+    through Y = 0 instead.
+    Positive λ rotates the orbit counterclockwise on the sky as seen by the observer.
     """
     # ---- True anomaly at mid-transit ----------------------------------------
     # At inferior conjunction (transit centre): ω + f_transit = π/2
@@ -203,6 +227,13 @@ def planet_sky_position(
     Y =  r *  sin_wf * jnp.cos(inclination)     # north–south (projected)
     Z =  r *  sin_wf * jnp.sin(inclination)     # toward observer
 
+    # ---- Spin-orbit angle: rotate (X, Y) relative to the (sky-Y-fixed)
+    # stellar spin axis. Z (transit front/back) is unaffected. See the
+    # docstring Notes for the rotation convention.
+    cos_obl = jnp.cos(sp_orb)
+    sin_obl = jnp.sin(sp_orb)
+    X, Y = X * cos_obl - Y * sin_obl, X * sin_obl + Y * cos_obl
+
     return X, Y, Z
 
 
@@ -218,6 +249,7 @@ def compute_planet_sky_positions(
     inclination: float,
     ecc: float,
     omega_peri: float,
+    sp_orb: float = 0.0,
 ) -> jnp.ndarray:
     """
     Vectorised wrapper around ``planet_sky_position``.
@@ -225,6 +257,8 @@ def compute_planet_sky_positions(
     Parameters
     ----------
     times : (ntime,) array of observation epochs
+    sp_orb: sky-projected spin-orbit angle λ [rad] (default 0.0).
+        See ``planet_sky_position``.
 
     Returns
     -------
@@ -234,6 +268,7 @@ def compute_planet_sky_positions(
         lambda t: jnp.stack(
             planet_sky_position(
                 t, t0, period, a_over_rstar, inclination, ecc, omega_peri,
+                sp_orb,
             )
         )
     )(jnp.asarray(times))   # (ntime, 3)
@@ -374,6 +409,7 @@ def build_transit_model(
     ecc: float          = 0.0,
     omega_peri: float   = 0.0,
     k: float | np.ndarray = 0.1,
+    sp_orb: float    = 0.0,
 ) -> dict:
     """
     Pre-compute the planet's sky-plane position at every epoch in ``times``.
@@ -400,6 +436,8 @@ def build_transit_model(
                     wavelength bin) -- the orbital position doesn't depend on
                     k at all, so this is stored as-is for later use by the
                     per-wavelength occultation mask in core.py.
+    sp_orb        : sky-projected spin-orbit angle λ [rad] (default: 0.0).
+                    See ``planet_sky_position``.
 
     Numerical precision
     --------------------
@@ -424,6 +462,7 @@ def build_transit_model(
 
     xyz = compute_planet_sky_positions(
         times_jax, t0, period, a_over_rstar, inclination, ecc, omega_peri,
+        sp_orb,
     )   # (ntime, 3)
 
     return dict(
