@@ -107,6 +107,7 @@ is the hot path and is safe to JIT via:
 from __future__ import annotations
 
 import functools
+import warnings
 from typing import Literal, Optional
 
 import numpy as np
@@ -1218,7 +1219,7 @@ def make_lc(
     model : dict
         Pre-built model dict returned by ``build_system``.
     flux_active : jnp.ndarray, shape (nar, nwave), (nwave,), or (ntime, nar, nwave), optional
-        Per-active-region flux / spectrum.
+        Per-active-region flux / spectrum. Must be >= 0.
         - If (nwave,):     broadcasts to all active regions.
         - If (nar, nwave): each active region gets its own spectrum.
         - If (ntime, nar, nwave): each active region gets its own time-varying spectrum.
@@ -1227,7 +1228,7 @@ def make_lc(
     ar_long : jnp.ndarray, shape (nar,) or (ntime, nar), optional
         active region longitudes in degrees. Must be in [0, 360).
     ar_size : jnp.ndarray, shape (nar,) or (ntime, nar), optional
-        active region angular radii in degrees
+        active region angular radii in degrees. Must be >= 0.
     ar_smoothness : jnp.ndarray, shape (nar,), scalar, or (ntime, nar), optional
         Super-Gaussian order controlling the sharpness of each AR's
         boundary (see ``_compute_ar_shape``). ``1`` is a true Gaussian;
@@ -1253,7 +1254,14 @@ def make_lc(
         the rest keep their usual constant-in-time shape. Using none of them
         (the default) is exactly as fast as before this capability existed.
         ``ld_coeffs_active``/``I_profile_active`` do not support time evolution
-        and always stay fixed across the observation.
+        and always stay fixed across the observation. Each epoch's values are
+        used exactly as given -- nothing couples them across epochs, so it's
+        up to the user to keep a fitted active region from changing unphysically
+        fast between epochs. If ``nar`` (read off the parameters' own trailing axis)
+        happens to equal ``ntime``, make_lc warns: this is the shape signature of
+        the common mistake of leaving a parameter meant to evolve as a flat ``(ntime,)``
+        array instead of ``(ntime, 1)``, which silently produces ``ntime`` separate
+        static active regions instead of one evolving one.
     ld_coeffs_active : jnp.ndarray, shape (nar, nwave, n_coeffs) or (nwave, n_coeffs), optional
         Per-active-region limb-darkening coefficients, same law as the
         quiet photosphere (``model["ld_mode"]``) but independent values.
@@ -1367,6 +1375,31 @@ def make_lc(
         or ar_smoothness.ndim == 2 or flux_active.ndim == 3
     )
 
+    # ``nar`` was read off ar_lat's trailing axis (above) before we knew
+    # whether any parameter was time-varying. If a caller meant a single AR
+    # to evolve over ntime epochs but passed one of ar_lat/ar_long/ar_size
+    # as a flat (ntime,) array -- forgetting the extra leading axis that
+    # would mark it time-varying, i.e. shape (ntime, 1) -- and ntime happens
+    # to equal nar, that array's own per-array shape check below passes
+    # vacuously (ntime == nar by coincidence), and it silently gets
+    # broadcast as ntime separate *static* active regions instead of one
+    # evolving one. This can't be told apart from a genuine ntime-active-region
+    # model by shape alone, so we warn rather than raise an error.
+    if ar_time_varying and nar == nphase_original:
+        warnings.warn(
+            f"SAJAX: nar (number of active regions, inferred as {nar} from "
+            "the trailing axis of ar_lat/ar_long/ar_size) equals ntime "
+            f"({nphase_original}, the number of `times` this model was "
+            "built with), while at least one active-region parameter "
+            "carries an explicit time axis. If you intended a single "
+            "time-varying active region and passed ar_lat/ar_long/ar_size/"
+            "ar_smoothness as a flat (ntime,) array instead of (ntime, 1), "
+            "it will silently be interpreted as ntime separate static "
+            "active regions rather than one evolving active region -- give "
+            "it an explicit (ntime, nar) shape to evolve it. Ignore this "
+            f"warning if {nar} distinct active regions is what you intended."
+        )
+
     if not ar_time_varying:
         # ---- Static path ---
         # Handle broadcasting: if flux_active is (nwave,), broadcast to (nar, nwave)
@@ -1403,6 +1436,16 @@ def make_lc(
                 "top-hat, but values below 1 do not correspond to a physically "
                 "meaningful AR shape."
             )
+        if not isinstance(ar_size, jax.core.Tracer) and bool(jnp.any(ar_size < 0)):
+            raise ValueError(
+                f"ar_size must be >= 0 (got {ar_size}); ar_size is an "
+                "angular radius in degrees and cannot be negative."
+            )
+        if not isinstance(flux_active, jax.core.Tracer) and bool(jnp.any(flux_active < 0)):
+            raise ValueError(
+                f"flux_active must be >= 0 (got min {float(jnp.min(flux_active))}); "
+                "flux_active is a flux/spectrum and cannot be negative."
+            )
     else:
         # ---- Time-varying path--
         # static properties (still their old shape) get broadcast across time;
@@ -1438,6 +1481,12 @@ def make_lc(
         ar_lat        = _expand_position("ar_lat", ar_lat)
         ar_long       = _expand_position("ar_long", ar_long)
         ar_size       = _expand_position("ar_size", ar_size)
+
+        if not isinstance(ar_size, jax.core.Tracer) and bool(jnp.any(ar_size < 0)):
+            raise ValueError(
+                f"ar_size must be >= 0 (got min {float(jnp.min(ar_size))}); "
+                "ar_size is an angular radius in degrees and cannot be negative."
+            )
 
         if ar_smoothness.ndim == 1:
             if ar_smoothness.size == 1:
@@ -1483,6 +1532,11 @@ def make_lc(
                 f"flux_active shape mismatch: got shape {flux_active.shape} but "
                 f"expected (nwave,), ({nar}, {nwave}), or ({ntime}, {nar}, {nwave})."
             )
+        if not isinstance(flux_active, jax.core.Tracer) and bool(jnp.any(flux_active < 0)):
+            raise ValueError(
+                f"flux_active must be >= 0 (got min {float(jnp.min(flux_active))}); "
+                "flux_active is a flux/spectrum and cannot be negative."
+            )
 
         # ---- Resolve from the original per-cadence grid onto the exact
         # oversampled sub-exposure times already used for the planet's
@@ -1505,6 +1559,30 @@ def make_lc(
         ar_size       = interpax.interp1d(_times_over, _times_orig, ar_size, method=_interp_method, extrap=True)
         ar_smoothness = interpax.interp1d(_times_over, _times_orig, ar_smoothness, method=_interp_method, extrap=True)
         flux_active   = interpax.interp1d(_times_over, _times_orig, flux_active, method=_interp_method, extrap=True)
+
+        # ar_time_interp="cubic" is a natural spline and can overshoot the
+        # input node values between/around them even though the nodes
+        # themselves satisfy ar_size >= 0 / ar_smoothness >= 1 / flux_active
+        # >= 0 (checked above) -- re-clip post-interpolation so no
+        # sub-exposure time sees an out-of-range value (otherwise ar_size
+        # crossing zero would make the AR boundary bounce unphysically, see
+        # _compute_ar_shape).
+        if model.get("verbose", False) and not isinstance(ar_size, jax.core.Tracer):
+            n_size_clipped  = int(jnp.sum(ar_size < 0))
+            n_smooth_clipped = int(jnp.sum(ar_smoothness < 1))
+            n_flux_clipped  = int(jnp.sum(flux_active < 0))
+            if n_size_clipped or n_smooth_clipped or n_flux_clipped:
+                print(
+                    f"make_lc: ar_time_interp='{ar_time_interp_val}' interpolation "
+                    f"overshot the physical domain at {n_size_clipped} sub-exposure "
+                    f"ar_size value(s), {n_smooth_clipped} sub-exposure ar_smoothness "
+                    f"value(s), and {n_flux_clipped} sub-exposure flux_active "
+                    "value(s) -- clipping to ar_size >= 0, ar_smoothness >= 1, "
+                    "and flux_active >= 0."
+                )
+        ar_size       = jnp.maximum(ar_size, 0.0)
+        ar_smoothness = jnp.maximum(ar_smoothness, 1.0)
+        flux_active   = jnp.maximum(flux_active, 0.0)
 
     ld_mode = model["ld_mode"]
     n_coeffs = 1 if ld_mode == "intensity_profile" else _N_COEFFS[ld_mode]
@@ -1784,7 +1862,7 @@ def quick_lc(
     flux_quiet : array_like, shape (nwave,)
         Quiet-photosphere flux / spectrum.
     flux_active : jnp.ndarray, shape (nar, nwave), (nwave,), or (ntime, nar, nwave), optional
-        Per-active-region flux / spectrum.
+        Per-active-region flux / spectrum. Must be >= 0.
         - If (nwave,):     broadcasts to all active regions.
         - If (nar, nwave): each active region gets its own spectrum.
         - If (ntime, nar, nwave): each active region gets its own time-varying spectrum.
@@ -1793,7 +1871,7 @@ def quick_lc(
     ar_long : jnp.ndarray, shape (nar,) or (ntime, nar), optional
         active region longitudes in degrees. Must be in [0, 360).
     ar_size : jnp.ndarray, shape (nar,) or (ntime, nar), optional
-        active region angular radii in degrees
+        active region angular radii in degrees. Must be >= 0.
     ar_smoothness : jnp.ndarray, shape (nar,), scalar, or (ntime, nar), optional
         Super-Gaussian order controlling the sharpness of each AR's
         boundary (see ``_compute_ar_shape``). ``1`` is a true Gaussian;
@@ -1819,7 +1897,14 @@ def quick_lc(
         the rest keep their usual constant-in-time shape. Using none of them
         (the default) is exactly as fast as before this capability existed.
         ``ld_coeffs_active``/``I_profile_active`` do not support time evolution
-        and always stay fixed across the observation.
+        and always stay fixed across the observation. Each epoch's values are
+        used exactly as given -- nothing couples them across epochs, so it's
+        up to the user to keep a fitted active region from changing unphysically
+        fast between epochs. If ``nar`` (read off the parameters' own trailing axis)
+        happens to equal ``ntime``, make_lc warns: this is the shape signature of
+        the common mistake of leaving a parameter meant to evolve as a flat ``(ntime,)``
+        array instead of ``(ntime, 1)``, which silently produces ``ntime`` separate
+        static active regions instead of one evolving one.
     times : array_like, shape (ntime,)
         Absolute observation times [days].
     P_rot : float
