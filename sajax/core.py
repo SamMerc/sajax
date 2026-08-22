@@ -1400,8 +1400,11 @@ def make_lc(
     # vacuously (ntime == nar by coincidence), and it silently gets
     # broadcast as ntime separate *static* active regions instead of one
     # evolving one. This can't be told apart from a genuine ntime-active-region
-    # model by shape alone, so we warn rather than raise an error.
-    if ar_time_varying and nar == nphase_original:
+    # model by shape alone, so we warn rather than raise an error. Excluded
+    # when nar == 1: with a single AR, "ntime separate static regions" and
+    # "one region evolving over ntime epochs" are the same computation, so
+    # there's no ambiguity to warn about.
+    if ar_time_varying and nar > 1 and nar == nphase_original:
         warnings.warn(
             f"SAJAX: nar (number of active regions, inferred as {nar} from "
             "the trailing axis of ar_lat/ar_long/ar_size) equals ntime "
