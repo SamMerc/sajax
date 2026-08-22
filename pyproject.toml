@@ -1,12 +1,12 @@
 [build-system]
 # setuptools>=77 is required for the PEP 639 SPDX `license = "MIT"` string below;
 # earlier versions reject it and demand a {file}/{text} table.
-requires = ["setuptools>=77", "wheel"]
+requires = ["setuptools>=77", "setuptools_scm>=8", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "sajax"
-version = "0.3.2"
+dynamic = ["version"]
 description = "Stellar Activity Grid for Exoplanets — JAX implementation"
 authors = [
     { name = "Samson Mercier", email = "merci228@mit.edu" },
@@ -32,12 +32,38 @@ dev = ["pytest>=7", "pytest-cov", "jupyter", "ipykernel"]
 docs = ["sphinx>=7.0", "sphinx-book-theme", "myst-nb", "sphinx-copybutton", "sphinx-autoapi", "ipykernel"]
 cuda = ["jax[cuda12]>=0.4; sys_platform == 'linux' and platform_machine == 'x86_64'"]
 
+[dependency-groups]
+examples = [
+    "speclib; python_version >= '3.11' and python_version < '3.14'",
+    "exotic-ld",
+    "setuptools<81",
+    "astropy>=5",
+    "pillow",
+    "numpyro",
+    "numpyro-ext",
+    "arviz",
+    "corner",
+    "fleck>=1.1.3",
+    "spotter",
+    "batman-package",
+    "jaxoplanet",
+    "jaxopt",
+]
+
+[tool.uv]
+override-dependencies = ["numpy>=1.24"]
+
+[tool.uv.sources]
+speclib = { git = "https://github.com/brackham/speclib.git" }
+
 [project.urls]
 Repository = "https://github.com/SamMerc/sajax"
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["sajax*"]
+
+[tool.setuptools_scm]
 
 [tool.pytest.ini_options]
 addopts = "--cov=sajax --cov-report=xml --cov-report=term-missing"

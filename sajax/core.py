@@ -923,6 +923,7 @@ def build_system(
     k: Optional[float | np.ndarray] = None,
     ecc: float = 0.0,
     omega_peri: float = 0.0,
+    sp_orb: float = 0.0,
     verbose: bool = False,
 ) -> dict:
     """
@@ -1020,6 +1021,12 @@ def build_system(
         Orbital eccentricity and argument of periastron [rad]. Only
         meaningful together with a transit; default to 0.0 (circular,
         non-precessing orbit).
+    sp_orb : sky-projected spin-orbit angle, λ  [deg]
+        Rotates the transit chord about the stellar
+        centre, in the sky plane. Angle is relative to the
+        stellar equator. Only meaningful together with a transit.
+        Converted to radians internally before use --
+        ``sajax.planet.planet_sky_position`` itself takes radians.
     verbose : bool, optional
         If True, print informational messages (LDC broadcasting, phase
         oversampling) while building the model. Default False.
@@ -1164,6 +1171,7 @@ def build_system(
             ecc          = float(ecc),
             omega_peri   = float(omega_peri),
             k            = k_arr,
+            sp_orb       = float(np.deg2rad(sp_orb)),   # sp_orb is given in degrees; planet.py takes radians
         )
 
         # ---- Attach transit data to the model dict --------------------------
@@ -1174,11 +1182,12 @@ def build_system(
         model["P_rot"]       = P_rot
         # Defaults for make_lc's dynamic path: t0/period/a_over_rstar/
         # inclination/k must all be given together (as individual keyword args,
-        # possibly traced) to override these; ecc/omega_peri may be overridden
-        # independently and fall back to the values stored here.
+        # possibly traced) to override these; ecc/omega_peri/sp_orb may be
+        # overridden independently and fall back to the values stored here.
         model["transit_params"] = dict(
             t0=t0, period=period, a_over_rstar=a_over_rstar,
             inclination=inclination, ecc=ecc, omega_peri=omega_peri, k=k,
+            sp_orb=sp_orb,
         )
 
     return model
@@ -1200,6 +1209,7 @@ def make_lc(
     inclination: Optional[float] = None,
     ecc: Optional[float] = None,
     omega_peri: Optional[float] = None,
+    sp_orb: Optional[float] = None,
     k: Optional[float] = None,
     transit_softness: float = 0.0,
 ) -> tuple:
@@ -1301,6 +1311,12 @@ def make_lc(
         transit parameters above (giving either of these without the rest
         also raises ``ValueError``). Default to the values ``model``'s transit
         was built with.
+    sp_orb : float, optional
+        Sky-projected spin-orbit angle λ [deg]. Same all-or-nothing-with-
+        ``ecc``/``omega_peri`` treatment: only used together with a
+        transit, defaults to the value ``model``'s transit was built with
+        (also in degrees). Converted to radians internally before use --
+        ``sajax.planet.planet_sky_position`` itself takes radians.
     transit_softness : float, optional
         Sigmoid transition width [R*] for the planet occultation mask
         (default 0.0: exact hard edge, matching the physical simulation).
@@ -1670,7 +1686,7 @@ def make_lc(
     # only meaningful alongside them -------------------------------------
     _transit_required = dict(t0=t0, period=period, a_over_rstar=a_over_rstar,
                                inclination=inclination, k=k)
-    _transit_optional  = dict(ecc=ecc, omega_peri=omega_peri)
+    _transit_optional  = dict(ecc=ecc, omega_peri=omega_peri, sp_orb=sp_orb)
     _transit_given = {name: v for name, v in {**_transit_required, **_transit_optional}.items()
                        if v is not None}
     if _transit_given:
@@ -1679,9 +1695,9 @@ def make_lc(
             raise ValueError(
                 "make_lc: partial transit parameters given "
                 f"({sorted(_transit_given)}); missing {_missing_required}. Provide all "
-                f"of {list(_transit_required)} to evaluate a transit (ecc/omega_peri "
-                "are optional and default to the model's build-time values), or none "
-                "to leave the transit as-is."
+                f"of {list(_transit_required)} to evaluate a transit "
+                "(ecc/omega_peri/sp_orb are optional and default to the model's "
+                "build-time values), or none to leave the transit as-is."
             )
         if not model.get("has_transit", False):
             raise ValueError(
@@ -1699,12 +1715,14 @@ def make_lc(
         _defaults  = model["transit_params"]
         ecc_val        = ecc        if ecc        is not None else _defaults.get("ecc", 0.0)
         omega_peri_val = omega_peri if omega_peri is not None else _defaults.get("omega_peri", 0.0)
+        sp_orb_deg     = sp_orb     if sp_orb     is not None else _defaults.get("sp_orb", 0.0)
+        sp_orb_val     = jnp.deg2rad(sp_orb_deg)   # sp_orb is given in degrees; planet.py takes radians
         # model["times_oversampled"] was already shifted by model["t_ref"] in
         # build_system; t0 (possibly traced/sampled here) must be shifted by
         # the same constant so time - t_peri still cancels correctly.
         planet_xyz_all = compute_planet_sky_positions(
             model["times_oversampled"], t0 - model["t_ref"], period, a_over_rstar, inclination,
-            ecc_val, omega_peri_val,
+            ecc_val, omega_peri_val, sp_orb_val,
         )
         k_val = k
     elif model.get("has_transit", False):
@@ -1834,6 +1852,7 @@ def quick_lc(
     k: Optional[float | np.ndarray] = None,
     ecc: float = 0.0,
     omega_peri: float = 0.0,
+    sp_orb: float = 0.0,
     ar_time_interp: ArTimeInterp = "linear",
     verbose: bool = False,
 ) -> tuple:
@@ -1847,7 +1866,7 @@ def quick_lc(
                              mu_profile, I_profile, ld_mode,
                              plot_map_wavelength, oversample,
                              t0, period, a_over_rstar, inclination, k,
-                             ecc, omega_peri)
+                             ecc, omega_peri, sp_orb)
         lc, star_maps = make_lc(model, flux_active, ar_lat, ar_long,
                                       ar_size, ar_smoothness,
                                       ld_coeffs_active, I_profile_active)
@@ -1968,6 +1987,12 @@ def quick_lc(
         Orbital eccentricity and argument of periastron [rad]. Only
         meaningful together with a transit; default to 0.0 (circular,
         non-precessing orbit).
+    sp_orb : sky-projected spin-orbit angle, λ  [deg]
+        Rotates the transit chord about the stellar
+        centre, in the sky plane. Angle is relative to the
+        star's spin axis. Only meaningful together with a transit.
+        Converted to radians internally before use --
+        ``sajax.planet.planet_sky_position`` itself takes radians.
     ar_time_interp : "linear" or "cubic", optional (default "linear")
         Interpolation method for when time-varying active-region parameters
         need to be interpolated onto ``oversample``'d sub-exposures.
@@ -2000,6 +2025,7 @@ def quick_lc(
         ar_time_interp=ar_time_interp,
         t0=t0, period=period, a_over_rstar=a_over_rstar,
         inclination=inclination, k=k, ecc=ecc, omega_peri=omega_peri,
+        sp_orb=sp_orb,
         verbose=verbose,
     )
 

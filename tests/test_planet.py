@@ -293,6 +293,112 @@ class TestPlanetSkyPosition:
         assert np.isfinite(float(g))
 
 
+# ============================================================================================
+# 2b.  Planetary sky-projected spin-orbit angle -- rotation of (X, Y) about the stellar centre
+# ============================================================================================
+
+class TestObliquity:
+    """
+    Tests for the sky-projected spin-orbit angle rotation
+    in ``planet_sky_position``. The stellar spin axis is fixed along sky-Y
+    elsewhere in sajax (geometry.py / core.py's ``vel_col``), so sp_orb
+    lives entirely in this rotation of the planet's trajectory.
+    """
+
+    # --- Backwards compatibility ------------------------------------------
+
+    def test_default_matches_omitted_argument(self):
+        """Omitting spin-orbit angle must be identical to sp_orb=0.0."""
+        X1, Y1, Z1 = _sky_pos(0.3)
+        X2, Y2, Z2 = _sky_pos(0.3, sp_orb=0.0)
+        np.testing.assert_allclose([float(X1), float(Y1), float(Z1)],
+                                    [float(X2), float(Y2), float(Z2)])
+
+    def test_zero_obliquity_matches_pre_obliquity_geometry(self):
+        """sp_orb=0 must reproduce the un-rotated (legacy) X, Y, Z."""
+        for t in np.linspace(0.0, 10.0, 15, endpoint=False):
+            X0, Y0, Z0 = _sky_pos(t)
+            X, Y, Z = _sky_pos(t, sp_orb=0.0)
+            np.testing.assert_allclose([float(X), float(Y), float(Z)],
+                                        [float(X0), float(Y0), float(Z0)], atol=1e-5)
+
+    # --- Rotation correctness ----------------------------------------------
+
+    @pytest.mark.parametrize("obliquity_deg", [15.0, 30.0, 45.0, 90.0, 135.0, 200.0, 315.0])
+    def test_rotation_matches_manual_formula(self, obliquity_deg):
+        """(X, Y) must equal the standard 2-D rotation of the λ=0 position."""
+        t = 0.7
+        X0, Y0, Z0 = _sky_pos(t)
+        lam = np.deg2rad(obliquity_deg)
+        X_expected = float(X0) * np.cos(lam) - float(Y0) * np.sin(lam)
+        Y_expected = float(X0) * np.sin(lam) + float(Y0) * np.cos(lam)
+        X, Y, Z = _sky_pos(t, sp_orb=lam)
+        np.testing.assert_allclose(float(X), X_expected, atol=1e-4)
+        np.testing.assert_allclose(float(Y), Y_expected, atol=1e-4)
+        np.testing.assert_allclose(float(Z), float(Z0), atol=1e-5,
+            err_msg="spin-orbit angle must not affect Z (line-of-sight position)")
+
+    def test_quarter_turn_swaps_axes(self):
+        """sp_orb=π/2 must map (X, Y) -> (-Y, X)."""
+        X0, Y0, Z0 = _sky_pos(0.3)
+        X, Y, Z = _sky_pos(0.3, sp_orb=np.pi / 2.0)
+        np.testing.assert_allclose(float(X), -float(Y0), atol=1e-4)
+        np.testing.assert_allclose(float(Y),  float(X0), atol=1e-4)
+
+    def test_full_turn_is_identity(self):
+        """sp_orb=2π must reproduce sp_orb=0 (rotation is periodic)."""
+        X0, Y0, Z0 = _sky_pos(0.4)
+        X, Y, Z = _sky_pos(0.4, sp_orb=2.0 * np.pi)
+        np.testing.assert_allclose(float(X), float(X0), atol=1e-3)
+        np.testing.assert_allclose(float(Y), float(Y0), atol=1e-3)
+
+    # --- Rotation-invariant quantities --------------------------------------
+
+    @pytest.mark.parametrize("obliquity_deg", [0.0, 37.0, 90.0, 180.0])
+    def test_sky_separation_invariant_under_obliquity(self, obliquity_deg):
+        """sqrt(X^2+Y^2) is a rotation-invariant quantity, so sp_orb must
+        leave the sky-plane separation from the stellar centre unchanged."""
+        t = 1.1
+        X0, Y0, Z0 = _sky_pos(t)
+        X, Y, Z = _sky_pos(t, sp_orb=np.deg2rad(obliquity_deg))
+        sep0 = float(jnp.sqrt(X0 ** 2 + Y0 ** 2))
+        sep  = float(jnp.sqrt(X ** 2 + Y ** 2))
+        np.testing.assert_allclose(sep, sep0, atol=1e-4)
+
+    # --- Physical sanity: polar spin-orbit angle moves the transit off the equator
+
+    def test_polar_obliquity_swaps_null_axis_at_central_transit(self):
+        """
+        For an edge-on, b≈0 orbit, sp_orb=0 keeps Y≈0 across the whole
+        transit (the chord runs along the projected stellar equator, where
+        v_los is maximal at the limbs). sp_orb=π/2 instead keeps X≈0
+        (the chord runs along the spin axis instead, crossing every
+        latitude but staying near the v_los=0 meridian) -- the geometric
+        picture underlying the suppressed classic Rossiter-McLaughlin
+        amplitude expected for polar transits.
+        """
+        for t in np.linspace(-0.3, 0.3, 7):
+            X0, Y0, Z0 = _sky_pos(t)
+            assert abs(float(Y0)) < 0.15, f"aligned: Y should stay near 0, got {float(Y0):.4f}"
+
+            Xp, Yp, Zp = _sky_pos(t, sp_orb=np.pi / 2.0)
+            assert abs(float(Xp)) < 0.15, f"polar: X should stay near 0, got {float(Xp):.4f}"
+
+    # --- Differentiability ---------------------------------------------------
+
+    def test_differentiable_wrt_obliquity(self):
+        """jax.grad w.r.t. sp_orb should be finite."""
+        def f(sp_orb):
+            X, Y, Z = planet_sky_position(
+                jnp.float32(0.5), t0=0.0, period=10.0, a_over_rstar=15.0,
+                inclination=np.pi / 2.0, ecc=0.0, omega_peri=0.0,
+                sp_orb=sp_orb,
+            )
+            return X + Y + Z
+        g = jax.grad(f)(jnp.float32(np.pi / 4.0))
+        assert np.isfinite(float(g))
+
+
 # ===================================================================
 # 3.  compute_planet_sky_positions — vectorised
 # ===================================================================

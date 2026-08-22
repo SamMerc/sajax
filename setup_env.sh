@@ -10,6 +10,7 @@
 #   ./setup_env.sh              # auto-detect: GPU if nvidia-smi sees a device
 #   ./setup_env.sh --cpu        # force the CPU-only environment (~150 MB)
 #   ./setup_env.sh --gpu        # force the CUDA environment (~3.1 GB)
+#   ./setup_env.sh --examples   # also install the docs/examples notebook deps
 #   ./setup_env.sh --docs       # also install the sphinx docs dependencies
 #   ./setup_env.sh --check      # don't install; just report what's in .venv
 #   ./setup_env.sh --locked     # fail if uv.lock is stale (used in CI)
@@ -24,6 +25,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 ACCEL="${SAJAX_ACCEL:-auto}"
 CHECK_ONLY=0
 WITH_DOCS=0
+WITH_EXAMPLES=0
 LOCK_MODE="${SAJAX_LOCK_MODE:-}"   # set to "--locked" to fail if uv.lock is stale
 
 while [[ $# -gt 0 ]]; do
@@ -31,7 +33,8 @@ while [[ $# -gt 0 ]]; do
         --cpu)          ACCEL=cpu ;;
         --gpu|--cuda)   ACCEL=cuda ;;
         --auto)         ACCEL=auto ;;
-        --docs)         WITH_DOCS=1 ;;
+        --docs)         WITH_DOCS=1; WITH_EXAMPLES=1 ;;
+        --examples)     WITH_EXAMPLES=1 ;;
         --check)        CHECK_ONLY=1 ;;
         --locked)       LOCK_MODE="--locked" ;;
         # Print the header block, stopping at the first non-comment line.
@@ -121,6 +124,18 @@ if [[ "$ACCEL" == cuda ]]; then
 fi
 if [[ "$WITH_DOCS" == 1 ]]; then
     EXTRAS+=(--extra docs)
+fi
+if [[ "$WITH_EXAMPLES" == 1 ]]; then
+    PYBIN="$(uv python find --project . 2>/dev/null || true)"
+    PYVER="$([[ -n "$PYBIN" ]] && "$PYBIN" -c 'import sys; print("%d.%d" % sys.version_info[:2])' || true)"
+    case "$PYVER" in
+        3.11|3.12|3.13) ;;
+        *)
+            echo "setup_env.sh: the examples notebooks need Python 3.11-3.13 (uv would use ${PYVER:-unknown})." >&2
+            echo "  Pin one with e.g.:  uv python pin 3.12   then re-run this script." >&2
+            exit 1 ;;
+    esac
+    EXTRAS+=(--group examples)
 fi
 
 echo "setup_env.sh: syncing ${ACCEL} environment${DETECTED} into .venv"
