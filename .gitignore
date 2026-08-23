@@ -44,6 +44,10 @@ sage_output/
 *.npy
 *.npz
 
+# exotic-ld's runtime data cache.
+# speclib's own cache lives under ~/.speclib/ (outside the repo) so needs no entry here.
+exotic_ld_data/
+
 # JAX / XLA compilation cache
 jax_cache/
 __jax_cache__/
