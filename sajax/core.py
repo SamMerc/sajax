@@ -107,12 +107,14 @@ is the hot path and is safe to JIT via:
 from __future__ import annotations
 
 import functools
+import warnings
 from typing import Literal, Optional
 
 import numpy as np
 import jax
 import jax.numpy as jnp
 from jax import vmap
+import interpax
 
 from .geometry import rotate_active_region
 from .planet import _compute_planet_mask, compute_planet_sky_positions
@@ -134,6 +136,16 @@ _N_COEFFS: dict[str, int] = {
     "power2":     2,
     "kipping3":   3,
     "nonlinear4": 4,
+}
+
+# Interpolation method for time-varying active-region parameters.
+# Maps to interpax.interp1d's `method`:
+#   "linear" -> "linear"  (piecewise-linear between the given times)
+#   "cubic"  -> "cubic2"  (C2 natural cubic spline)
+ArTimeInterp = Literal["linear", "cubic"]
+_AR_TIME_INTERP_METHOD: dict[str, str] = {
+    "linear": "linear", 
+    "cubic": "cubic2"
 }
 
 # Numerical safeguards for the super-Gaussian AR shape (see _compute_ar_shape):
@@ -732,6 +744,83 @@ def _compute_all_phases(
 
 
 # ---------------------------------------------------------------------------
+# 6b. All-phases computation -- time-varying active-region counterpart.
+# ---------------------------------------------------------------------------
+
+def _compute_all_phases_evolving(
+    ar_lat_all:         jnp.ndarray,   # (nphase, nar) degrees
+    ar_long_all:        jnp.ndarray,   # (nphase, nar) degrees
+    arsize_rads_all:    jnp.ndarray,   # (nphase, nar) radians
+    ar_smoothness_all:  jnp.ndarray,   # (nphase, nar)
+    flux_active_all:    jnp.ndarray,   # (nphase, nar, nwave)
+    planet_xyz_all:     jnp.ndarray,   # (nphase, 3)
+    phases_rot:         jnp.ndarray,   # (nphase,) degrees -- stellar rotation phase
+    *,
+    inc_star:           float,
+    wavelength:         jnp.ndarray,
+    flux_quiet:         jnp.ndarray,
+    ld_coeffs_quiet:    jnp.ndarray,   # (nwave, n_coeffs) -- fixed across phases
+    ld_coeffs_active:   jnp.ndarray,   # (nar, nwave, n_coeffs) -- fixed across phases
+    I_profile_quiet:    jnp.ndarray,
+    I_profile_active:   jnp.ndarray,   # (nar, nwave, n_mu_pts) -- fixed across phases
+    mu_profile_pts:     jnp.ndarray,
+    x_disc:             jnp.ndarray,
+    y_disc:             jnp.ndarray,
+    mu_disc:            jnp.ndarray,
+    col_idx:            jnp.ndarray,
+    vel_col:            jnp.ndarray,
+    star_pixel_rad:     float,
+    total_pixels:       int,
+    k:                  jnp.ndarray,
+    ld_mode:            LdMode,
+    plot_map_wavelength:float,
+    n:                  int,
+    flat_indices:       jnp.ndarray,
+    transit_softness:   float = 0.0,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """
+    Time-varying counterpart to ``_compute_all_phases``. Used only when make_lc() is given at least
+    one AR parameter with a time axis. Identical to _compute_all_phases except
+    ar_lat/ar_long/arsize_rads/ ar_smoothness/flux_active are supplied per-phase and the AR's Cartesian
+    position is rebuilt and rotated fresh every phase. This function's existence adds no cost to 
+    _compute_all_phases or any caller that doesn't use it.
+
+    Returns
+    -------
+    lc_raw    : (nphase, nwave)
+    star_maps : (nphase, n, n)
+    """
+    def _single_phase(ar_lat_ph, ar_long_ph, arsize_ph, smooth_ph, flux_ph,
+                       planet_xyz_ph, phase_deg):
+        lat_rad  = jnp.deg2rad(ar_lat_ph)
+        long_rad = jnp.deg2rad(ar_long_ph)
+        cart = jnp.stack([
+            star_pixel_rad * jnp.sin(long_rad) * jnp.cos(lat_rad),
+            star_pixel_rad * jnp.sin(lat_rad),
+            star_pixel_rad * jnp.cos(long_rad) * jnp.cos(lat_rad),
+        ], axis=-1)   # (nar, 3)
+        cart_rot = vmap(
+            lambda c: rotate_active_region(c, phase_deg, inc_star)
+        )(cart)
+        return _compute_single_phase(
+            cart_rot, planet_xyz_ph,
+            wavelength=wavelength, flux_quiet=flux_quiet, flux_active=flux_ph,
+            ld_coeffs_quiet=ld_coeffs_quiet, ld_coeffs_active=ld_coeffs_active,
+            I_profile_quiet=I_profile_quiet, I_profile_active=I_profile_active,
+            mu_profile_pts=mu_profile_pts, x_disc=x_disc, y_disc=y_disc,
+            mu_disc=mu_disc, col_idx=col_idx, vel_col=vel_col,
+            star_pixel_rad=star_pixel_rad, total_pixels=total_pixels,
+            arsize_rads=arsize_ph, ar_smoothness=smooth_ph, k=k, ld_mode=ld_mode,
+            plot_map_wavelength=plot_map_wavelength, n=n, flat_indices=flat_indices,
+            transit_softness=transit_softness,
+        )
+
+    _phase_vmap = vmap(_single_phase, in_axes=(0, 0, 0, 0, 0, 0, 0))
+    return _phase_vmap(ar_lat_all, ar_long_all, arsize_rads_all, ar_smoothness_all,
+                        flux_active_all, planet_xyz_all, phases_rot)
+
+
+# ---------------------------------------------------------------------------
 # 7. Public API -- two-stage design
 #
 #   Stage 1:  build_system()         - NumPy, call once before sampling.
@@ -826,6 +915,7 @@ def build_system(
     ld_mode: LdMode = "quadratic",
     plot_map_wavelength: Optional[float] = None,
     oversample: int = 1,
+    ar_time_interp: ArTimeInterp = "linear",
     t0: Optional[float] = None,
     period: Optional[float] = None,
     a_over_rstar: Optional[float] = None,
@@ -904,7 +994,7 @@ def build_system(
     I_profile : array-like, shape (nwave, n_mu_pts), optional
         Quiet-photosphere specific intensity at each (wavelength, mu) grid
         point. Required when ``ld_mode="intensity_profile"``.
-    ld_mode : str
+    ld_mode : str (default "quadratic")
         Limb-darkening law, shared by the quiet photosphere and every
         active region (each with its own coefficient values).
     plot_map_wavelength : float, optional
@@ -915,6 +1005,11 @@ def build_system(
         phase step, and the resulting fluxes are averaged.  This mimics
         finite-exposure integration and smooths limb-crossing artefacts.
         Default: 1 (no oversampling).
+    ar_time_interp : "linear" or "cubic", optional (default "linear")
+        Interpolation method for when time-varying active-region parameters
+        need to be interpolated onto ``oversample``'d sub-exposures.
+        Only matters when ``oversample > 1`` and at least one AR parameter
+        is time-varying -- see ``make_lc`` for the full description.
     t0, period, a_over_rstar, inclination : float, optional
         Transit-geometry parameters: mid-transit epoch, orbital period [days],
         semi-major axis/R*, and orbital inclination [rad]. All-or-nothing with
@@ -957,7 +1052,7 @@ def build_system(
     nwave  = len(wavelength)
     nphase = len(phases_rot)  # original number of phases (before oversampling)
 
-    # ---- Phase oversampling -------------------------------------------------
+    # ---- Phase and absolute time oversampling -------------------------------------------------
     if oversample > 1:
         phases_oversampled = _make_oversampled_phases(phases_rot, oversample)
         nphase_compute = len(phases_oversampled)
@@ -1031,6 +1126,7 @@ def build_system(
         flat_indices        = jnp.asarray(grid["flat_indices"]),
         phases_rot          = jnp.asarray(phases_oversampled),
         oversample          = oversample,
+        ar_time_interp      = ar_time_interp,
         nphase_original     = nphase,
         t_ref               = t_ref,
         times               = times_arr_full,               # original, unshifted
@@ -1040,6 +1136,7 @@ def build_system(
         plot_map_wavelength = float(plot_map_wavelength),
         nwave               = nwave,
         nphase              = nphase_compute,
+        verbose             = verbose,
     )
 
     # ---- Optional transit ----------------------------------------------------
@@ -1054,7 +1151,6 @@ def build_system(
         )
     if all(given):
         from .planet import build_transit_model   # local import avoids circular dep.
-
 
         # ---- Validate k against the wavelength grid (scalar or per-wavelength)
         k_arr = np.atleast_1d(np.asarray(k, dtype=np.float32))
@@ -1132,17 +1228,18 @@ def make_lc(
     ----------
     model : dict
         Pre-built model dict returned by ``build_system``.
-    flux_active : jnp.ndarray, shape (nar, nwave) or (nwave,), optional
-        Per-active-region flux / spectrum.
-        - If (nar, nwave): each active region gets its own spectrum.
+    flux_active : jnp.ndarray, shape (nar, nwave), (nwave,), or (ntime, nar, nwave), optional
+        Per-active-region flux / spectrum. Must be >= 0.
         - If (nwave,):     broadcasts to all active regions.
-    ar_lat : jnp.ndarray, shape (nar,), optional
+        - If (nar, nwave): each active region gets its own spectrum.
+        - If (ntime, nar, nwave): each active region gets its own time-varying spectrum.
+    ar_lat : jnp.ndarray, shape (nar,) or (ntime, nar), optional
         active region latitudes in degrees. Must be in [-90, 90].
-    ar_long : jnp.ndarray, shape (nar,), optional
+    ar_long : jnp.ndarray, shape (nar,) or (ntime, nar), optional
         active region longitudes in degrees. Must be in [0, 360).
-    ar_size : jnp.ndarray, shape (nar,), optional
-        active region angular radii in degrees
-    ar_smoothness : jnp.ndarray, shape (nar,) or scalar, optional
+    ar_size : jnp.ndarray, shape (nar,) or (ntime, nar), optional
+        active region angular radii in degrees. Must be >= 0.
+    ar_smoothness : jnp.ndarray, shape (nar,), scalar, or (ntime, nar), optional
         Super-Gaussian order controlling the sharpness of each AR's
         boundary (see ``_compute_ar_shape``). ``1`` is a true Gaussian;
         larger values sharpen the edge, converging to a hard-edged cap as
@@ -1153,6 +1250,28 @@ def make_lc(
         are all-or-nothing: give every one of them to add active region(s),
         or omit all five for a quiet star. Giving some but not all raises
         ``ValueError``.
+
+        **Time-varying active regions.** Any of the above five properties may
+        independently carry an extra leading axis of length ``ntime`` instead
+        of its usual shape, to let that property evolve over the observation,
+        e.g. a spot that grows/decays (``ar_size``), drifts in latitude/longitude
+        (``ar_lat``/``ar_long``), or changes contrast (``flux_active``).
+        Values are given per original time and interpolated internally onto
+        ``oversample`` sub-exposures when oversampling is active, using the
+        model's ``ar_time_interp`` law (set at ``build_system`` time, like
+        ``ld_mode`` -- see there for the "linear"/"cubic" choice). Mixing is
+        allowed: only the parameters you want to evolve need the extra axis,
+        the rest keep their usual constant-in-time shape. Using none of them
+        (the default) is exactly as fast as before this capability existed.
+        ``ld_coeffs_active``/``I_profile_active`` do not support time evolution
+        and always stay fixed across the observation. Each epoch's values are
+        used exactly as given -- nothing couples them across epochs, so it's
+        up to the user to keep a fitted active region from changing unphysically
+        fast between epochs. If ``nar`` (read off the parameters' own trailing axis)
+        happens to equal ``ntime``, make_lc warns: this is the shape signature of
+        the common mistake of leaving a parameter meant to evolve as a flat ``(ntime,)``
+        array instead of ``(ntime, 1)``, which silently produces ``ntime`` separate
+        static active regions instead of one evolving one.
     ld_coeffs_active : jnp.ndarray, shape (nar, nwave, n_coeffs) or (nwave, n_coeffs), optional
         Per-active-region limb-darkening coefficients, same law as the
         quiet photosphere (``model["ld_mode"]``) but independent values.
@@ -1249,44 +1368,240 @@ def make_lc(
     ar_size       = jnp.atleast_1d(jnp.asarray(ar_size))
     ar_smoothness = jnp.atleast_1d(jnp.asarray(ar_smoothness))
 
-    # Determine number of active regions
-    nar   = ar_lat.size
+    # Determine number of active regions from the trailing axis, so this
+    # works whether or not a parameter carries an extra leading time axis
+    nar   = ar_lat.shape[-1]
     nwave = model["nwave"]
 
-    # Handle broadcasting: if flux_active is (nwave,), broadcast to (nar, nwave)
-    if flux_active.ndim == 1:
-        if flux_active.size != nwave:
-            raise ValueError(
-                f"flux_active shape mismatch: got size {flux_active.size} "
-                f"but wavelength grid has {nwave} bins."
-            )
-        flux_active = jnp.broadcast_to(flux_active[None, :], (nar, nwave))
-    elif flux_active.ndim == 2:
-        if flux_active.shape != (nar, nwave):
-            raise ValueError(
-                f"flux_active shape mismatch: got {flux_active.shape} "
-                f"but expected ({nar}, {nwave})."
-            )
-    else:
-        raise ValueError(
-            f"flux_active must be 1D or 2D, got shape {flux_active.shape}."
+    spr             = model["star_pixel_rad"]
+    inc_star        = model["inc_star"]
+    oversample      = model["oversample"]
+    nphase_original = model["nphase_original"]
+
+    # ---- Time-varying active regions (optional) ---------------------------
+    # Any of flux_active/ar_lat/ar_long/ar_size/ar_smoothness may carry an
+    # extra leading axis of length nphase_original (the model's original,
+    # pre-oversampling `times`) to make that property evolve over the
+    # observation. 
+    # No extra axis on any of them (today's usage) takes the usual code path 
+    # so it costs nothing extra. ld_coeffs_active/ I_profile_active do not support
+    # time evolution and stay fixed.
+    ar_time_varying = (
+        ar_lat.ndim == 2 or ar_long.ndim == 2 or ar_size.ndim == 2
+        or ar_smoothness.ndim == 2 or flux_active.ndim == 3
+    )
+
+    # ``nar`` was read off ar_lat's trailing axis (above) before we knew
+    # whether any parameter was time-varying. If a caller meant a single AR
+    # to evolve over ntime epochs but passed one of ar_lat/ar_long/ar_size
+    # as a flat (ntime,) array -- forgetting the extra leading axis that
+    # would mark it time-varying, i.e. shape (ntime, 1) -- and ntime happens
+    # to equal nar, that array's own per-array shape check below passes
+    # vacuously (ntime == nar by coincidence), and it silently gets
+    # broadcast as ntime separate *static* active regions instead of one
+    # evolving one. This can't be told apart from a genuine ntime-active-region
+    # model by shape alone, so we warn rather than raise an error. Excluded
+    # when nar == 1: with a single AR, "ntime separate static regions" and
+    # "one region evolving over ntime epochs" are the same computation, so
+    # there's no ambiguity to warn about.
+    if ar_time_varying and nar > 1 and nar == nphase_original:
+        warnings.warn(
+            f"SAJAX: nar (number of active regions, inferred as {nar} from "
+            "the trailing axis of ar_lat/ar_long/ar_size) equals ntime "
+            f"({nphase_original}, the number of `times` this model was "
+            "built with), while at least one active-region parameter "
+            "carries an explicit time axis. If you intended a single "
+            "time-varying active region and passed ar_lat/ar_long/ar_size/"
+            "ar_smoothness as a flat (ntime,) array instead of (ntime, 1), "
+            "it will silently be interpreted as ntime separate static "
+            "active regions rather than one evolving active region -- give "
+            "it an explicit (ntime, nar) shape to evolve it. Ignore this "
+            f"warning if {nar} distinct active regions is what you intended."
         )
 
-    # Broadcast a shared ar_smoothness (scalar or size-1) to all ARs
-    if ar_smoothness.size == 1:
-        ar_smoothness = jnp.broadcast_to(ar_smoothness, (nar,))
-    elif ar_smoothness.shape != (nar,):
-        raise ValueError(
-            f"ar_smoothness shape mismatch: got shape {ar_smoothness.shape} "
-            f"but expected a scalar or shape ({nar},)."
-        )
-    if not isinstance(ar_smoothness, jax.core.Tracer) and bool(jnp.any(ar_smoothness < 1)):
-        raise ValueError(
-            f"ar_smoothness must be >= 1 (got {ar_smoothness}); 1 is a "
-            "Gaussian AR boundary and larger values sharpen it towards a "
-            "top-hat, but values below 1 do not correspond to a physically "
-            "meaningful AR shape."
-        )
+    if not ar_time_varying:
+        # ---- Static path ---
+        # Handle broadcasting: if flux_active is (nwave,), broadcast to (nar, nwave)
+        if flux_active.ndim == 1:
+            if flux_active.size != nwave:
+                raise ValueError(
+                    f"flux_active shape mismatch: got size {flux_active.size} "
+                    f"but wavelength grid has {nwave} bins."
+                )
+            flux_active = jnp.broadcast_to(flux_active[None, :], (nar, nwave))
+        elif flux_active.ndim == 2:
+            if flux_active.shape != (nar, nwave):
+                raise ValueError(
+                    f"flux_active shape mismatch: got {flux_active.shape} "
+                    f"but expected ({nar}, {nwave})."
+                )
+        else:
+            raise ValueError(
+                f"flux_active must be 1D or 2D, got shape {flux_active.shape}."
+            )
+
+        # Broadcast a shared ar_smoothness (scalar or size-1) to all ARs if only one smoothness value is provided
+        if ar_smoothness.size == 1:
+            ar_smoothness = jnp.broadcast_to(ar_smoothness, (nar,))
+        elif ar_smoothness.shape != (nar,):
+            raise ValueError(
+                f"ar_smoothness shape mismatch: got shape {ar_smoothness.shape} "
+                f"but expected a scalar or shape ({nar},)."
+            )
+        if not isinstance(ar_smoothness, jax.core.Tracer) and bool(jnp.any(ar_smoothness < 1)):
+            raise ValueError(
+                f"ar_smoothness must be >= 1 (got {ar_smoothness}); 1 is a "
+                "Gaussian AR boundary and larger values sharpen it towards a "
+                "top-hat, but values below 1 do not correspond to a physically "
+                "meaningful AR shape."
+            )
+        if not isinstance(ar_size, jax.core.Tracer) and bool(jnp.any(ar_size < 0)):
+            raise ValueError(
+                f"ar_size must be >= 0 (got {ar_size}); ar_size is an "
+                "angular radius in degrees and cannot be negative."
+            )
+        if not isinstance(flux_active, jax.core.Tracer) and bool(jnp.any(flux_active < 0)):
+            raise ValueError(
+                f"flux_active must be >= 0 (got min {float(jnp.min(flux_active))}); "
+                "flux_active is a flux/spectrum and cannot be negative."
+            )
+    else:
+        # ---- Time-varying path--
+        # static properties (still their old shape) get broadcast across time;
+        # time-varying ones (one extra leading axis) are validated as-is.
+        ntime = nphase_original
+
+        ar_time_interp_val = model["ar_time_interp"]
+
+        if ar_time_interp_val == "cubic" and ntime < 2:
+            raise ValueError(
+                "make_lc: ar_time_interp='cubic' needs at least 2 distinct "
+                f"times to fit a spline, but the model was built with "
+                f"{ntime}. Use ar_time_interp='linear' instead."
+            )
+
+        #Expands static properties over time axis and raise warnings
+        def _expand_position(name, arr):
+            if arr.ndim == 1:
+                if arr.shape[0] != nar:
+                    raise ValueError(
+                        f"{name} shape mismatch: got shape {arr.shape} but "
+                        f"expected ({nar},) or ({ntime}, {nar}) for a "
+                        "time-varying value."
+                    )
+                return jnp.broadcast_to(arr[None, :], (ntime, nar))
+            if arr.shape != (ntime, nar):
+                raise ValueError(
+                    f"{name} shape mismatch: got shape {arr.shape} but "
+                    f"expected ({nar},) or ({ntime}, {nar})."
+                )
+            return arr
+
+        ar_lat        = _expand_position("ar_lat", ar_lat)
+        ar_long       = _expand_position("ar_long", ar_long)
+        ar_size       = _expand_position("ar_size", ar_size)
+
+        if not isinstance(ar_size, jax.core.Tracer) and bool(jnp.any(ar_size < 0)):
+            raise ValueError(
+                f"ar_size must be >= 0 (got min {float(jnp.min(ar_size))}); "
+                "ar_size is an angular radius in degrees and cannot be negative."
+            )
+
+        if ar_smoothness.ndim == 1:
+            if ar_smoothness.size == 1:
+                ar_smoothness = jnp.broadcast_to(ar_smoothness, (ntime, nar))
+            elif ar_smoothness.shape == (nar,):
+                ar_smoothness = jnp.broadcast_to(ar_smoothness[None, :], (ntime, nar))
+            else:
+                raise ValueError(
+                    f"ar_smoothness shape mismatch: got shape {ar_smoothness.shape} "
+                    f"but expected a scalar, ({nar},), or ({ntime}, {nar})."
+                )
+        elif ar_smoothness.shape != (ntime, nar):
+            raise ValueError(
+                f"ar_smoothness shape mismatch: got shape {ar_smoothness.shape} "
+                f"but expected a scalar, ({nar},), or ({ntime}, {nar})."
+            )
+        if not isinstance(ar_smoothness, jax.core.Tracer) and bool(jnp.any(ar_smoothness < 1)):
+            raise ValueError(
+                f"ar_smoothness must be >= 1 (got min {float(jnp.min(ar_smoothness))}); "
+                "1 is a Gaussian AR boundary and larger values sharpen it "
+                "towards a top-hat, but values below 1 do not correspond to "
+                "a physically meaningful AR shape."
+            )
+
+        if flux_active.ndim == 1:
+            if flux_active.size != nwave:
+                raise ValueError(
+                    f"flux_active shape mismatch: got size {flux_active.size} "
+                    f"but wavelength grid has {nwave} bins."
+                )
+            flux_active = jnp.broadcast_to(
+                flux_active[None, None, :], (ntime, nar, nwave)
+            )
+        elif flux_active.ndim == 2:
+            if flux_active.shape != (nar, nwave):
+                raise ValueError(
+                    f"flux_active shape mismatch: got {flux_active.shape} but "
+                    f"expected ({nar}, {nwave}) or ({ntime}, {nar}, {nwave})."
+                )
+            flux_active = jnp.broadcast_to(flux_active[None, :, :], (ntime, nar, nwave))
+        elif flux_active.shape != (ntime, nar, nwave):
+            raise ValueError(
+                f"flux_active shape mismatch: got shape {flux_active.shape} but "
+                f"expected (nwave,), ({nar}, {nwave}), or ({ntime}, {nar}, {nwave})."
+            )
+        if not isinstance(flux_active, jax.core.Tracer) and bool(jnp.any(flux_active < 0)):
+            raise ValueError(
+                f"flux_active must be >= 0 (got min {float(jnp.min(flux_active))}); "
+                "flux_active is a flux/spectrum and cannot be negative."
+            )
+
+        # ---- Resolve from the original per-cadence grid onto the exact
+        # oversampled sub-exposure times already used for the planet's
+        # position (model["times_oversampled"]), via interpolation ----
+        _interp_method = _AR_TIME_INTERP_METHOD[ar_time_interp_val]
+        if model.get("verbose", False) and oversample > 1:
+            print(
+                f"make_lc: time-varying active-region parameter(s) detected "
+                f"with oversample={oversample} -- resolving onto sub-exposure "
+                f"times using ar_time_interp='{ar_time_interp_val}' interpolation."
+            )
+        # model["times"] is stored unshifted (original BJD-scale epochs) but
+        # model["times_oversampled"] was shifted by model["t_ref"] in
+        # build_system -- both sides of the interpolation must be on the same scale,
+        # or querying times_oversampled against the unshifted grid silently extrapolates.
+        _times_orig = model["times"] - model["t_ref"]
+        _times_over = model["times_oversampled"]
+        ar_lat        = interpax.interp1d(_times_over, _times_orig, ar_lat, method=_interp_method, extrap=True)
+        ar_long       = interpax.interp1d(_times_over, _times_orig, ar_long, method=_interp_method, extrap=True)
+        ar_size       = interpax.interp1d(_times_over, _times_orig, ar_size, method=_interp_method, extrap=True)
+        ar_smoothness = interpax.interp1d(_times_over, _times_orig, ar_smoothness, method=_interp_method, extrap=True)
+        flux_active   = interpax.interp1d(_times_over, _times_orig, flux_active, method=_interp_method, extrap=True)
+
+        # ar_time_interp="cubic" is a natural spline and can overshoot the
+        # input node values between/around them even though the nodes
+        # themselves satisfy ar_size >= 0 / ar_smoothness >= 1 / flux_active
+        # >= 0 (checked above) -- re-clip post-interpolation so no
+        # sub-exposure time sees an out-of-range value (otherwise ar_size
+        # crossing zero would make the AR boundary bounce unphysically, see
+        # _compute_ar_shape).
+        if model.get("verbose", False) and not isinstance(ar_size, jax.core.Tracer):
+            n_size_clipped  = int(jnp.sum(ar_size < 0))
+            n_smooth_clipped = int(jnp.sum(ar_smoothness < 1))
+            n_flux_clipped  = int(jnp.sum(flux_active < 0))
+            if n_size_clipped or n_smooth_clipped or n_flux_clipped:
+                print(
+                    f"make_lc: ar_time_interp='{ar_time_interp_val}' interpolation "
+                    f"overshot the physical domain at {n_size_clipped} sub-exposure "
+                    f"ar_size value(s), {n_smooth_clipped} sub-exposure ar_smoothness "
+                    f"value(s), and {n_flux_clipped} sub-exposure flux_active "
+                    "value(s) -- clipping to ar_size >= 0, ar_smoothness >= 1, "
+                    "and flux_active >= 0."
+                )
+        ar_size       = jnp.maximum(ar_size, 0.0)
+        ar_smoothness = jnp.maximum(ar_smoothness, 1.0)
+        flux_active   = jnp.maximum(flux_active, 0.0)
 
     ld_mode = model["ld_mode"]
     n_coeffs = 1 if ld_mode == "intensity_profile" else _N_COEFFS[ld_mode]
@@ -1349,31 +1664,26 @@ def make_lc(
                 f"but expected ({nar}, {nwave}, {n_mu_pts})."
             )
 
-    spr        = model["star_pixel_rad"]
-    inc_star   = model["inc_star"]
-    oversample = model["oversample"]
-    nphase_original = model["nphase_original"]
+    if not ar_time_varying:
+        # ---- Static path: build the AR's Cartesian position once --
+        ar_lat_rad  = jnp.deg2rad(ar_lat)
+        ar_long_rad = jnp.deg2rad(ar_long)
 
-    # ---- active region Cartesian coordinates (JAX) --------------------------------
-    ar_lat_rad  = jnp.deg2rad(ar_lat)
-    ar_long_rad = jnp.deg2rad(ar_long)
+        ar_cart = jnp.stack([
+            spr * jnp.sin(ar_long_rad) * jnp.cos(ar_lat_rad),
+            spr * jnp.sin(ar_lat_rad),
+            spr * jnp.cos(ar_long_rad) * jnp.cos(ar_lat_rad),
+        ], axis=-1)   # (nar, 3)
 
-    ar_cart = jnp.stack([
-        spr * jnp.sin(ar_long_rad) * jnp.cos(ar_lat_rad),
-        spr * jnp.sin(ar_lat_rad),
-        spr * jnp.cos(ar_long_rad) * jnp.cos(ar_lat_rad),
-    ], axis=-1)   # (nar, 3)
+        # phases_rot in the model is already oversampled if oversample > 1
+        def _rotate_ars_at_phase(phase_deg):
+            return vmap(
+                lambda cart: rotate_active_region(cart, phase_deg, inc_star)
+            )(ar_cart)
 
-    # ---- Rotate all active regions for all phases (JAX) ---------------------------
-    # phases_rot in the model is already oversampled if oversample > 1
-    def _rotate_ars_at_phase(phase_deg):
-        return vmap(
-            lambda cart: rotate_active_region(cart, phase_deg, inc_star)
-        )(ar_cart)
-
-    all_ar_carts = vmap(_rotate_ars_at_phase)(
-        model["phases_rot"]
-    )   # (nphase_compute, nar, 3)
+        all_ar_carts = vmap(_rotate_ars_at_phase)(
+            model["phases_rot"]
+        )   # (nphase_compute, nar, 3)
 
     # ---- Transit parameters: all-or-nothing (required 5), ecc/omega_peri
     # only meaningful alongside them -------------------------------------
@@ -1441,33 +1751,64 @@ def make_lc(
         )
 
     # ---- All-phases computation ------------------------------------------
-    lc_raw, star_maps = _compute_all_phases(
-        all_ar_carts,
-        planet_xyz_all,
-        wavelength          = model["wavelength"],
-        flux_quiet          = model["flux_quiet"],
-        flux_active         = flux_active,
-        ld_coeffs_quiet     = ld_coeffs_quiet_val,
-        ld_coeffs_active    = ld_coeffs_active,
-        I_profile_quiet     = model["I_profile"],
-        I_profile_active    = I_profile_active,
-        mu_profile_pts      = model["mu_profile_pts"],
-        x_disc              = model["x_disc"],
-        y_disc              = model["y_disc"],
-        mu_disc             = model["mu_disc"],
-        col_idx             = model["col_idx"],
-        vel_col             = model["vel_col"],
-        star_pixel_rad      = spr,
-        total_pixels        = model["total_pixels"],
-        arsize_rads         = jnp.deg2rad(ar_size),
-        ar_smoothness       = ar_smoothness,
-        k                   = k_val,
-        ld_mode             = model["ld_mode"],
-        plot_map_wavelength = model["plot_map_wavelength"],
-        n                   = model["n"],
-        flat_indices        = model["flat_indices"],
-        transit_softness    = transit_softness,
-    )
+    if not ar_time_varying:
+        lc_raw, star_maps = _compute_all_phases(
+            all_ar_carts,
+            planet_xyz_all,
+            wavelength          = model["wavelength"],
+            flux_quiet          = model["flux_quiet"],
+            flux_active         = flux_active,
+            ld_coeffs_quiet     = ld_coeffs_quiet_val,
+            ld_coeffs_active    = ld_coeffs_active,
+            I_profile_quiet     = model["I_profile"],
+            I_profile_active    = I_profile_active,
+            mu_profile_pts      = model["mu_profile_pts"],
+            x_disc              = model["x_disc"],
+            y_disc              = model["y_disc"],
+            mu_disc             = model["mu_disc"],
+            col_idx             = model["col_idx"],
+            vel_col             = model["vel_col"],
+            star_pixel_rad      = spr,
+            total_pixels        = model["total_pixels"],
+            arsize_rads         = jnp.deg2rad(ar_size),
+            ar_smoothness       = ar_smoothness,
+            k                   = k_val,
+            ld_mode             = model["ld_mode"],
+            plot_map_wavelength = model["plot_map_wavelength"],
+            n                   = model["n"],
+            flat_indices        = model["flat_indices"],
+            transit_softness    = transit_softness,
+        )
+    else:
+        lc_raw, star_maps = _compute_all_phases_evolving(
+            ar_lat, ar_long,
+            jnp.deg2rad(ar_size),
+            ar_smoothness,
+            flux_active,
+            planet_xyz_all,
+            model["phases_rot"],
+            inc_star            = inc_star,
+            star_pixel_rad      = spr,
+            wavelength          = model["wavelength"],
+            flux_quiet          = model["flux_quiet"],
+            ld_coeffs_quiet     = ld_coeffs_quiet_val,
+            ld_coeffs_active    = ld_coeffs_active,
+            I_profile_quiet     = model["I_profile"],
+            I_profile_active    = I_profile_active,
+            mu_profile_pts      = model["mu_profile_pts"],
+            x_disc              = model["x_disc"],
+            y_disc              = model["y_disc"],
+            mu_disc             = model["mu_disc"],
+            col_idx             = model["col_idx"],
+            vel_col             = model["vel_col"],
+            total_pixels        = model["total_pixels"],
+            k                   = k_val,
+            ld_mode             = model["ld_mode"],
+            plot_map_wavelength = model["plot_map_wavelength"],
+            n                   = model["n"],
+            flat_indices        = model["flat_indices"],
+            transit_softness    = transit_softness,
+        )
 
     # ---- Oversample averaging --------------------------------------------
     if oversample > 1:
@@ -1515,6 +1856,7 @@ def quick_lc(
     ecc: float = 0.0,
     omega_peri: float = 0.0,
     sp_orb: float = 0.0,
+    ar_time_interp: ArTimeInterp = "linear",
     verbose: bool = False,
 ) -> tuple:
     """
@@ -1541,17 +1883,18 @@ def quick_lc(
         Wavelength value or array at which the quiet photosphere and active-region spectra are defined.
     flux_quiet : array_like, shape (nwave,)
         Quiet-photosphere flux / spectrum.
-    flux_active : jnp.ndarray, shape (nar, nwave) or (nwave,), optional
-        Per-active-region flux / spectrum.
-        - If (nar, nwave): each active region gets its own spectrum.
+    flux_active : jnp.ndarray, shape (nar, nwave), (nwave,), or (ntime, nar, nwave), optional
+        Per-active-region flux / spectrum. Must be >= 0.
         - If (nwave,):     broadcasts to all active regions.
-    ar_lat : jnp.ndarray, shape (nar,), optional
+        - If (nar, nwave): each active region gets its own spectrum.
+        - If (ntime, nar, nwave): each active region gets its own time-varying spectrum.
+    ar_lat : jnp.ndarray, shape (nar,) or (ntime, nar), optional
         active region latitudes in degrees. Must be in [-90, 90].
-    ar_long : jnp.ndarray, shape (nar,), optional
+    ar_long : jnp.ndarray, shape (nar,) or (ntime, nar), optional
         active region longitudes in degrees. Must be in [0, 360).
-    ar_size : jnp.ndarray, shape (nar,), optional
-        active region angular radii in degrees
-    ar_smoothness : jnp.ndarray, shape (nar,) or scalar, optional
+    ar_size : jnp.ndarray, shape (nar,) or (ntime, nar), optional
+        active region angular radii in degrees. Must be >= 0.
+    ar_smoothness : jnp.ndarray, shape (nar,), scalar, or (ntime, nar), optional
         Super-Gaussian order controlling the sharpness of each AR's
         boundary (see ``_compute_ar_shape``). ``1`` is a true Gaussian;
         larger values sharpen the edge, converging to a hard-edged cap as
@@ -1562,6 +1905,28 @@ def quick_lc(
         are all-or-nothing: give every one of them to add active region(s),
         or omit all five for a quiet star. Giving some but not all raises
         ``ValueError``.
+
+        **Time-varying active regions.** Any of the above five properties may
+        independently carry an extra leading axis of length ``ntime`` instead
+        of its usual shape, to let that property evolve over the observation,
+        e.g. a spot that grows/decays (``ar_size``), drifts in latitude/longitude
+        (``ar_lat``/``ar_long``), or changes contrast (``flux_active``).
+        Values are given per original time and interpolated internally onto
+        ``oversample`` sub-exposures when oversampling is active, using the
+        model's ``ar_time_interp`` law (set at ``build_system`` time, like
+        ``ld_mode`` -- see there for the "linear"/"cubic" choice). Mixing is
+        allowed: only the parameters you want to evolve need the extra axis,
+        the rest keep their usual constant-in-time shape. Using none of them
+        (the default) is exactly as fast as before this capability existed.
+        ``ld_coeffs_active``/``I_profile_active`` do not support time evolution
+        and always stay fixed across the observation. Each epoch's values are
+        used exactly as given -- nothing couples them across epochs, so it's
+        up to the user to keep a fitted active region from changing unphysically
+        fast between epochs. If ``nar`` (read off the parameters' own trailing axis)
+        happens to equal ``ntime``, make_lc warns: this is the shape signature of
+        the common mistake of leaving a parameter meant to evolve as a flat ``(ntime,)``
+        array instead of ``(ntime, 1)``, which silently produces ``ntime`` separate
+        static active regions instead of one evolving one.
     times : array_like, shape (ntime,)
         Absolute observation times [days].
     P_rot : float
@@ -1593,7 +1958,7 @@ def quick_lc(
     I_profile : array-like, shape (nwave, n_mu_pts), optional
         Quiet-photosphere specific intensity at each (wavelength, mu) grid
         point. Required when ``ld_mode="intensity_profile"``.
-    ld_mode : str
+    ld_mode : str (default "quadratic")
         Limb-darkening law, shared by the quiet photosphere and every
         active region (each with its own coefficient values).
     ld_coeffs_active : jnp.ndarray, shape (nar, nwave, n_coeffs) or (nwave, n_coeffs), optional
@@ -1631,6 +1996,11 @@ def quick_lc(
         star's spin axis. Only meaningful together with a transit.
         Converted to radians internally before use --
         ``sajax.planet.planet_sky_position`` itself takes radians.
+    ar_time_interp : "linear" or "cubic", optional (default "linear")
+        Interpolation method for when time-varying active-region parameters
+        need to be interpolated onto ``oversample``'d sub-exposures.
+        Only matters when ``oversample > 1`` and at least one AR parameter
+        is time-varying -- see ``make_lc`` for the full description.
     verbose : bool, optional
         If True, print informational messages (LDC broadcasting, phase
         oversampling) while building the model. Default False.
@@ -1655,6 +2025,7 @@ def quick_lc(
         ld_coeffs=ld_coeffs, inc_star=inc_star, mu_profile=mu_profile,
         I_profile=I_profile, ld_mode=ld_mode,
         plot_map_wavelength=plot_map_wavelength, oversample=oversample,
+        ar_time_interp=ar_time_interp,
         t0=t0, period=period, a_over_rstar=a_over_rstar,
         inclination=inclination, k=k, ecc=ecc, omega_peri=omega_peri,
         sp_orb=sp_orb,

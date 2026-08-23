@@ -181,6 +181,39 @@ lc, star_maps = quick_lc(
 
 Since the active region's latitude/longitude are unaffected by `sp_orb` — only the planet's trajectory rotates — a spot that produces a clear crossing anomaly at `sp_orb=0` can end up entirely missed by a polar (`sp_orb≈90`) chord, even though the transit depth and duration are unchanged. See `quickstart.ipynb`'s Case 6 for a full side-by-side comparison (light curve + stellar-disc animation) of an aligned vs. polar transit of the same spot.
 
+### Case 4: Time-evolving active regions
+
+`flux_active`/`ar_lat`/`ar_long`/`ar_size`/`ar_smoothness` may each independently carry an extra leading time axis (length = the number of `times` the model was built with) instead of their usual per-AR shape, to let that property evolve over the observations — a spot growing/decaying, drifting in latitude/longitude, or changing contrast:
+
+```python
+import numpy as np
+
+ntime = len(times)
+ar_size_evolving = np.linspace(5.0, 15.0, ntime)[:, None]   # (ntime, nar=1): a growing spot
+
+lc, star_maps = quick_lc(
+    wavelength         = wavelength,
+    flux_quiet         = flux_quiet,
+    flux_active        = flux_active,
+    ld_coeffs          = [0.3, 0.1],
+    inc_star           = 90.0,
+    ar_lat             = 20.0,             # static: same shape as before
+    ar_long            = 0.0,
+    ar_size            = ar_size_evolving, # time-varying: (ntime, nar)
+    ar_smoothness      = 4.0,
+    times              = times,
+    P_rot              = P_ROT,
+    stellar_grid_size  = 100,
+    ve                 = 2.0,
+    ld_mode            = "quadratic",
+    ar_time_interp     = "linear",         # or "cubic" -- see below
+)
+```
+
+Only the parameters you want to evolve need the extra axis — the rest keep their usual constant-in-time shape. Values are given per `times` entry, *not* per oversampled sub-exposure. When `oversample > 1`, each evolving property is resolved onto the exact sub-exposure times through interpolation: `ar_time_interp="linear"` (the default) for piecewise-linear, or `"cubic"` for a C2 natural cubic spline (matching `scipy.interpolate.CubicSpline(bc_type="natural")`, but implemented in JAX via [`interpax`](https://github.com/f0uriest/interpax) so it stays differentiable). `ar_time_interp` is fixed at `build_system`/`quick_lc` time, like `ld_mode`. `ld_coeffs_active`/`I_profile_active` don't support time evolution and always stay fixed. Importantly, if none of the five parameters are given a time axis, `make_lc` takes the exact same code path as the static case, such that this feature adds no computational cost unless activated.
+
+Each `times` entry's active-region values are used exactly as given — the forward model does **not** couple them across epochs (no smoothness/continuity is enforced between one entry and the next). This is deliberate: it keeps the model as a per-epoch evaluation, allowing users full control over the dynamics. It also means nothing stops a naive fit from letting an active region changing unphysically between epochs. If you're doing inference on a dynamic active region, it's up to you to keep that from happening — _e.g._ with priors on the epoch-to-epoch differences (or on physical rates, like a maximum drift speed) that prevent implausible jumps.
+
 ### Numerical precision for long baselines (absolute BJD times)
 
 JAX defaults to `float32`. If you pass absolute epochs in BJD (e.g. `2460123.45`) `float32`'s 24 mantissa bits leave a rounding error (on the order of hours) significant enough to blur or bias the transit shape. To avoid this issue, `build_system` **automatically** subtracts a reference epoch (`model["t_ref"] = floor(times.min())`) so any downstream numerical work benefits from the smaller magnitude. If the rounding error is still a meaningful fraction of your sampling cadence *after* this automatic shift, SAJAX emits a warning, and `jax_enable_x64` remains available as a fallback for that case:

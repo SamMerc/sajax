@@ -5,10 +5,13 @@ Run with:
     pytest tests/
 """
 
+import warnings
+
 import numpy as np
 import pytest
 import jax
 import jax.numpy as jnp
+import interpax
 
 from sajax import quick_lc, build_stellar_grid
 from sajax.core import (
@@ -577,6 +580,24 @@ class TestInputValidation:
                 ar_size=jnp.array([10.0]), ar_smoothness=jnp.array([0.5]),
             )
 
+    def test_ar_size_below_zero_raises(self, small_model):
+        nwave = small_model["nwave"]
+        with pytest.raises(ValueError, match="ar_size must be >= 0"):
+            make_lc(
+                small_model, flux_active=jnp.ones(nwave),
+                ar_lat=jnp.array([0.0]), ar_long=jnp.array([0.0]),
+                ar_size=jnp.array([-5.0]), ar_smoothness=jnp.array([_SM]),
+            )
+
+    def test_flux_active_below_zero_raises(self, small_model):
+        nwave = small_model["nwave"]
+        with pytest.raises(ValueError, match="flux_active must be >= 0"):
+            make_lc(
+                small_model, flux_active=jnp.full(nwave, -0.1),
+                ar_lat=jnp.array([0.0]), ar_long=jnp.array([0.0]),
+                ar_size=jnp.array([10.0]), ar_smoothness=jnp.array([_SM]),
+            )
+
     def test_ar_smoothness_below_one_not_checked_under_jit(self, small_model):
         """The ar_smoothness>=1 check must not break jit/grad-based fitting
         (e.g. numpyro_ext), where ar_smoothness arrives as a Tracer with no
@@ -595,6 +616,36 @@ class TestInputValidation:
             return lc
 
         run(0.5)  # must not raise TracerBoolConversionError
+
+    def test_ar_size_below_zero_not_checked_under_jit(self, small_model):
+        """Same jit-safety requirement as above, for the ar_size>=0 check."""
+        nwave = small_model["nwave"]
+
+        @jax.jit
+        def run(size):
+            lc, _ = make_lc(
+                small_model, flux_active=jnp.ones(nwave),
+                ar_lat=jnp.array([0.0]), ar_long=jnp.array([0.0]),
+                ar_size=jnp.array([size]), ar_smoothness=jnp.array([_SM]),
+            )
+            return lc
+
+        run(-5.0)  # must not raise TracerBoolConversionError
+
+    def test_flux_active_below_zero_not_checked_under_jit(self, small_model):
+        """Same jit-safety requirement as above, for the flux_active>=0 check."""
+        nwave = small_model["nwave"]
+
+        @jax.jit
+        def run(flux):
+            lc, _ = make_lc(
+                small_model, flux_active=jnp.full(nwave, flux),
+                ar_lat=jnp.array([0.0]), ar_long=jnp.array([0.0]),
+                ar_size=jnp.array([10.0]), ar_smoothness=jnp.array([_SM]),
+            )
+            return lc
+
+        run(-0.1)  # must not raise TracerBoolConversionError
 
     def test_ld_coeffs_active_shape_mismatch_raises(self, small_model):
         nwave = small_model["nwave"]
@@ -2476,7 +2527,520 @@ class TestQuietLdcOverride:
 
 
 # ===================================================================
-# 9.  BJD-scale reference-epoch shift (numerical precision)
+# 9.  Time-varying active regions
+#
+# Any of flux_active/ar_lat/ar_long/ar_size/ar_smoothness may carry an
+# extra leading time axis (length = the model's original, pre-oversampling
+# `times`) to let that property evolve over the observation, independently
+# of the others. Omitting the extra axis on every one of them (today's
+# usage) must take the exact code path that existed before this feature,
+# at zero added cost -- most of the tests below exist to pin that down,
+# not just to check the new path works.
+# ===================================================================
+
+class TestTimeVaryingAR:
+
+    _NTIME = 12
+
+    @pytest.fixture(scope="class")
+    def evolving_model(self):
+        return build_system(
+            wavelength=WAVELENGTH, flux_quiet=FLUX_QUIET, **BASE_PARAMS,
+            times=np.linspace(0, 8.0, self._NTIME, endpoint=False), P_rot=10.0,
+            stellar_grid_size=50, ve=0.0, ld_mode="quadratic",
+        )
+
+    @pytest.fixture(scope="class")
+    def evolving_model_oversampled(self):
+        return build_system(
+            wavelength=WAVELENGTH, flux_quiet=FLUX_QUIET, **BASE_PARAMS,
+            times=np.linspace(0, 8.0, self._NTIME, endpoint=False), P_rot=10.0,
+            stellar_grid_size=50, ve=0.0, ld_mode="quadratic", oversample=3,
+        )
+
+    @pytest.fixture(scope="class")
+    def evolving_model_oversampled_cubic(self):
+        """Same as evolving_model_oversampled, but ar_time_interp='cubic'
+        -- a build_system-level setting, like ld_mode, so it needs its own
+        model rather than being choosable per make_lc call."""
+        return build_system(
+            wavelength=WAVELENGTH, flux_quiet=FLUX_QUIET, **BASE_PARAMS,
+            times=np.linspace(0, 8.0, self._NTIME, endpoint=False), P_rot=10.0,
+            stellar_grid_size=50, ve=0.0, ld_mode="quadratic", oversample=3,
+            ar_time_interp="cubic",
+        )
+
+    @pytest.fixture(scope="class")
+    def evolving_model_cubic(self):
+        """Same as evolving_model (oversample=1), but ar_time_interp='cubic'."""
+        return build_system(
+            wavelength=WAVELENGTH, flux_quiet=FLUX_QUIET, **BASE_PARAMS,
+            times=np.linspace(0, 8.0, self._NTIME, endpoint=False), P_rot=10.0,
+            stellar_grid_size=50, ve=0.0, ld_mode="quadratic",
+            ar_time_interp="cubic",
+        )
+
+    # ---- Correctness: a time-varying array holding a constant value must
+    # reproduce the static-shape call exactly (same kernel, different vmap
+    # structure) --------------------------------------------------------
+
+    def test_broadcast_time_varying_ar_size_matches_static(self, evolving_model):
+        static_kwargs = dict(
+            flux_active=jnp.array(FLUX_SPOT), ar_lat=jnp.array([20.0]),
+            ar_long=jnp.array([0.0]), ar_smoothness=jnp.array([_SM]),
+        )
+        lc_static = make_lc(evolving_model, ar_size=jnp.array([10.0]), **static_kwargs)[0]
+        ar_size_const = jnp.broadcast_to(jnp.array([10.0]), (self._NTIME, 1))
+        lc_evolving = make_lc(evolving_model, ar_size=ar_size_const, **static_kwargs)[0]
+        np.testing.assert_array_equal(np.array(lc_static), np.array(lc_evolving))
+
+    def test_broadcast_time_varying_ar_lat_matches_static(self, evolving_model):
+        static_kwargs = dict(
+            flux_active=jnp.array(FLUX_SPOT), ar_long=jnp.array([0.0]),
+            ar_size=jnp.array([10.0]), ar_smoothness=jnp.array([_SM]),
+        )
+        lc_static = make_lc(evolving_model, ar_lat=jnp.array([20.0]), **static_kwargs)[0]
+        ar_lat_const = jnp.broadcast_to(jnp.array([20.0]), (self._NTIME, 1))
+        lc_evolving = make_lc(evolving_model, ar_lat=ar_lat_const, **static_kwargs)[0]
+        np.testing.assert_array_equal(np.array(lc_static), np.array(lc_evolving))
+
+    def test_broadcast_time_varying_flux_active_matches_static(self, evolving_model):
+        static_kwargs = dict(
+            ar_lat=jnp.array([20.0]), ar_long=jnp.array([0.0]),
+            ar_size=jnp.array([10.0]), ar_smoothness=jnp.array([_SM]),
+        )
+        lc_static = make_lc(evolving_model, flux_active=jnp.array(FLUX_SPOT), **static_kwargs)[0]
+        flux_active_const = jnp.broadcast_to(
+            jnp.array(FLUX_SPOT), (self._NTIME, 1, len(WAVELENGTH))
+        )
+        lc_evolving = make_lc(evolving_model, flux_active=flux_active_const, **static_kwargs)[0]
+        np.testing.assert_array_equal(np.array(lc_static), np.array(lc_evolving))
+
+    # ---- Genuine evolution: finite, and actually different from a
+    # constant-parameter call ------------------------------------------
+
+    def test_evolving_ar_size_matches_independent_per_time_calls(self, evolving_model):
+        """
+        Ground-truth cross-check: the evolving path's output at each phase
+        must match an independent build_system+make_lc call at that single
+        time with the corresponding static ar_size -- i.e. the vmapped
+        evolving kernel does the same per-phase physics as the ordinary
+        static kernel, just batched over time.
+
+        (A simpler "growing spot -> monotonically deepening dip" version of
+        this test doesn't hold here: with P_rot=10 and times spanning 0-8,
+        the AR rotates most of the way around the star, so the changing
+        foreshortening/visibility confounds a naive monotonicity check.)
+        """
+        times = np.linspace(0, 8.0, self._NTIME, endpoint=False)
+        ar_size_vals = np.linspace(3.0, 15.0, self._NTIME)
+        ar_size_t = jnp.asarray(ar_size_vals)[:, None]
+
+        lc_evolving, _ = make_lc(
+            evolving_model, flux_active=jnp.array(FLUX_SPOT), ar_lat=jnp.array([0.0]),
+            ar_long=jnp.array([0.0]), ar_size=ar_size_t, ar_smoothness=jnp.array([_SM]),
+        )
+        lc_evolving = np.array(lc_evolving)
+        assert np.all(np.isfinite(lc_evolving))
+
+        for i in [0, self._NTIME // 2, self._NTIME - 1]:
+            single_model = build_system(
+                wavelength=WAVELENGTH, flux_quiet=FLUX_QUIET, **BASE_PARAMS,
+                times=times[i:i + 1], P_rot=10.0, stellar_grid_size=50, ve=0.0,
+                ld_mode="quadratic",
+            )
+            lc_single, _ = make_lc(
+                single_model, flux_active=jnp.array(FLUX_SPOT), ar_lat=jnp.array([0.0]),
+                ar_long=jnp.array([0.0]), ar_size=jnp.array([ar_size_vals[i]]),
+                ar_smoothness=jnp.array([_SM]),
+            )
+            np.testing.assert_allclose(
+                float(lc_evolving[i]), float(np.array(lc_single)[0]), atol=1e-5,
+                err_msg=f"evolving-path row {i} doesn't match an independent static call",
+            )
+
+    def test_evolving_position_differs_from_static(self, evolving_model):
+        ar_lat_t = jnp.linspace(-30.0, 30.0, self._NTIME)[:, None]
+        static_kwargs = dict(
+            flux_active=jnp.array(FLUX_SPOT), ar_long=jnp.array([0.0]),
+            ar_size=jnp.array([10.0]), ar_smoothness=jnp.array([_SM]),
+        )
+        lc_evolving = make_lc(evolving_model, ar_lat=ar_lat_t, **static_kwargs)[0]
+        lc_static = make_lc(evolving_model, ar_lat=jnp.array([0.0]), **static_kwargs)[0]
+        assert np.all(np.isfinite(np.array(lc_evolving)))
+        assert not np.allclose(np.array(lc_evolving), np.array(lc_static))
+
+    def test_evolving_flux_active_differs_from_static(self, evolving_model):
+        flux_active_t = jnp.linspace(0.9, 0.4, self._NTIME)[:, None, None] \
+            * jnp.ones((self._NTIME, 1, len(WAVELENGTH)))
+        static_kwargs = dict(
+            ar_lat=jnp.array([0.0]), ar_long=jnp.array([0.0]),
+            ar_size=jnp.array([10.0]), ar_smoothness=jnp.array([_SM]),
+        )
+        lc_evolving = make_lc(evolving_model, flux_active=flux_active_t, **static_kwargs)[0]
+        lc_static = make_lc(evolving_model, flux_active=jnp.array(FLUX_SPOT), **static_kwargs)[0]
+        assert np.all(np.isfinite(np.array(lc_evolving)))
+        assert not np.allclose(np.array(lc_evolving), np.array(lc_static))
+
+    def test_mixed_static_and_evolving_params(self, evolving_model):
+        """Only some of the five AR parameters need to be time-varying;
+        the rest are broadcast across time as usual."""
+        ar_size_t = jnp.linspace(5.0, 15.0, self._NTIME)[:, None]
+        lc, _ = make_lc(
+            evolving_model, flux_active=jnp.array(FLUX_SPOT), ar_lat=jnp.array([0.0]),
+            ar_long=jnp.array([0.0]), ar_size=ar_size_t, ar_smoothness=jnp.array([_SM]),
+        )
+        assert np.all(np.isfinite(np.array(lc)))
+
+    def test_two_active_regions_time_varying(self, evolving_model):
+        """Time-varying shape is (ntime, nar) -- nar=2 here."""
+        ar_size_t = jnp.stack([
+            jnp.linspace(3.0, 12.0, self._NTIME),
+            jnp.linspace(12.0, 3.0, self._NTIME),
+        ], axis=-1)  # (ntime, 2)
+        lc, _ = make_lc(
+            evolving_model,
+            flux_active=jnp.broadcast_to(jnp.array(FLUX_SPOT), (2, len(WAVELENGTH))),
+            ar_lat=jnp.array([20.0, -20.0]), ar_long=jnp.array([0.0, 180.0]),
+            ar_size=ar_size_t, ar_smoothness=jnp.array([_SM, _SM]),
+        )
+        assert np.all(np.isfinite(np.array(lc)))
+
+    def test_oversample_with_evolving_param(self, evolving_model_oversampled):
+        """Time-varying values are specified per original time, not per
+        oversampled sub-exposure, and expanded internally."""
+        ar_size_t = jnp.linspace(5.0, 15.0, self._NTIME)[:, None]
+        lc, star_maps = make_lc(
+            evolving_model_oversampled, flux_active=jnp.array(FLUX_SPOT),
+            ar_lat=jnp.array([0.0]), ar_long=jnp.array([0.0]), ar_size=ar_size_t,
+            ar_smoothness=jnp.array([_SM]),
+        )
+        assert np.array(lc).shape == (self._NTIME,)  # nwave == 1: axis already dropped
+        assert star_maps.shape[0] == self._NTIME
+        assert np.all(np.isfinite(np.array(lc)))
+
+    # ---- Interpolation (ar_time_interp) ----------------------------------
+
+    def test_oversample_interpolation_matches_manual_reference(self, evolving_model_oversampled):
+        """
+        Ground-truth cross-check for oversample>1: make_lc's output for an
+        (ntime, nar) time-varying ar_size must match manually
+        linear-interpolating ar_size onto the model's exact sub-exposure
+        times (model["times_oversampled"]), evaluating each sub-exposure
+        independently, and averaging per block -- i.e. genuine
+        interpolation is what happens internally, not a step-function
+        repeat (which would instead match evaluating only at the nearest
+        original cadence point, not this interpolated reference).
+        """
+        ar_size_vals = np.linspace(5.0, 15.0, self._NTIME)
+        ar_size_t = jnp.asarray(ar_size_vals)[:, None]
+
+        # evolving_model_oversampled defaults to ar_time_interp="linear"
+        # (build_system's own default, like ld_mode).
+        lc_interp, _ = make_lc(
+            evolving_model_oversampled, flux_active=jnp.array(FLUX_SPOT),
+            ar_lat=jnp.array([0.0]), ar_long=jnp.array([0.0]), ar_size=ar_size_t,
+            ar_smoothness=jnp.array([_SM]),
+        )
+        lc_interp = np.array(lc_interp)
+
+        times_orig = np.asarray(evolving_model_oversampled["times"])
+        times_over = np.asarray(evolving_model_oversampled["times_oversampled"])
+        # np.interp clamps outside [times_orig[0], times_orig[-1]]; interpax's
+        # extrap=True (needed since sub-exposure times spill slightly past
+        # the first/last cadence point) instead extends the boundary slope,
+        # so the reference must match that, not plain clamped np.interp.
+        ar_size_over = np.interp(times_over, times_orig, ar_size_vals)
+        slope_left  = (ar_size_vals[1] - ar_size_vals[0]) / (times_orig[1] - times_orig[0])
+        slope_right = (ar_size_vals[-1] - ar_size_vals[-2]) / (times_orig[-1] - times_orig[-2])
+        ar_size_over = np.where(
+            times_over < times_orig[0],
+            ar_size_vals[0] + slope_left * (times_over - times_orig[0]),
+            ar_size_over,
+        )
+        ar_size_over = np.where(
+            times_over > times_orig[-1],
+            ar_size_vals[-1] + slope_right * (times_over - times_orig[-1]),
+            ar_size_over,
+        )
+
+        ref_model = build_system(
+            wavelength=WAVELENGTH, flux_quiet=FLUX_QUIET, **BASE_PARAMS,
+            times=times_over, P_rot=10.0, stellar_grid_size=50, ve=0.0, ld_mode="quadratic",
+        )
+        lc_ref, _ = make_lc(
+            ref_model, flux_active=jnp.array(FLUX_SPOT), ar_lat=jnp.array([0.0]),
+            ar_long=jnp.array([0.0]), ar_size=jnp.asarray(ar_size_over)[:, None],
+            ar_smoothness=jnp.array([_SM]),
+        )
+        oversample = evolving_model_oversampled["oversample"]
+        lc_ref_avg = np.array(lc_ref).reshape(self._NTIME, oversample).mean(axis=1)
+
+        np.testing.assert_allclose(lc_interp, lc_ref_avg, atol=1e-5)
+
+    def test_linear_vs_cubic_differ_for_nonlinear_evolution(
+        self, evolving_model_oversampled, evolving_model_oversampled_cubic,
+    ):
+        """
+        linear and cubic interpolation must give different sub-exposure
+        values for a genuinely nonlinear (not just non-constant) evolution.
+        ar_time_interp is fixed at build_system time (like ld_mode), so
+        comparing the two methods means comparing two separately-built
+        models, not one model with a per-call override.
+        """
+        assert evolving_model_oversampled["ar_time_interp"] == "linear"
+        assert evolving_model_oversampled_cubic["ar_time_interp"] == "cubic"
+
+        times_orig = np.asarray(evolving_model_oversampled["times"])
+        ar_size_t = jnp.asarray(5.0 + 1.5 * (times_orig - times_orig[0]) ** 2)[:, None]
+        kwargs = dict(
+            flux_active=jnp.array(FLUX_SPOT), ar_lat=jnp.array([0.0]),
+            ar_long=jnp.array([0.0]), ar_size=ar_size_t, ar_smoothness=jnp.array([_SM]),
+        )
+        lc_linear = np.array(make_lc(evolving_model_oversampled, **kwargs)[0])
+        lc_cubic  = np.array(make_lc(evolving_model_oversampled_cubic, **kwargs)[0])
+        assert np.all(np.isfinite(lc_linear))
+        assert np.all(np.isfinite(lc_cubic))
+        # An explicit magnitude threshold rather than np.allclose's default
+        # tolerance, which was loose enough to call a genuine (if small)
+        # difference "close" -- both curves are finite and physically
+        # sensible, but must not be the *same* curve.
+        assert np.max(np.abs(lc_linear - lc_cubic)) > 1e-6
+
+    def test_cubic_overshoot_is_clipped_to_physical_domain(self, evolving_model_oversampled_cubic):
+        """
+        ar_time_interp='cubic' is a natural spline and can overshoot the
+        input knots between them, even though the knots themselves satisfy
+        ar_size>=0/ar_smoothness>=1/flux_active>=0 -- make_lc must re-clip
+        the interpolated sub-exposure values back into the physical domain.
+
+        Ground-truth cross-check: replicate the exact interpax interpolation
+        make_lc performs internally, clip it by hand to the physical domain,
+        and feed the result through a model built directly at the
+        sub-exposure times (the static code path, which needs no
+        interpolation) -- make_lc's actual output must match this clipped
+        reference, not the raw (unclamped) spline.
+        """
+        times_orig = np.asarray(evolving_model_oversampled_cubic["times"])
+        times_over = np.asarray(evolving_model_oversampled_cubic["times_oversampled"])
+
+        # Knots alternate between a comfortably-valid value and exactly the
+        # boundary, which makes a natural cubic spline ring past the
+        # boundary between them.
+        ar_size_vals = np.tile([8.0, 0.0], self._NTIME // 2)
+        smooth_vals  = np.tile([_SM, 1.0], self._NTIME // 2)
+        flux_vals    = np.tile([0.9, 0.0], self._NTIME // 2)
+
+        def _raw_interp(vals):
+            return np.array(interpax.interp1d(
+                jnp.asarray(times_over), jnp.asarray(times_orig), jnp.asarray(vals),
+                method="cubic2", extrap=True,
+            ))
+
+        ar_size_raw = _raw_interp(ar_size_vals)
+        smooth_raw  = _raw_interp(smooth_vals)
+        flux_raw    = _raw_interp(flux_vals)
+        # Self-check that this fixture actually exercises the clip, so the
+        # test doesn't silently pass without ever overshooting.
+        assert np.any(ar_size_raw < 0)
+        assert np.any(smooth_raw < 1)
+        assert np.any(flux_raw < 0)
+
+        lc, _ = make_lc(
+            evolving_model_oversampled_cubic,
+            flux_active=jnp.asarray(flux_vals)[:, None, None],
+            ar_lat=jnp.array([0.0]), ar_long=jnp.array([0.0]),
+            ar_size=jnp.asarray(ar_size_vals)[:, None],
+            ar_smoothness=jnp.asarray(smooth_vals)[:, None],
+        )
+        lc = np.array(lc)
+        assert np.all(np.isfinite(lc))
+
+        ref_model = build_system(
+            wavelength=WAVELENGTH, flux_quiet=FLUX_QUIET, **BASE_PARAMS,
+            times=times_over, P_rot=10.0, stellar_grid_size=50, ve=0.0, ld_mode="quadratic",
+        )
+        lc_ref, _ = make_lc(
+            ref_model,
+            flux_active=jnp.asarray(np.maximum(flux_raw, 0.0))[:, None, None],
+            ar_lat=jnp.array([0.0]), ar_long=jnp.array([0.0]),
+            ar_size=jnp.asarray(np.maximum(ar_size_raw, 0.0))[:, None],
+            ar_smoothness=jnp.asarray(np.maximum(smooth_raw, 1.0))[:, None],
+        )
+        oversample = evolving_model_oversampled_cubic["oversample"]
+        lc_ref_avg = np.array(lc_ref).reshape(self._NTIME, oversample).mean(axis=1)
+
+        np.testing.assert_allclose(lc, lc_ref_avg, atol=1e-5)
+
+    def test_cubic_matches_linear_when_oversample_is_one(self, evolving_model, evolving_model_cubic):
+        """With oversample == 1, the sub-exposure grid equals the original
+        cadence grid exactly, so both interpolation laws reproduce the
+        given knots exactly and must agree bit-for-bit."""
+        ar_size_t = jnp.linspace(5.0, 15.0, self._NTIME)[:, None]
+        kwargs = dict(
+            flux_active=jnp.array(FLUX_SPOT), ar_lat=jnp.array([0.0]),
+            ar_long=jnp.array([0.0]), ar_size=ar_size_t, ar_smoothness=jnp.array([_SM]),
+        )
+        lc_linear = make_lc(evolving_model, **kwargs)[0]
+        lc_cubic  = make_lc(evolving_model_cubic, **kwargs)[0]
+        np.testing.assert_array_equal(np.array(lc_linear), np.array(lc_cubic))
+
+    def test_cubic_requires_at_least_two_times(self):
+        single_time_model = build_system(
+            wavelength=WAVELENGTH, flux_quiet=FLUX_QUIET, **BASE_PARAMS,
+            times=np.array([0.0]), P_rot=10.0,
+            stellar_grid_size=50, ve=0.0, ld_mode="quadratic",
+            ar_time_interp="cubic",
+        )
+        with pytest.raises(ValueError, match="ar_time_interp='cubic'"):
+            make_lc(
+                single_time_model, flux_active=jnp.array(FLUX_SPOT),
+                ar_lat=jnp.zeros((1, 1)), ar_long=jnp.array([0.0]),
+                ar_size=jnp.array([10.0]), ar_smoothness=jnp.array([_SM]),
+            )
+
+    # ---- Shape validation -----------------------------------------------
+
+    def test_ar_lat_wrong_time_length_raises(self, evolving_model):
+        with pytest.raises(ValueError, match="ar_lat"):
+            make_lc(
+                evolving_model, flux_active=jnp.array(FLUX_SPOT),
+                ar_lat=jnp.zeros((self._NTIME - 1, 1)), ar_long=jnp.array([0.0]),
+                ar_size=jnp.array([10.0]), ar_smoothness=jnp.array([_SM]),
+            )
+
+    def test_flux_active_wrong_time_shape_raises(self, evolving_model):
+        with pytest.raises(ValueError, match="flux_active"):
+            make_lc(
+                evolving_model,
+                flux_active=jnp.zeros((self._NTIME - 1, 1, len(WAVELENGTH))),
+                ar_lat=jnp.array([0.0]), ar_long=jnp.array([0.0]),
+                ar_size=jnp.array([10.0]), ar_smoothness=jnp.array([_SM]),
+            )
+
+    def test_evolving_ar_smoothness_below_one_raises(self, evolving_model):
+        bad_smoothness = jnp.broadcast_to(jnp.array([0.5]), (self._NTIME, 1))
+        with pytest.raises(ValueError, match="ar_smoothness must be >= 1"):
+            make_lc(
+                evolving_model, flux_active=jnp.array(FLUX_SPOT),
+                ar_lat=jnp.array([0.0]), ar_long=jnp.array([0.0]),
+                ar_size=jnp.array([10.0]), ar_smoothness=bad_smoothness,
+            )
+
+    def test_evolving_ar_size_below_zero_raises(self, evolving_model):
+        bad_size = jnp.broadcast_to(jnp.array([-5.0]), (self._NTIME, 1))
+        with pytest.raises(ValueError, match="ar_size must be >= 0"):
+            make_lc(
+                evolving_model, flux_active=jnp.array(FLUX_SPOT),
+                ar_lat=jnp.array([0.0]), ar_long=jnp.array([0.0]),
+                ar_size=bad_size, ar_smoothness=jnp.array([_SM]),
+            )
+
+    def test_evolving_flux_active_below_zero_raises(self, evolving_model):
+        bad_flux = jnp.broadcast_to(jnp.array([-0.1]), (self._NTIME, 1, len(WAVELENGTH)))
+        with pytest.raises(ValueError, match="flux_active must be >= 0"):
+            make_lc(
+                evolving_model, flux_active=bad_flux,
+                ar_lat=jnp.array([0.0]), ar_long=jnp.array([0.0]),
+                ar_size=jnp.array([10.0]), ar_smoothness=jnp.array([_SM]),
+            )
+
+    def test_ar_size_wrong_static_length_raises(self, evolving_model):
+        """Triggers the time-varying path via ar_lat, then ar_size's own
+        (nar,)-mismatch check inside it."""
+        ar_lat_t = jnp.broadcast_to(jnp.array([0.0]), (self._NTIME, 1))
+        with pytest.raises(ValueError, match="ar_size"):
+            make_lc(
+                evolving_model, flux_active=jnp.array(FLUX_SPOT),
+                ar_lat=ar_lat_t, ar_long=jnp.array([0.0]),
+                ar_size=jnp.array([1.0, 2.0]),  # size 2, but nar == 1
+                ar_smoothness=jnp.array([_SM]),
+            )
+
+    def test_ar_smoothness_wrong_static_shape_raises(self, evolving_model):
+        ar_lat_t = jnp.broadcast_to(jnp.array([0.0]), (self._NTIME, 1))
+        with pytest.raises(ValueError, match="ar_smoothness"):
+            make_lc(
+                evolving_model, flux_active=jnp.array(FLUX_SPOT),
+                ar_lat=ar_lat_t, ar_long=jnp.array([0.0]),
+                ar_size=jnp.array([10.0]),
+                ar_smoothness=jnp.array([1.0, 2.0]),  # size 2, but nar == 1
+            )
+
+    def test_flux_active_wrong_static_2d_shape_raises(self, evolving_model):
+        ar_lat_t = jnp.broadcast_to(jnp.array([0.0]), (self._NTIME, 1))
+        with pytest.raises(ValueError, match="flux_active"):
+            make_lc(
+                evolving_model,
+                flux_active=jnp.zeros((2, len(WAVELENGTH))),  # (nar, nwave) but nar == 1
+                ar_lat=ar_lat_t, ar_long=jnp.array([0.0]),
+                ar_size=jnp.array([10.0]), ar_smoothness=jnp.array([_SM]),
+            )
+
+    def test_warns_when_nar_coincides_with_ntime(self, evolving_model):
+        """
+        nar is read off ar_lat's own trailing axis before make_lc knows
+        whether any parameter is time-varying. A caller who means a single
+        AR to evolve over ntime epochs, but forgets the extra leading axis
+        on ar_lat/ar_long (passing flat (ntime,) arrays instead of
+        (ntime, 1)), silently ends up with ntime separate *static* active
+        regions instead -- indistinguishable from a genuine
+        ntime-active-region model by shape alone whenever nar == ntime, so
+        make_lc must warn in that case rather than stay silent.
+
+        This reproduces the footgun end-to-end: ar_lat/ar_long become
+        (accidentally) per-region constants, ar_size is shaped to broadcast
+        the same evolving curve onto every one of the ntime fake regions,
+        and the call succeeds without any ValueError -- shape validation
+        alone cannot catch this, only the warning does.
+        """
+        ntime = self._NTIME
+        nwave = len(WAVELENGTH)
+        ar_lat_flat  = jnp.linspace(-10.0, 10.0, ntime)  # meant as 1 AR's time-course...
+        ar_long_flat = jnp.zeros(ntime)                   # ...but nar ends up == ntime instead
+        ar_size_t = jnp.broadcast_to(
+            jnp.linspace(5.0, 15.0, ntime)[:, None], (ntime, ntime)
+        )
+        with pytest.warns(UserWarning, match="nar.*ntime|ntime.*nar"):
+            lc, _ = make_lc(
+                evolving_model,
+                flux_active=jnp.full((ntime, nwave), FLUX_SPOT[0]),
+                ar_lat=ar_lat_flat, ar_long=ar_long_flat,
+                ar_size=ar_size_t, ar_smoothness=jnp.full(ntime, _SM),
+            )
+        assert np.all(np.isfinite(np.array(lc)))
+
+    def test_no_warning_when_nar_differs_from_ntime(self, evolving_model):
+        """Normal time-varying usage -- nar (1 active region here) differs
+        from ntime (self._NTIME) -- must not trigger the nar==ntime
+        footgun warning."""
+        ar_size_t = jnp.linspace(5.0, 15.0, self._NTIME)[:, None]
+        with warnings.catch_warnings(record=True) as record:
+            warnings.simplefilter("always")
+            make_lc(
+                evolving_model, flux_active=jnp.array(FLUX_SPOT), ar_lat=jnp.array([0.0]),
+                ar_long=jnp.array([0.0]), ar_size=ar_size_t, ar_smoothness=jnp.array([_SM]),
+            )
+        assert not any("ntime" in str(w.message) for w in record)
+
+    # ---- Autodiff ---------------------------------------------------------
+
+    def test_grad_through_evolving_ar_size_is_finite_and_nonzero(self, evolving_model):
+        def f(size0):
+            ar_size_t = jnp.linspace(size0, size0 + 5.0, self._NTIME)[:, None]
+            lc, _ = make_lc(
+                evolving_model, flux_active=jnp.array(FLUX_SPOT), ar_lat=jnp.array([0.0]),
+                ar_long=jnp.array([0.0]), ar_size=ar_size_t, ar_smoothness=jnp.array([_SM]),
+            )
+            return jnp.sum(lc)
+
+        g = jax.grad(f)(jnp.float32(8.0))
+        assert jnp.isfinite(g)
+        assert jnp.abs(g) > 0
+
+
+# ===================================================================
+# 10.  BJD-scale reference-epoch shift (numerical precision)
 #
 # build_system now subtracts a reference epoch (model["t_ref"]) from
 # times/t0 internally, before either reaches a JAX array, so absolute
