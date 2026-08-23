@@ -181,7 +181,7 @@ lc, star_maps = quick_lc(
 
 Since the active region's latitude/longitude are unaffected by `sp_orb` — only the planet's trajectory rotates — a spot that produces a clear crossing anomaly at `sp_orb=0` can end up entirely missed by a polar (`sp_orb≈90`) chord, even though the transit depth and duration are unchanged. See `quickstart.ipynb`'s Case 6 for a full side-by-side comparison (light curve + stellar-disc animation) of an aligned vs. polar transit of the same spot.
 
-### Case 4: Time-evolving active regions
+### Case 5: Time-evolving active regions
 
 `flux_active`/`ar_lat`/`ar_long`/`ar_size`/`ar_smoothness` may each independently carry an extra leading time axis (length = the number of `times` the model was built with) instead of their usual per-AR shape, to let that property evolve over the observations — a spot growing/decaying, drifting in latitude/longitude, or changing contrast:
 
@@ -230,4 +230,4 @@ from sajax import build_system, make_lc   # import sajax only after this
 
 - 💾 **[Explore Tutorials](https://sajax.readthedocs.io/en/latest/examples/quickstart.html)** — Check out full working examples with colorful plots, interesting use cases, and the full implementation of both an MCMC and a gradient-based retrieval!
 
-- 📚 **[Read the API Reference](modules.html)** — Learn about all available functions, classes, and parameters
+- 📚 **{doc}`Read the API Reference <autoapi/index>`** — Learn about all available functions, classes, and parameters

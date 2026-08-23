@@ -18,30 +18,37 @@ automatically — no extra parameters are required.
 
 Orbital convention  (Winn 2010 / Eastman et al. 2013)
 ------------------------------------------------------
-  X  — sky-plane east-west  (positive east)
-  Y  — sky-plane north-south  (positive north, foreshortened by cos i)
-  Z  — line-of-sight toward observer  (Z > 0 ⟹ planet in front of star)
+
+- **X** — sky-plane east-west (positive east)
+- **Y** — sky-plane north-south (positive north, foreshortened by cos i)
+- **Z** — line-of-sight toward observer (Z > 0 ⟹ planet in front of star)
 
 All sky positions are in units of the stellar radius R*.
 
 Minimum parameter set
 ---------------------
-  t0            : mid-transit epoch  [days]
-  period        : orbital period  [days]
-  a_over_rstar  : semimajor axis / R*  (dimensionless)
-                  May be derived from stellar density via
-                  ``stellar_density_to_a_over_rstar()``.
-  inclination   : orbital inclination  [rad]   (90deg / pi/2 = perfect edge-on)
-  ecc           : orbital eccentricity  [0, 1)
-  omega_peri    : argument of periastron  [rad]
-                  (ω = 0deg → periapsis at ascending node;
-                   ω = 90deg → periapsis at inferior conjunction /
-                   transit centre for a circular orbit)
-  sp_orb        : sky-projected spin-orbit angle, λ  [rad]
-                  ``sp_orb`` rotates the transit chord about the stellar
-                  centre, in the sky plane. Angle is relative to the 
-                  star's spin axis.
-  k             : planet-to-star radius ratio  Rp / R*
+
+``t0``
+   mid-transit epoch [days]
+``period``
+   orbital period [days]
+``a_over_rstar``
+   semimajor axis / R* (dimensionless). May be derived from stellar
+   density via ``stellar_density_to_a_over_rstar()``.
+``inclination``
+   orbital inclination [rad] (90deg / pi/2 = perfect edge-on)
+``ecc``
+   orbital eccentricity [0, 1)
+``omega_peri``
+   argument of periastron [rad] (ω = 0deg → periapsis at ascending
+   node; ω = 90deg → periapsis at inferior conjunction / transit
+   centre for a circular orbit)
+``sp_orb``
+   sky-projected spin-orbit angle, λ [rad]. ``sp_orb`` rotates the
+   transit chord about the stellar centre, in the sky plane. Angle is
+   relative to the star's spin axis.
+``k``
+   planet-to-star radius ratio Rp / R*
 
 Limb darkening
 --------------

@@ -95,7 +95,7 @@ JIT compilation
 ---------------
 *Do NOT jit(make_lc) directly* -- it contains Python-level
 control flow on model metadata.  Instead, the inner _compute_all_phases
-is the hot path and is safe to JIT via:
+is the hot path and is safe to JIT via::
 
     from jax import jit
     _compute_all_phases_jit = jit(_compute_all_phases, static_argnames=[
@@ -952,10 +952,11 @@ def build_system(
     ``make_lc`` for details on how this interacts with active
     regions. Compared to multiplying independent stellar and transit light
     curves, this correctly handles:
-      • Planet occulting a spot (spot-crossing anomaly).
-      • Planet occulting a facula (facula-crossing anomaly).
-      • The varying limb-darkening depth of the transit as a function of
-        the stellar surface brightness profile.
+
+    - Planet occulting a spot (spot-crossing anomaly).
+    - Planet occulting a facula (facula-crossing anomaly).
+    - The varying limb-darkening depth of the transit as a function of
+      the stellar surface brightness profile.
 
     Parameters
     ----------
