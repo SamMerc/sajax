@@ -77,3 +77,7 @@ suppress_warnings = ["autoapi.python_import_resolution"]
 
 nb_execution_excludepatterns = []
 plot_include_source = True
+
+# The example notebooks are committed with their outputs already generated
+# Trust the stored outputs instead of re-executing at doc-build time.
+nb_execution_mode = "off"
