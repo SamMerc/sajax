@@ -26,15 +26,15 @@ Key Features
    :caption: Get Started
 
    installation
-   usage
-   examples/comparison
+   quickstart
 
 .. toctree::
    :maxdepth: 1
    :caption: Tutorials
 
-   examples/quickstart
+   examples/introduction
    examples/inference
+   examples/comparison
 
 
 .. toctree::
