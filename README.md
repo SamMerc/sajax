@@ -52,9 +52,10 @@ sajax/
 │   ├── planet.py            # planet orbital dynamics
 │   ├── geometry.py          # rotation matrices, coordinate transforms
 ├── docs/
-│   ├── quickstart.ipynb
-│   ├── comparison.ipynb
-│   ├── inference.ipynb
+│   ├── examples/
+│   │   ├── introduction.ipynb
+│   │   ├── comparison.ipynb
+│   │   ├── inference.ipynb
 ├── tests/
 │   ├── test_core.py
 │   ├── test_planet.py

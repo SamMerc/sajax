@@ -36,6 +36,7 @@ cuda = ["jax[cuda12]>=0.4; sys_platform == 'linux' and platform_machine == 'x86_
 examples = [
     "speclib; python_version >= '3.11' and python_version < '3.14'",
     "exotic-ld",
+    "ipywidgets",
     "setuptools<81",
     "astropy>=5",
     "pillow",
