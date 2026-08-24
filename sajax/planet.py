@@ -46,7 +46,7 @@ Minimum parameter set
 ``sp_orb``
    sky-projected spin-orbit angle, λ [rad]. ``sp_orb`` rotates the
    transit chord about the stellar centre, in the sky plane. Angle is
-   relative to the star's spin axis.
+   relative to the stellar equator.
 ``k``
    planet-to-star radius ratio Rp / R*
 
