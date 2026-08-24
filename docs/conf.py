@@ -31,6 +31,20 @@ root_doc = "index"
 html_theme_options = {
     "repository_url": "https://github.com/SamMerc/sajax",
     "use_repository_button": True,
+    "path_to_docs": "docs",
+    "repository_branch": "main",
+    "launch_buttons": {
+        # Binder builds the environment from binder/requirements.txt (an
+        # `uv export` of the docs+examples dependency set -- regenerate with
+        # `uv export --format requirements-txt --extra docs --group examples
+        # --no-hashes --quiet > binder/requirements.txt` after touching
+        # pyproject.toml/uv.lock) and binder/runtime.txt (Python version).
+        # Colab has no repo checkout, so each notebook installs itself from
+        # that same file in its own first cell -- see there for details.
+        "binderhub_url": "https://mybinder.org",
+        "colab_url": "https://colab.research.google.com",
+        "notebook_interface": "jupyterlab",
+    },
 }
 
 nb_render_image_options = {"align": "center"}
