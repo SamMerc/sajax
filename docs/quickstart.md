@@ -35,7 +35,7 @@ It takes stellar, active region, and orbital parameters, as well as timing infor
 | `ar_smoothness` | Super-Gaussian order of the AR edge (higher = sharper) | `4.0` |
 | `times` | Absolute observation times [days] | `jnp.linspace(0, 10, 50, endpoint=False)` |
 | `P_rot` | Stellar rotation period [days] | `10.0` |
-| `stellar_grid_size` | Stellar grid resolution [pixels/side] | `100` |
+| `stellar_grid_size` | Stellar grid radius [pixels] | `100` |
 | `t0`, `period`, `a_over_rstar`, `inclination`, `k` | Transit geometry (all-or-nothing) — mid-transit epoch [days], orbital period [days], a/R\*, orbital inclination [rad], and Rp/R\* | `k=0.1` |
 | `ecc`, `omega_peri` | Orbital eccentricity and argument of periastron [rad] *(optional, default circular)* | `0.0`, `0.0` |
 | `sp_orb` | Sky-projected spin-orbit angle λ [deg] — rotates the transit chord relative to the stellar spin axis *(optional, default 0.0 = aligned)* | `90.0` (polar) |
