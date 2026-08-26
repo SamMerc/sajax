@@ -13,6 +13,7 @@ from sajax.planet import (
     _kepler,
     planet_sky_position,
     compute_planet_sky_positions,
+    compute_multi_planet_sky_positions,
     build_transit_model,
     stellar_density_to_a_over_rstar,
     a_over_rstar_to_stellar_density,
@@ -447,6 +448,99 @@ class TestComputePlanetSkyPositions:
 
 
 # ===================================================================
+# 3b.  compute_multi_planet_sky_positions
+# ===================================================================
+
+class TestComputeMultiPlanetSkyPositions:
+
+    _kw2 = dict(
+        t0=[0.0, 2.0], period=[5.0, 11.0], a_over_rstar=[15.0, 25.0],
+        inclination=[np.pi / 2.0, np.pi / 2.0], ecc=[0.0, 0.0],
+        omega_peri=[0.0, 0.0],
+    )
+
+    def test_output_shape_nplanet_one(self):
+        times = jnp.linspace(-0.5, 0.5, 80)
+        xyz = compute_multi_planet_sky_positions(
+            times, t0=0.0, period=5.0, a_over_rstar=15.0,
+            inclination=np.pi / 2.0,
+        )
+        assert xyz.shape == (80, 1, 3)
+
+    def test_output_shape_multi(self):
+        times = jnp.linspace(-0.5, 0.5, 80)
+        xyz = compute_multi_planet_sky_positions(times, **self._kw2)
+        assert xyz.shape == (80, 2, 3)
+
+    def test_nplanet_one_matches_compute_planet_sky_positions(self):
+        """Regression pin: nplanet=1 must exactly equal the single-planet fn."""
+        times = jnp.linspace(-0.2, 0.2, 30)
+        xyz_multi = compute_multi_planet_sky_positions(
+            times, t0=0.0, period=5.0, a_over_rstar=15.0,
+            inclination=np.pi / 2.0, ecc=0.1, omega_peri=0.3,
+        )
+        xyz_single = compute_planet_sky_positions(
+            times, 0.0, 5.0, 15.0, np.pi / 2.0, 0.1, 0.3,
+        )
+        np.testing.assert_allclose(
+            np.array(xyz_multi[:, 0, :]), np.array(xyz_single), atol=1e-5,
+        )
+
+    def test_each_planet_matches_independent_scalar_calls(self):
+        """Each planet's column must match a separate scalar-orbit call."""
+        times = jnp.linspace(-0.2, 0.2, 30)
+        xyz = compute_multi_planet_sky_positions(times, **self._kw2)
+        for i in range(2):
+            expected = compute_planet_sky_positions(
+                times,
+                self._kw2["t0"][i], self._kw2["period"][i],
+                self._kw2["a_over_rstar"][i], self._kw2["inclination"][i],
+                self._kw2["ecc"][i], self._kw2["omega_peri"][i],
+            )
+            np.testing.assert_allclose(
+                np.array(xyz[:, i, :]), np.array(expected), atol=1e-5,
+                err_msg=f"Mismatch for planet {i}",
+            )
+
+    def test_scalar_broadcasts_to_all_planets(self):
+        """A scalar param (e.g. period shared by all planets) broadcasts."""
+        times = jnp.linspace(-0.2, 0.2, 20)
+        xyz = compute_multi_planet_sky_positions(
+            times, t0=[0.0, 2.0], period=5.0, a_over_rstar=15.0,
+            inclination=np.pi / 2.0,
+        )
+        expected0 = compute_planet_sky_positions(times, 0.0, 5.0, 15.0, np.pi / 2.0, 0.0, 0.0)
+        expected1 = compute_planet_sky_positions(times, 2.0, 5.0, 15.0, np.pi / 2.0, 0.0, 0.0)
+        np.testing.assert_allclose(np.array(xyz[:, 0, :]), np.array(expected0), atol=1e-5)
+        np.testing.assert_allclose(np.array(xyz[:, 1, :]), np.array(expected1), atol=1e-5)
+
+    def test_size_mismatch_raises(self):
+        times = jnp.linspace(-0.2, 0.2, 10)
+        with pytest.raises(ValueError):
+            compute_multi_planet_sky_positions(
+                times, t0=[0.0, 2.0, 4.0], period=[5.0, 11.0],
+                a_over_rstar=15.0, inclination=np.pi / 2.0,
+            )
+
+    def test_grad_through_one_planets_t0(self):
+        """jax.grad through a multi-planet call is finite (vmap-through-grad
+        works) -- the underlying Kepler-solver math is untouched and already
+        covered by TestOrbitalParamGradientsFD, so this is a smoke test."""
+        times = jnp.linspace(-0.2, 0.2, 20)
+
+        def f(t0_0):
+            t0 = jnp.stack([t0_0, jnp.asarray(2.0)])
+            xyz = compute_multi_planet_sky_positions(
+                times, t0=t0, period=jnp.asarray([5.0, 11.0]),
+                a_over_rstar=jnp.asarray(15.0), inclination=jnp.asarray(np.pi / 2.0),
+            )
+            return jnp.sum(xyz[:, 0, :] ** 2)
+
+        g = jax.grad(f)(jnp.asarray(0.0))
+        assert np.isfinite(float(g))
+
+
+# ===================================================================
 # 4.  build_transit_model
 # ===================================================================
 
@@ -464,7 +558,7 @@ class TestBuildTransitModel:
     def test_xyz_shape_matches_times(self):
         times = np.linspace(-0.2, 0.2, 50)
         tm = build_transit_model(times=times, **self._kw)
-        assert tm["planet_xyz"].shape == (50, 3)
+        assert tm["planet_xyz"].shape == (50, 1, 3)
 
     def test_k_stored_correctly(self):
         times = np.array([0.0])
@@ -474,7 +568,7 @@ class TestBuildTransitModel:
     def test_mid_transit_Z_positive(self):
         """At t=t0, Z (column 2) should be positive."""
         tm = build_transit_model(times=np.array([0.0]), **self._kw)
-        assert float(tm["planet_xyz"][0, 2]) > 0
+        assert float(tm["planet_xyz"][0, 0, 2]) > 0
 
     def test_default_circular_orbit(self):
         """Default ecc=0, omega_peri=0 should work without explicit kwargs."""
@@ -490,6 +584,20 @@ class TestBuildTransitModel:
             inclination=np.pi / 2.0, k=0.1, ecc=0.3, omega_peri=np.pi / 2.0,
         )
         assert np.all(np.isfinite(np.array(tm["planet_xyz"])))
+
+    def test_nplanet_key_present_and_correct(self):
+        tm = build_transit_model(times=np.array([0.0]), **self._kw)
+        assert tm["nplanet"] == 1
+
+    def test_multi_planet_shape(self):
+        times = np.linspace(-0.2, 0.2, 50)
+        tm = build_transit_model(
+            times=times, t0=[0.0, 2.5], period=[5.0, 11.0],
+            a_over_rstar=[15.0, 25.0], inclination=[np.pi / 2.0, np.pi / 2.0],
+            k=[0.1, 0.05],
+        )
+        assert tm["planet_xyz"].shape == (50, 2, 3)
+        assert tm["nplanet"] == 2
 
 
 # ===================================================================
@@ -544,7 +652,7 @@ class TestTimePrecision:
         times = self._bjd_times(n=50, half_width=0.1)
         tm = build_transit_model(times=times, t0=self._t0_bjd, **self._kw)
         xyz = np.array(tm["planet_xyz"])
-        assert len(np.unique(xyz[:, 0])) == len(times)
+        assert len(np.unique(xyz[:, 0, 0])) == len(times)
 
     def test_x64_build_transit_model_matches_reduced_time_reference(self, _x64_enabled):
         """
@@ -683,7 +791,7 @@ class TestTimePrecision:
         with warnings.catch_warnings():
             warnings.simplefilter("error")
             tm = build_transit_model(times=times, t0=self._t0_bjd, **self._kw)
-        assert tm["planet_xyz"].shape == (5, 3)
+        assert tm["planet_xyz"].shape == (5, 1, 3)
 
 
 # ===================================================================

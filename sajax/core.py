@@ -117,7 +117,7 @@ from jax import vmap
 import interpax
 
 from .geometry import rotate_active_region
-from .planet import _compute_planet_mask, compute_planet_sky_positions
+from .planet import _compute_all_planets_mask, compute_multi_planet_sky_positions
 
 # Type alias
 LdMode = Literal[
@@ -462,7 +462,7 @@ def _flux_at_wavelength(
     ld_coeffs_active_wl: jnp.ndarray, # (nar, n_coeffs)
     I_prof_quiet_wl:      jnp.ndarray, # (n_mu_pts,)
     I_prof_active_wl:     jnp.ndarray, # (nar, n_mu_pts)
-    k_wl:                 float,      # Rp / R* at this wavelength
+    k_wl:                 jnp.ndarray, # (nplanet,) Rp / R* of every planet at this wavelength
     # --- broadcast: shared across wavelengths ---
     wavelength_grid: jnp.ndarray, # (nwave,) full spectral axis
     flux_quiet:      jnp.ndarray, # (nwave,) full quiet-photosphere spectrum
@@ -473,7 +473,7 @@ def _flux_at_wavelength(
     x_disc:          jnp.ndarray, # (total_pixels,) -- for the per-wavelength planet mask
     y_disc:          jnp.ndarray, # (total_pixels,)
     star_pixel_rad:  float,
-    planet_xyz:      jnp.ndarray, # (3,) planet sky position, shared across wavelengths
+    planet_xyz:      jnp.ndarray, # (nplanet, 3) planet sky positions, shared across wavelengths
     transit_softness: float,
     mu_profile_pts:  jnp.ndarray, # (n_mu_pts,)
     col_idx:         jnp.ndarray, # (total_pixels,) int
@@ -501,19 +501,24 @@ def _flux_at_wavelength(
     generality; the mask itself is a cheap elementwise op over the pixel
     grid relative to the rest of this function.
 
+    Every planet's mask is combined multiplicatively via
+    ``_compute_all_planets_mask`` -- planets are opaque occulters, so
+    overlapping planets' "surviving flux" fractions multiply rather than
+    sum. The exception is when ``nplanets=1``: in that case the code 
+    defaults back to using ``_compute_planet_mask``. This ensures there is
+    no loss in computational cost in the ``nplanets=1`` case.
+
     All arrays are 1D (in-disc pixels only) - no starmask needed.
-    The planet mask is 1 for pixels occulted by the planet; those pixels
-    contribute zero flux regardless of active-region status.
+    The combined planet mask is 1 for pixels occulted by any planet; those
+    pixels contribute zero flux regardless of active-region status.
 
     Returns
     -------
     total_flux : float            - active-region'ed integrated flux
     arted_flux : (total_pixels,)  - per-pixel flux values (for map output)
     """
-    planet_mask = _compute_planet_mask(
-        x_disc, y_disc, star_pixel_rad,
-        planet_xyz[0], planet_xyz[1], planet_xyz[2], k_wl,
-        transit_softness,
+    planet_mask = _compute_all_planets_mask(
+        x_disc, y_disc, star_pixel_rad, planet_xyz, k_wl, transit_softness,
     )
 
     # ---- Per-column Doppler-shifted spectral lookup ----------------------
@@ -567,7 +572,7 @@ def _flux_at_wavelength(
 
 def _compute_single_phase(
     ar_cart_all:         jnp.ndarray,  # (nar, 3)
-    planet_xyz:          jnp.ndarray,  # (3,)
+    planet_xyz:          jnp.ndarray,  # (nplanet, 3)
     *,
     wavelength:          jnp.ndarray,  # (nwave,)
     flux_quiet:          jnp.ndarray,  # (nwave,)
@@ -586,7 +591,7 @@ def _compute_single_phase(
     total_pixels:        int,
     arsize_rads:         jnp.ndarray,  # (nar,)
     ar_smoothness:       jnp.ndarray,  # (nar,)
-    k:                   jnp.ndarray,  # (nwave,) Rp / R*, one value per wavelength
+    k:                   jnp.ndarray,  # (nplanet, nwave) Rp / R*, one value per planet per wavelength
     ld_mode:            LdMode,
     plot_map_wavelength: float,
     n:                   int,         # full grid side (for map scatter)
@@ -596,12 +601,12 @@ def _compute_single_phase(
     """
     Full spectral computation for one rotational phase, including optional
     pixel-level planet occultation.
-    ``planet_xyz`` is the planet's sky-plane position (X, Y, Z) in stellar
-    radii -- the same at every wavelength (the orbit doesn't depend on
-    wavelength). ``k`` may still differ per wavelength (a chromatic transit
-    depth), so the occultation mask itself is computed per wavelength inside
-    ``_flux_at_wavelength``, not once here. Pass
-    ``jnp.array([0., 0., -1e10])`` and an all-zero ``k`` to disable the
+    ``planet_xyz`` holds every planet's sky-plane position (X, Y, Z) in
+    stellar radii. ``k`` differs per planet and per wavelength (to allow for 
+    chromatic transit depths), so the occultation mask itself is computed per
+    wavelength inside ``_flux_at_wavelength`` (combining all planets
+    multiplicatively via ``_compute_all_planets_mask``), not once here. Pass
+    ``jnp.array([[0., 0., -1e10]])`` and an all-zero ``k`` to disable the
     transit mask (no performance cost -- the mask is all-False).
 
     Returns
@@ -624,9 +629,10 @@ def _compute_single_phase(
 
     # ---- vmap over wavelengths ----
     # ld_coeffs_active/I_profile_active have the wavelength axis second
-    # (nar, nwave, ...), so they vmap on axis=1; everything else vmaps on
-    # its leading (wavelength) axis -- including k now, so the planet mask
-    # (computed inside _flux_at_wavelength) can differ per wavelength too.
+    # (nar, nwave, ...), so they vmap on axis=1; k now has the same layout
+    # (nplanet, nwave), so it also vmaps on axis=1 -- everything else vmaps
+    # on its leading (wavelength) axis, so the planet mask (computed inside
+    # _flux_at_wavelength) can differ per wavelength too.
     _flux_vmap = vmap(
         functools.partial(
             _flux_at_wavelength,
@@ -646,7 +652,7 @@ def _compute_single_phase(
             vel_col          = vel_col,
             ld_mode         = ld_mode,
         ),
-        in_axes=(0, 0, 1, 0, 1, 0),
+        in_axes=(0, 0, 1, 0, 1, 1),
     )
 
     flux_per_wavelength, flux_discs = _flux_vmap(
@@ -672,7 +678,7 @@ def _compute_single_phase(
 
 def _compute_all_phases(
     all_ar_carts:    jnp.ndarray,   # (nphase, nar, 3)
-    planet_xyz_all:  jnp.ndarray,   # (nphase, 3)
+    planet_xyz_all:  jnp.ndarray,   # (nphase, nplanet, 3)
     *,
     wavelength:          jnp.ndarray,
     flux_quiet:          jnp.ndarray,
@@ -691,7 +697,7 @@ def _compute_all_phases(
     total_pixels:        int,
     arsize_rads:         jnp.ndarray,
     ar_smoothness:       jnp.ndarray,
-    k:                   jnp.ndarray,  # (nwave,) Rp / R★, one value per wavelength
+    k:                   jnp.ndarray,  # (nplanet, nwave) Rp / R★, one value per planet per wavelength
     ld_mode:            LdMode,
     plot_map_wavelength: float,
     n:                   int,
@@ -701,9 +707,9 @@ def _compute_all_phases(
     """
     vmap ``_compute_single_phase`` over the phase axis.
 
-    ``planet_xyz_all`` contains the planet (X, Y, Z) position at each
+    ``planet_xyz_all`` contains every planet's (X, Y, Z) position at each
     (oversampled) phase, shared across every wavelength. Pass
-    ``jnp.full((nphase, 3), [0, 0, -1e10])`` and an all-zero ``k`` to
+    ``jnp.full((nphase, 1, 3), [0, 0, -1e10])`` and an all-zero ``k`` to
     disable transit (no performance overhead).
 
     Returns
@@ -753,7 +759,7 @@ def _compute_all_phases_evolving(
     arsize_rads_all:    jnp.ndarray,   # (nphase, nar) radians
     ar_smoothness_all:  jnp.ndarray,   # (nphase, nar)
     flux_active_all:    jnp.ndarray,   # (nphase, nar, nwave)
-    planet_xyz_all:     jnp.ndarray,   # (nphase, 3)
+    planet_xyz_all:     jnp.ndarray,   # (nphase, nplanet, 3)
     phases_rot:         jnp.ndarray,   # (nphase,) degrees -- stellar rotation phase
     *,
     inc_star:           float,
@@ -771,7 +777,7 @@ def _compute_all_phases_evolving(
     vel_col:            jnp.ndarray,
     star_pixel_rad:     float,
     total_pixels:       int,
-    k:                  jnp.ndarray,
+    k:                  jnp.ndarray,  # (nplanet, nwave)
     ld_mode:            LdMode,
     plot_map_wavelength:float,
     n:                  int,
@@ -901,6 +907,75 @@ def _prepare_ld_coeffs(raw, ld_mode: LdMode, nwave: int, label: str,
     return coeffs
 
 
+def _prepare_transit_k(
+    k, nplanet: int, nwave: int,
+) -> jnp.ndarray:
+    """
+    Validate and broadcast the planet-to-star radius ratio to (nplanet, nwave).
+
+    Accepted input shapes
+    ~~~~~~~~~~~~~~~~~~~~~
+    - scalar                          -> same value for every planet and wavelength
+    - (nplanet,)                      -> one achromatic value per planet,
+                                         broadcast across wavelength
+    - (nplanet, nwave)                -> fully chromatic, independent per
+                                         planet and wavelength
+    - (nwave,), only when nplanet==1 and nwave>1
+                                      -> legacy single-planet chromatic depth
+                                         (pre-multi-planet convention),
+                                         unambiguous since it can't collide
+                                         with the (nplanet,)=(1,) case when
+                                         nwave != 1
+
+    A bare 1D array is *always* interpreted as per-planet (never
+    per-wavelength) outside of the narrow nplanet==1 case.
+    This matches every other transit parameter's "1D = trailing nplanet
+    axis" convention (see ``compute_multi_planet_sky_positions``) and
+    removes any nplanet-vs-nwave length-collision ambiguity.
+
+    Parameters
+    ----------
+    k       : scalar or array_like, one of the shapes above
+    nplanet : number of planets
+    nwave   : number of wavelength bins
+
+    ``k`` is not forced to a particular dtype here (unlike most other
+    build-time-only arrays) -- ``make_lc``'s dynamic-override path may pass a
+    traced ``k`` through this function, and gradients w.r.t. ``k`` must keep
+    flowing (mirrors the pre-multi-planet code, which likewise left a
+    dynamically-overridden ``k`` uncast).
+
+    Returns
+    -------
+    jnp.ndarray, shape (nplanet, nwave)
+    """
+    k_arr = jnp.atleast_1d(jnp.asarray(k))
+
+    if k_arr.ndim == 1:
+        if k_arr.shape[0] == 1:
+            return jnp.broadcast_to(k_arr, (nplanet, nwave))
+        if nplanet == 1 and nwave > 1 and k_arr.shape[0] == nwave:
+            return k_arr[None, :]   # legacy single-planet chromatic depth
+        if k_arr.shape[0] == nplanet:
+            return jnp.broadcast_to(k_arr[:, None], (nplanet, nwave))
+        raise ValueError(
+            f"k shape mismatch: got a 1D array of length "
+            f"{k_arr.shape[0]}, but a 1D k is interpreted as "
+            f"one achromatic value per planet and must have length "
+            f"nplanet ({nplanet})"
+            + (f" or, for a single planet, nwave ({nwave})." if nplanet == 1 else ".")
+        )
+
+    if k_arr.shape == (nplanet, nwave):
+        return k_arr
+
+    raise ValueError(
+        f"k shape mismatch: got shape {k_arr.shape}, but expected a "
+        f"scalar, ({nplanet},) [per-planet, achromatic], or ({nplanet}, {nwave}) "
+        "[per-planet, per-wavelength]."
+    )
+
+
 def build_system(
     wavelength: np.ndarray,
     flux_quiet: np.ndarray,
@@ -946,9 +1021,12 @@ def build_system(
     Transit (optional, all-or-nothing) -- give every one of ``t0``,
     ``period``, ``a_over_rstar``, ``inclination``, ``k`` to attach a
     planetary transit to the model, or omit all five for a quiet-star/
-    active-region-only model. When occulting a starspot or facula, the
-    planet mask is applied at the individual pixel level, so the resulting
-    light-curve anomaly is computed correctly -- see
+    active-region-only model. Multiple planets are supported the same way
+    active regions are: give ``t0`` (and, as needed, the other transit
+    parameters) a trailing ``(nplanet,)`` axis instead of a scalar --
+    ``nplanet`` is inferred from ``t0``. When occulting a starspot or
+    facula, the planet mask is applied at the individual pixel level, so the
+    resulting light-curve anomaly is computed correctly -- see
     ``make_lc`` for details on how this interacts with active
     regions. Compared to multiplying independent stellar and transit light
     curves, this correctly handles:
@@ -1011,23 +1089,40 @@ def build_system(
         need to be interpolated onto ``oversample``'d sub-exposures.
         Only matters when ``oversample > 1`` and at least one AR parameter
         is time-varying -- see ``make_lc`` for the full description.
-    t0, period, a_over_rstar, inclination : float, optional
+    t0, period, a_over_rstar, inclination : float or array-like, shape (nplanet,), optional
         Transit-geometry parameters: mid-transit epoch, orbital period [days],
         semi-major axis/R*, and orbital inclination [rad]. All-or-nothing with
-        ``k``.
-    k : float or array-like, shape (nwave,), optional
-        Planet-to-star radius ratio Rp/R*. A scalar (achromatic) or an
-        array of length ``nwave`` (chromatic transit depth).
-    ecc, omega_peri : float, optional
+        ``k``. Each is a scalar or an array with a trailing ``(nplanet,)``
+        axis -- exactly like ``ar_lat``/``ar_long``/etc. for active regions
+        (see ``make_lc``) -- with ``nplanet`` inferred from ``t0``'s trailing
+        axis. A scalar (or size-1 array) among the others broadcasts to every
+        planet; giving more than one planet requires giving each of these
+        four its own length-``nplanet`` array (or leaving it scalar to share
+        one value across all planets).
+    k : float or array-like, shape (nplanet,) or (nplanet, nwave), optional
+        Planet-to-star radius ratio Rp/R*. A scalar (the same value for
+        every planet and wavelength), an array of length ``nplanet`` (one
+        achromatic value per planet), or an array of shape
+        ``(nplanet, nwave)`` (a chromatic transit depth, independent per
+        planet). For a single planet (``nplanet == 1``), a bare array of
+        length ``nwave`` is also accepted as that planet's chromatic depth
+        (legacy convention). Multiple overlapping planets combine their
+        occultation multiplicatively (they are opaque, unlike active
+        regions' additive contrast -- see ``make_lc``), so overlapping
+        transits never drive flux negative.
+    ecc, omega_peri : float or array-like, shape (nplanet,), optional
         Orbital eccentricity and argument of periastron [rad]. Only
         meaningful together with a transit; default to 0.0 (circular,
-        non-precessing orbit).
-    sp_orb : sky-projected spin-orbit angle, λ  [deg]
+        non-precessing orbit). Scalar or ``(nplanet,)``, same broadcasting
+        rule as ``t0``/``period``/etc.
+    sp_orb : float or jnp.ndarray, shape (nplanet,), optional
+        sky-projected spin-orbit angle, λ  [deg]
         Rotates the transit chord about the stellar
         centre, in the sky plane. Angle is relative to the
         stellar equator. Only meaningful together with a transit.
         Converted to radians internally before use --
         ``sajax.planet.planet_sky_position`` itself takes radians.
+        Scalar or ``(nplanet,)``, same broadcasting rule as ``t0``/``period``/etc.
     verbose : bool, optional
         If True, print informational messages (LDC broadcasting, phase
         oversampling) while building the model. Default False.
@@ -1153,32 +1248,40 @@ def build_system(
     if all(given):
         from .planet import build_transit_model   # local import avoids circular dep.
 
-        # ---- Validate k against the wavelength grid (scalar or per-wavelength)
-        k_arr = np.atleast_1d(np.asarray(k, dtype=np.float32))
-        if k_arr.size not in (1, nwave):
-            raise ValueError(
-                f"k shape mismatch: got size {k_arr.size} but wavelength grid has "
-                f"{nwave} bin(s). k must be a scalar (the same Rp/R* at every "
-                f"wavelength) or an array of length {nwave} (a chromatic transit depth)."
-            )
+        # ---- nplanet is inferred from t0's trailing axis, exactly like nar
+        # is inferred from ar_lat's trailing axis in make_lc -----------------
+        t0_arr  = np.atleast_1d(np.asarray(t0, dtype=np.float64))
+        nplanet = t0_arr.shape[-1]
+
+        # ---- Validate/broadcast k against nplanet and the wavelength grid --
+        k_dense = _prepare_transit_k(k, nplanet, nwave)
+
+        # ---- Array-preserving normalisation of the other orbital elements --
+        period_arr       = np.atleast_1d(np.asarray(period, dtype=np.float32))
+        a_over_rstar_arr = np.atleast_1d(np.asarray(a_over_rstar, dtype=np.float32))
+        inclination_arr  = np.atleast_1d(np.asarray(inclination, dtype=np.float32))
+        ecc_arr          = np.atleast_1d(np.asarray(ecc, dtype=np.float32))
+        omega_peri_arr   = np.atleast_1d(np.asarray(omega_peri, dtype=np.float32))
+        sp_orb_arr       = np.atleast_1d(np.asarray(sp_orb, dtype=np.float32))
 
         # ---- Build transit model (planet positions at oversampled times) ---
         transit = build_transit_model(
             times        = times_oversampled,
-            t0           = float(t0) - t_ref,
-            period       = float(period),
-            a_over_rstar = float(a_over_rstar),
-            inclination  = float(inclination),
-            ecc          = float(ecc),
-            omega_peri   = float(omega_peri),
-            k            = k_arr,
-            sp_orb       = float(np.deg2rad(sp_orb)),   # sp_orb is given in degrees; planet.py takes radians
+            t0           = t0_arr - t_ref,
+            period       = period_arr,
+            a_over_rstar = a_over_rstar_arr,
+            inclination  = inclination_arr,
+            ecc          = ecc_arr,
+            omega_peri   = omega_peri_arr,
+            k            = k_dense,
+            sp_orb       = np.deg2rad(sp_orb_arr),   # sp_orb is given in degrees; planet.py takes radians
         )
 
         # ---- Attach transit data to the model dict --------------------------
-        model["planet_xyz"]  = transit["planet_xyz"]   # (nphase_compute, 3) -- static, from the
+        model["planet_xyz"]  = transit["planet_xyz"]   # (nphase_compute, nplanet, 3) -- static, from the
                                                         #   concrete parameters given here
-        model["k"]           = transit["k"]
+        model["k"]           = transit["k"]            # (nplanet, nwave)
+        model["nplanet"]     = transit["nplanet"]
         model["has_transit"] = True
         model["P_rot"]       = P_rot
         # Defaults for make_lc's dynamic path: t0/period/a_over_rstar/
@@ -1204,14 +1307,14 @@ def make_lc(
     ld_coeffs_active: Optional[jnp.ndarray] = None,
     I_profile_active: Optional[jnp.ndarray] = None,
     ld_coeffs_quiet: Optional[jnp.ndarray] = None,
-    t0: Optional[float] = None,
-    period: Optional[float] = None,
-    a_over_rstar: Optional[float] = None,
-    inclination: Optional[float] = None,
-    ecc: Optional[float] = None,
-    omega_peri: Optional[float] = None,
-    sp_orb: Optional[float] = None,
-    k: Optional[float] = None,
+    t0: Optional[float | jnp.ndarray] = None,
+    period: Optional[float | jnp.ndarray] = None,
+    a_over_rstar: Optional[float | jnp.ndarray] = None,
+    inclination: Optional[float | jnp.ndarray] = None,
+    ecc: Optional[float | jnp.ndarray] = None,
+    omega_peri: Optional[float | jnp.ndarray] = None,
+    sp_orb: Optional[float | jnp.ndarray] = None,
+    k: Optional[float | jnp.ndarray] = None,
     transit_softness: float = 0.0,
 ) -> tuple:
     """
@@ -1293,31 +1396,45 @@ def make_lc(
         When given, active regions that don't specify their own
         ``ld_coeffs_active`` default to this (possibly traced) value too,
         instead of the static one.
-    t0, period, a_over_rstar, inclination : float, optional
+    t0, period, a_over_rstar, inclination : float or jnp.ndarray, shape (nplanet,), optional
         Transit-geometry parameters: mid-transit epoch, orbital period [days],
-        semi-major axis/R*, and orbital inclination [rad]. 
-    k : float or jnp.ndarray, shape (nwave,), optional
-        Planet-to-star radius ratio Rp/R*. A scalar (achromatic) or an
-        array of length ``nwave`` (chromatic transit depth).
+        semi-major axis/R*, and orbital inclination [rad]. Scalar or
+        ``(nplanet,)``, same trailing-axis convention as ``build_system``
+        (``nplanet`` inferred from ``t0``). When overriding a model built
+        with a different ``nplanet``, also override ``ecc``/``omega_peri``/
+        ``sp_orb`` if you don't want them to fall back to the build-time defaults.
+    k : float or array-like, shape (nplanet,) or (nplanet, nwave), optional
+        Planet-to-star radius ratio Rp/R*. A scalar (the same value for
+        every planet and wavelength), an array of length ``nplanet`` (one
+        achromatic value per planet), or an array of shape
+        ``(nplanet, nwave)`` (a chromatic transit depth, independent per
+        planet). For a single planet (``nplanet == 1``), a bare array of
+        length ``nwave`` is also accepted as that planet's chromatic depth
+        (legacy convention). Multiple overlapping planets combine their
+        occultation multiplicatively (they are opaque, unlike active
+        regions' additive contrast -- see ``make_lc``), so overlapping
+        transits never drive flux negative.
         The planet's parameters are all-or-nothing, exactly like the AR parameters:
         give every one of them to evaluate a transit at those (possibly
         traced) values instead of the static ones ``model`` was built
         with, or omit all five to fall back to the model's static transit
         (or to no transit, if it doesn't have one) -- ``ValueError`` if
         only some are given.
-    ecc, omega_peri : float, optional
+    ecc, omega_peri : float or jnp.ndarray, shape (nplanet,), optional
         Orbital eccentricity and argument of periastron [rad]. Only
         meaningful together with a transit; default to 0.0 (circular,
         non-precessing orbit). Only used together with the five required
         transit parameters above (giving either of these without the rest
         also raises ``ValueError``). Default to the values ``model``'s transit
-        was built with.
-    sp_orb : float, optional
+        was built with. Scalar or ``(nplanet,)``, same broadcasting
+        rule as ``t0``/``period``/etc.
+    sp_orb : float or jnp.ndarray, shape (nplanet,), optional
         Sky-projected spin-orbit angle λ [deg]. Same all-or-nothing-with-
         ``ecc``/``omega_peri`` treatment: only used together with a
         transit, defaults to the value ``model``'s transit was built with
         (also in degrees). Converted to radians internally before use --
-        ``sajax.planet.planet_sky_position`` itself takes radians.
+        ``sajax.planet.planet_sky_position`` itself takes radians. Scalar or ``(nplanet,)``,
+        same broadcasting rule as ``t0``/``period``/etc.
     transit_softness : float, optional
         Sigmoid transition width [R*] for the planet occultation mask
         (default 0.0: exact hard edge, matching the physical simulation).
@@ -1335,8 +1452,11 @@ def make_lc(
     (lc, star_maps) tuple
     ~~~~~~~~~~~~~~~~~~~~~
     ``lc``        - (ntimes, nwave) disc-integrated flux at each
-                    wavelength bin, in the same units as ``flux_quiet``/``flux_active``.
-                    If ``nwave == 1``, the wavelength axis is dropped and this is shape (ntimes,).
+                    wavelength bin, in the same units as
+                    ``flux_quiet``/``flux_active`` (not normalised to the
+                    quiet-star baseline -- divide by that yourself if you
+                    want relative flux). If ``nwave == 1``, the wavelength
+                    axis is dropped and this is shape (ntimes,).
     ``star_maps`` - (ntimes, n, n) stellar flux map per phase
                     (maps are from the *first* sub-exposure of each phase
                     when oversampling is active)
@@ -1713,9 +1833,14 @@ def make_lc(
     if _transit_given:
         # Dynamic path: recompute positions from (possibly traced) orbital
         # parameters every call, exactly like ar_cart is recomputed from
-        # ar_lat/ar_long every call. k_val is deliberately left as-is
-        # (not float()-cast) so gradients w.r.t. k propagate through
-        # _compute_planet_mask, which is written to accept a traced k.
+        # ar_lat/ar_long every call. k_val is deliberately left as-is here
+        # (uncast) so gradients w.r.t. k propagate through
+        # _compute_all_planets_mask, which is written to accept a traced k.
+        # nplanet is inferred fresh from this call's own t0 -- if
+        # ecc/omega_peri/sp_orb are *not* overridden here and the caller
+        # changed nplanet via t0, the stale-length fallback array below will
+        # make compute_multi_planet_sky_positions raise a clear shape error;
+        # override ecc/omega_peri/sp_orb too when changing nplanet dynamically.
         _defaults  = model["transit_params"]
         ecc_val        = ecc        if ecc        is not None else _defaults.get("ecc", 0.0)
         omega_peri_val = omega_peri if omega_peri is not None else _defaults.get("omega_peri", 0.0)
@@ -1724,32 +1849,31 @@ def make_lc(
         # model["times_oversampled"] was already shifted by model["t_ref"] in
         # build_system; t0 (possibly traced/sampled here) must be shifted by
         # the same constant so time - t_peri still cancels correctly.
-        planet_xyz_all = compute_planet_sky_positions(
+        planet_xyz_all = compute_multi_planet_sky_positions(
             model["times_oversampled"], t0 - model["t_ref"], period, a_over_rstar, inclination,
             ecc_val, omega_peri_val, sp_orb_val,
-        )
+        )   # (nphase_compute, nplanet, 3)
+        nplanet = jnp.atleast_1d(jnp.asarray(t0)).shape[-1]
         k_val = k
     elif model.get("has_transit", False):
         # Static, backwards-compatible path: positions baked at build time.
-        planet_xyz_all = model["planet_xyz"]    # (nphase_compute, 3)
-        k_val          = model["k"]             # scalar or (nwave,)
+        planet_xyz_all = model["planet_xyz"]    # (nphase_compute, nplanet, 3)
+        k_val          = model["k"]             # (nplanet, nwave), already dense
+        nplanet        = model["nplanet"]
     else:
         # Dummy: planet permanently behind the star, zero-radius disc.
         nphase_compute = model["phases_rot"].shape[0]
-        planet_xyz_all = jnp.zeros((nphase_compute, 3)).at[:, 2].set(-1e10)
+        nplanet        = 1
+        planet_xyz_all = jnp.zeros((nphase_compute, 1, 3)).at[:, :, 2].set(-1e10)
         k_val          = 0.0
 
-    # ---- Broadcast k to (nwave,): a scalar means the same (achromatic)
-    # radius ratio at every wavelength; an array of shape (nwave,) gives a
-    # genuinely chromatic transit depth (the occultation mask is computed
-    # per wavelength -- see _flux_at_wavelength -- specifically to support this).
-    k_val = jnp.atleast_1d(jnp.asarray(k_val))
-    if k_val.size == 1:
-        k_val = jnp.broadcast_to(k_val, (nwave,))
-    elif k_val.shape != (nwave,):
-        raise ValueError(
-            f"k shape mismatch: got shape {k_val.shape} but expected scalar or ({nwave},)."
-        )
+    # ---- Broadcast k to (nplanet, nwave): see _prepare_transit_k for the
+    # full shape convention. A scalar means the same (achromatic) radius
+    # ratio at every planet/wavelength; a genuinely chromatic and/or
+    # per-planet depth is supported (the occultation mask is computed per
+    # wavelength -- see _flux_at_wavelength -- specifically to support this).
+    # Idempotent (a no-op) on the already-dense static-path value above.
+    k_val = _prepare_transit_k(k_val, nplanet, nwave)
 
     # ---- All-phases computation ------------------------------------------
     if not ar_time_varying:
@@ -1849,14 +1973,14 @@ def quick_lc(
     I_profile_active: Optional[np.ndarray] = None,
     plot_map_wavelength: Optional[float] = None,
     oversample: int = 1,
-    t0: Optional[float] = None,
-    period: Optional[float] = None,
-    a_over_rstar: Optional[float] = None,
-    inclination: Optional[float] = None,
+    t0: Optional[float | np.ndarray] = None,
+    period: Optional[float | np.ndarray] = None,
+    a_over_rstar: Optional[float | np.ndarray] = None,
+    inclination: Optional[float | np.ndarray] = None,
     k: Optional[float | np.ndarray] = None,
-    ecc: float = 0.0,
-    omega_peri: float = 0.0,
-    sp_orb: float = 0.0,
+    ecc: float | np.ndarray = 0.0,
+    omega_peri: float | np.ndarray = 0.0,
+    sp_orb: float | np.ndarray = 0.0,
     ar_time_interp: ArTimeInterp = "linear",
     verbose: bool = False,
 ) -> tuple:
@@ -1980,23 +2104,46 @@ def quick_lc(
         phase step, and the resulting fluxes are averaged.  This mimics
         finite-exposure integration and smooths limb-crossing artefacts.
         Default: 1 (no oversampling).
-    t0, period, a_over_rstar, inclination : float, optional
+    t0, period, a_over_rstar, inclination : float or array-like, shape (nplanet,), optional
         Transit-geometry parameters: mid-transit epoch, orbital period [days],
         semi-major axis/R*, and orbital inclination [rad]. All-or-nothing with
-        ``k``.
-    k : float or array-like, shape (nwave,), optional
-        Planet-to-star radius ratio Rp/R*. A scalar (achromatic) or an
-        array of length ``nwave`` (chromatic transit depth).
-    ecc, omega_peri : float, optional
+        ``k``. Each is a scalar or an array with a trailing ``(nplanet,)``
+        axis -- exactly like ``ar_lat``/``ar_long``/etc. for active regions
+        (see ``make_lc``) -- with ``nplanet`` inferred from ``t0``'s trailing
+        axis. A scalar (or size-1 array) among the others broadcasts to every
+        planet; giving more than one planet requires giving each of these
+        four its own length-``nplanet`` array (or leaving it scalar to share
+        one value across all planets).
+    k : float or array-like, shape (nplanet,) or (nplanet, nwave), optional
+        Planet-to-star radius ratio Rp/R*. A scalar (the same value for
+        every planet and wavelength), an array of length ``nplanet`` (one
+        achromatic value per planet), or an array of shape
+        ``(nplanet, nwave)`` (a chromatic transit depth, independent per
+        planet). For a single planet (``nplanet == 1``), a bare array of
+        length ``nwave`` is also accepted as that planet's chromatic depth
+        (legacy convention). Multiple overlapping planets combine their
+        occultation multiplicatively (they are opaque, unlike active
+        regions' additive contrast -- see ``make_lc``), so overlapping
+        transits never drive flux negative.
+        The planet's parameters are all-or-nothing, exactly like the AR parameters:
+        give every one of them to evaluate a transit at those (possibly
+        traced) values instead of the static ones ``model`` was built
+        with, or omit all five to fall back to the model's static transit
+        (or to no transit, if it doesn't have one) -- ``ValueError`` if
+        only some are given.
+    ecc, omega_peri : float or array-like, shape (nplanet,), optional
         Orbital eccentricity and argument of periastron [rad]. Only
         meaningful together with a transit; default to 0.0 (circular,
-        non-precessing orbit).
-    sp_orb : sky-projected spin-orbit angle, λ  [deg]
+        non-precessing orbit). Scalar or ``(nplanet,)``, same broadcasting
+        rule as ``t0``/``period``/etc.
+    sp_orb : float or jnp.ndarray, shape (nplanet,), optional
+        sky-projected spin-orbit angle, λ  [deg]
         Rotates the transit chord about the stellar
         centre, in the sky plane. Angle is relative to the
-        star's spin axis. Only meaningful together with a transit.
+        stellar equator. Only meaningful together with a transit.
         Converted to radians internally before use --
         ``sajax.planet.planet_sky_position`` itself takes radians.
+        Scalar or ``(nplanet,)``, same broadcasting rule as ``t0``/``period``/etc.
     ar_time_interp : "linear" or "cubic", optional (default "linear")
         Interpolation method for when time-varying active-region parameters
         need to be interpolated onto ``oversample``'d sub-exposures.

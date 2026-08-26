@@ -40,7 +40,9 @@ It takes stellar, active region, and orbital parameters, as well as timing infor
 | `ecc`, `omega_peri` | Orbital eccentricity and argument of periastron [rad] *(optional, default circular)* | `0.0`, `0.0` |
 | `sp_orb` | Sky-projected spin-orbit angle λ [deg] — rotates the transit chord relative to the stellar spin axis *(optional, default 0.0 = aligned)* | `90.0` (polar) |
 
-`ar_lat`/`ar_long`/`ar_size`/`ar_smoothness`/`flux_active` are all-or-nothing: give every one of them to add active region(s), or omit all of them for a quiet star. `t0`/`period`/`a_over_rstar`/`inclination`/`k` are likewise all-or-nothing for a transit. `k` may also be an array of shape `(nwave,)` for a chromatic transit depth.
+`ar_lat`/`ar_long`/`ar_size`/`ar_smoothness`/`flux_active` are all-or-nothing: give every one of them to add active region(s), or omit all of them for a quiet star. Each carries a trailing `(nar,)` axis (`nar` inferred from `ar_lat`), so `ar_lat=[20.0, -20.0]` etc. adds two active regions.
+
+`t0`/`period`/`a_over_rstar`/`inclination`/`k` are likewise all-or-nothing for a transit, and each is scalar or carries a trailing `(nplanet,)` axis (`nplanet` inferred from `t0`) — see case 3c below. `k` may be a scalar (the same value for every planet/wavelength), an array of shape `(nplanet,)` (one achromatic value per planet), or an array of shape `(nplanet, nwave)` (a chromatic transit depth, independent per planet); for a single planet, a bare `(nwave,)` array is also still accepted as that planet's chromatic depth.
 
 ## Key Outputs
 
@@ -120,7 +122,8 @@ in the previous code, with
 
 Active regions overlap additively — e.g. an umbra sitting inside a penumbra contributes on top of it, rather than one masking the other.
 
-### Case 3: Adding a planetary transit
+### Case 3: Planetary transit
+#### a) Basic transit + stellar activity
 
 Transit parameters are individual keyword arguments, given all together alongside the active-region ones above:
 
@@ -150,7 +153,7 @@ lc, star_maps = quick_lc(
 
 By default the occultation mask has a hard edge, which gives `jax.grad` (almost) zero gradient with respect to the transit-geometry parameters. For gradient-based retrieval of `t0`/`period`/`a_over_rstar`/`inclination`/`k`/`ecc`/`omega_peri`/`sp_orb` (_e.g._, a gradient-descent MAP approach), pass `transit_softness > 0` to `make_lc` (not exposed on `quick_lc`) — see the `inference.ipynb` example notebook for a full walkthrough.
 
-### Case 4: Misaligned transit (spin-orbit angle)
+#### b) Misaligned transit (spin-orbit angle)
 
 SAJAX fixes the stellar spin axis along the sky's north-south direction, so by default (`sp_orb=0.0`) the transit chord runs parallel to the projected stellar equator. Passing `sp_orb` rotates the chord about the stellar centre, letting you model misaligned or even polar configurations:
 
@@ -180,6 +183,30 @@ lc, star_maps = quick_lc(
 ```
 
 Since the active region's latitude/longitude are unaffected by `sp_orb` — only the planet's trajectory rotates — a spot that produces a clear crossing anomaly at `sp_orb=0` can end up entirely missed by a polar (`sp_orb≈90`) chord, even though the transit depth and duration are unchanged. See `introduction.ipynb`'s Case 6 for a full side-by-side comparison (light curve + stellar-disc animation) of an aligned vs. inclined transit of the same spot.
+
+#### c) Multiple planets
+
+Every transit-geometry parameter (`t0`/`period`/`a_over_rstar`/`inclination`/`k`, plus the optional `ecc`/`omega_peri`/`sp_orb`) carries a trailing `(nplanet,)` axis, exactly like `ar_lat`/`ar_long`/etc. do for active regions — `nplanet` is inferred from `t0`. A scalar (or size-1 array) among the others broadcasts to every planet. Replace
+
+```python
+    t0                 = 5.0,
+    period             = 3.5,
+    a_over_rstar       = 15.0,
+    inclination        = 1.55,
+    k                  = 0.1,
+```
+
+in Case 3's snippet, with
+
+```python
+    t0                 = [5.0, 8.2],       # two planets' mid-transit epochs [days]
+    period             = [3.5, 11.0],
+    a_over_rstar       = [15.0, 22.0],
+    inclination        = [1.55, 1.52],     # rad
+    k                  = [0.1, 0.05],      # Rp/R* per planet
+```
+
+Unlike active regions — which are spectral-contrast modulators and so overlap **additively** (Case 2) — planets are opaque occulters, so overlapping transits combine **multiplicatively**: the fraction of a pixel's flux surviving `nplanet` planets is `prod(1 - mask_i)`, not `1 - sum(mask_i)`. This keeps the occulted flux fraction physically bounded in `[0, 1]` even when two planets' discs overlap on the stellar grid, rather than letting their masks double-subtract past full occultation.
 
 ### Case 5: Time-evolving active regions
 

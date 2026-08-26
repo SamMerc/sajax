@@ -57,12 +57,14 @@ to occulted pixels — no separate transit LDC parameters are required.
 
 Public API
 ----------
-  ``_kepler(M, ecc)``                    — differentiable Kepler solver
-  ``planet_sky_position(...)``           — single-epoch sky coords (X, Y, Z)
-  ``compute_planet_sky_positions(...)``  — vectorised over an array of times
-  ``_compute_planet_mask(...)``          — per-pixel occultation mask
-  ``build_transit_model(...)``           — pre-compute positions for all times
-  ``stellar_density_to_a_over_rstar()``  — unit-conversion convenience
+  ``_kepler(M, ecc)``                         — differentiable Kepler solver
+  ``planet_sky_position(...)``                — single-epoch sky coords (X, Y, Z)
+  ``compute_planet_sky_positions(...)``       — vectorised over an array of times
+  ``compute_multi_planet_sky_positions(...)`` — vectorised over times AND planets
+  ``_compute_planet_mask(...)``               — per-pixel occultation mask, one planet
+  ``_compute_all_planets_mask(...)``          — per-pixel occultation mask, over multiple planets
+  ``build_transit_model(...)``                — pre-compute positions for all times/planets
+  ``stellar_density_to_a_over_rstar()``       — unit-conversion convenience
 """
 
 from __future__ import annotations
@@ -282,6 +284,80 @@ def compute_planet_sky_positions(
     return _pos
 
 
+def compute_multi_planet_sky_positions(
+    times: jnp.ndarray,
+    t0: float | jnp.ndarray,
+    period: float | jnp.ndarray,
+    a_over_rstar: float | jnp.ndarray,
+    inclination: float | jnp.ndarray,
+    ecc: float | jnp.ndarray = 0.0,
+    omega_peri: float | jnp.ndarray = 0.0,
+    sp_orb: float | jnp.ndarray = 0.0,
+) -> jnp.ndarray:
+    """
+    Multi-planet counterpart of ``compute_planet_sky_positions``.
+
+    Each orbital-element argument is scalar or shape ``(nplanet,)`` --
+    exactly the "trailing axis" convention already used for active regions
+    (``ar_lat``/``ar_long``/... in ``core.py``'s ``make_lc``). ``nplanet`` is
+    inferred from ``t0``'s trailing axis; every other argument is broadcast
+    to ``(nplanet,)`` if given as a scalar (or size-1 array), and otherwise
+    must already have length ``nplanet``.
+
+    Implemented as a thin ``vmap`` of ``compute_planet_sky_positions`` over
+    the planet axis -- ``planet_sky_position``/``compute_planet_sky_positions``
+    themselves are untouched, so this adds no risk to the underlying Kepler
+    solver. For a single planet, ``compute_planet_sky_positions`` remains the
+    simpler, preferred entry point -- this function is for ``nplanet > 1``
+    (or for callers, like ``build_transit_model``, that want to support
+    either uniformly).
+
+    Parameters
+    ----------
+    times : (ntime,) array of observation epochs
+    t0, period, a_over_rstar, inclination, ecc, omega_peri, sp_orb :
+        Scalar or ``(nplanet,)``. See ``planet_sky_position`` for units and
+        meaning. ``sp_orb`` is in radians, like ``planet_sky_position``.
+
+    Returns
+    -------
+    xyz : (ntime, nplanet, 3) array -- columns are [X, Y, Z] in units of R*
+    """
+    t0_arr = jnp.atleast_1d(jnp.asarray(t0))
+    nplanet = t0_arr.shape[-1]
+
+    def _broadcast(name, value):
+        arr = jnp.atleast_1d(jnp.asarray(value))
+        if arr.shape[-1] == 1:
+            return jnp.broadcast_to(arr, (nplanet,))
+        if arr.shape[-1] != nplanet:
+            raise ValueError(
+                f"compute_multi_planet_sky_positions: '{name}' has length "
+                f"{arr.shape[-1]} but nplanet (inferred from t0) is "
+                f"{nplanet}. Every orbital-element argument must be a "
+                "scalar or match t0's trailing axis length."
+            )
+        return arr
+
+    period_arr       = _broadcast("period", period)
+    a_over_rstar_arr = _broadcast("a_over_rstar", a_over_rstar)
+    inclination_arr  = _broadcast("inclination", inclination)
+    ecc_arr          = _broadcast("ecc", ecc)
+    omega_peri_arr   = _broadcast("omega_peri", omega_peri)
+    sp_orb_arr       = _broadcast("sp_orb", sp_orb)
+
+    times_jax = jnp.asarray(times)
+    _pos = vmap(
+        lambda t0_p, period_p, a_p, inc_p, ecc_p, omega_p, sp_p:
+            compute_planet_sky_positions(
+                times_jax, t0_p, period_p, a_p, inc_p, ecc_p, omega_p, sp_p,
+            )
+    )(t0_arr, period_arr, a_over_rstar_arr, inclination_arr, ecc_arr,
+      omega_peri_arr, sp_orb_arr)   # (nplanet, ntime, 3)
+
+    return jnp.moveaxis(_pos, 0, 1)   # (ntime, nplanet, 3)
+
+
 # ---------------------------------------------------------------------------
 # 4. Per-pixel transit mask on the sajax stellar grid
 # ---------------------------------------------------------------------------
@@ -362,6 +438,74 @@ def _compute_planet_mask(
     return jnp.where(k > 0.0, disc_mask * z_gate, jnp.zeros_like(disc_mask))
 
 
+def _compute_all_planets_mask(
+    x_disc: jnp.ndarray,    # (total_pixels,)
+    y_disc: jnp.ndarray,    # (total_pixels,)
+    star_pixel_rad: float,
+    planet_xyz: jnp.ndarray,  # (nplanet, 3)
+    k: jnp.ndarray,           # (nplanet,)
+    softness: float = 0.0,
+) -> jnp.ndarray:
+    """
+    Combine per-planet occultation masks (see ``_compute_planet_mask``) over
+    ``nplanet`` planets at a single epoch and wavelength.
+
+    Planets are opaque occulters, not spectral-contrast modulators (unlike
+    active regions, whose contrasts sum -- see core.py's module docstring),
+    so the physically correct combination for possibly-overlapping planets
+    is multiplicative: each planet's ``(1 - mask)`` is the fraction of a
+    pixel's flux that *survives* that planet, and independent survival
+    fractions multiply. This also keeps the combined result in [0, 1] for
+    overlapping planets, unlike a sum of masks (which can exceed 1 and
+    drive the "surviving flux" negative).
+
+    ``nplanet == 1`` fast path
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~
+    For a single planet, ``1 - prod([1 - mask]) == mask`` algebraically, but
+    that identity is not free at trace time: the general path below always
+    emits three real elementwise/reduction ops (subtract, product-reduce,
+    subtract), and XLA's algebraic simplifier does not reliably cancel a
+    ``1 - (1 - x)`` pattern when a ``reduce`` sits between the two
+    subtracts, even when the reduce is over a size-1 axis -- confirmed via
+    ``jax.jit(...).lower(...).compile().cost_analysis()``, which showed the
+    general path costing 2 * total_pixels more flops than
+    ``_compute_planet_mask`` alone at nplanet=1 (the two subtract passes
+    survive compilation; only the reduce itself gets optimised away). Since
+    ``planet_xyz.shape[0]`` is a static (trace-time) Python int -- JAX array
+    shapes are always static even when the values themselves are traced --
+    branching on it here is safe under jit/vmap/grad and costs nothing at
+    trace time; it just avoids ever constructing the redundant ops for the
+    common single-planet case, rather than hoping the compiler removes them.
+
+    Parameters
+    ----------
+    x_disc, y_disc  : in-disc pixel coordinates  [pixels]
+    star_pixel_rad  : stellar radius in pixels
+    planet_xyz      : (nplanet, 3) planet sky positions [X, Y, Z] in R*
+    k               : (nplanet,) planet-to-star radius ratios
+    softness        : sigmoid transition width [R*] (default 0.0: hard edge)
+
+    Returns
+    -------
+    jnp.ndarray, shape (total_pixels,), dtype float32, values in [0, 1]
+    """
+    if planet_xyz.shape[0] == 1:
+        return _compute_planet_mask(
+            x_disc, y_disc, star_pixel_rad,
+            planet_xyz[0, 0], planet_xyz[0, 1], planet_xyz[0, 2], k[0],
+            softness,
+        )
+
+    masks = vmap(
+        lambda xyz, kk: _compute_planet_mask(
+            x_disc, y_disc, star_pixel_rad, xyz[0], xyz[1], xyz[2], kk,
+            softness,
+        )
+    )(planet_xyz, k)   # (nplanet, total_pixels)
+
+    return 1.0 - jnp.prod(1.0 - masks, axis=0)
+
+
 # ---------------------------------------------------------------------------
 # 5. build_transit_model — pre-compute positions for all (oversampled) epochs
 # ---------------------------------------------------------------------------
@@ -409,17 +553,17 @@ def _warn_if_precision_insufficient(times: np.ndarray) -> None:
 
 def build_transit_model(
     times: np.ndarray,
-    t0: float,
-    period: float,
-    a_over_rstar: float,
-    inclination: float,
-    ecc: float          = 0.0,
-    omega_peri: float   = 0.0,
-    k: float | np.ndarray = 0.1,
-    sp_orb: float    = 0.0,
+    t0: float | np.ndarray,
+    period: float | np.ndarray,
+    a_over_rstar: float | np.ndarray,
+    inclination: float | np.ndarray,
+    ecc: float | np.ndarray        = 0.0,
+    omega_peri: float | np.ndarray = 0.0,
+    k: float | np.ndarray          = 0.1,
+    sp_orb: float | np.ndarray     = 0.0,
 ) -> dict:
     """
-    Pre-compute the planet's sky-plane position at every epoch in ``times``.
+    Pre-compute every planet's sky-plane position at every epoch in ``times``.
 
     The returned dict should be stored in the sajax model dict under the key
     ``"transit"``.  ``build_system()`` (in core.py) does this automatically
@@ -431,27 +575,34 @@ def build_transit_model(
     times         : (ntime,) array of observation epochs  [days]
                     Must be the **oversampled** time array when oversampling
                     is active (see ``build_system``).
-    t0            : mid-transit epoch  [days]
-    period        : orbital period  [days]
-    a_over_rstar  : semimajor axis / R*  (dimensionless)
-    inclination   : orbital inclination  [rad]
-    ecc           : eccentricity  (default: 0.0 = circular)
-    omega_peri    : argument of periastron  [rad]  (default: 0.0)
+    t0            : mid-transit epoch(s)  [days] -- scalar or (nplanet,).
+                    ``nplanet`` is inferred from ``t0``'s trailing axis.
+    period        : orbital period(s)  [days] -- scalar or (nplanet,)
+    a_over_rstar  : semimajor axis / R*  (dimensionless) -- scalar or (nplanet,)
+    inclination   : orbital inclination  [rad] -- scalar or (nplanet,)
+    ecc           : eccentricity  (default: 0.0 = circular) -- scalar or (nplanet,)
+    omega_peri    : argument of periastron  [rad]  (default: 0.0) -- scalar or (nplanet,)
     k             : planet-to-star radius ratio  Rp / R*  (default: 0.1).
-                    A scalar (achromatic transit depth) or an array of shape
-                    (nwave,) (a chromatic transit depth, one value per
-                    wavelength bin) -- the orbital position doesn't depend on
-                    k at all, so this is stored as-is for later use by the
+                    The orbital position doesn't depend on k at all, so this
+                    is stored as-is (not shape-validated against nplanet/nwave
+                    here -- that happens one level up in core.py's
+                    build_system/make_lc, which are the only callers that
+                    know both nplanet and nwave) for later use by the
                     per-wavelength occultation mask in core.py.
-    sp_orb        : sky-projected spin-orbit angle λ [rad] (default: 0.0).
-                    See ``planet_sky_position``.
+    sp_orb        : sky-projected spin-orbit angle λ [rad] (default: 0.0) --
+                    scalar or (nplanet,). See ``planet_sky_position``.
+
+    Any scalar (or size-1 array) among t0/period/a_over_rstar/inclination/
+    ecc/omega_peri/sp_orb broadcasts to all nplanet planets; a differently-
+    sized array raises ``ValueError`` (see
+    ``compute_multi_planet_sky_positions``).
 
     Numerical precision
     --------------------
-    This function does **not** shift ``times``/``t0`` itself -- ``build_system`` 
-    (in core.py) already subtracts a common reference epoch (``model["t_ref"]``) 
+    This function does **not** shift ``times``/``t0`` itself -- ``build_system``
+    (in core.py) already subtracts a common reference epoch (``model["t_ref"]``)
     from both before ever casting either to a JAX array, so absolute BJD-scale
-    epochs reaching this function via the normal two-stage API are already small. 
+    epochs reaching this function via the normal two-stage API are already small.
     Direct/standalone callers passing raw BJD-scale ``times``/``t0`` are
     responsible for doing the same reduction themselves -- a warning fires
     (see ``_warn_if_precision_insufficient``) when this hasn't been done
@@ -461,20 +612,22 @@ def build_transit_model(
     -------
     dict with keys
     ~~~~~~~~~~~~~~
-    ``planet_xyz`` : (ntime, 3) jnp.ndarray — planet (X, Y, Z) per epoch
-    ``k``          : jnp.ndarray, scalar or (nwave,) — planet-to-star radius ratio
+    ``planet_xyz`` : (ntime, nplanet, 3) jnp.ndarray — each planet's (X, Y, Z) per epoch
+    ``k``          : jnp.ndarray, as given — planet-to-star radius ratio
+    ``nplanet``    : int — number of planets, inferred from t0's trailing axis
     """
     _warn_if_precision_insufficient(times)
     times_jax = jnp.asarray(times)
 
-    xyz = compute_planet_sky_positions(
+    xyz = compute_multi_planet_sky_positions(
         times_jax, t0, period, a_over_rstar, inclination, ecc, omega_peri,
         sp_orb,
-    )   # (ntime, 3)
+    )   # (ntime, nplanet, 3)
 
     return dict(
         planet_xyz = xyz,
         k          = jnp.asarray(k, dtype=jnp.float32),
+        nplanet    = int(jnp.atleast_1d(jnp.asarray(t0)).shape[-1]),
     )
 
 
