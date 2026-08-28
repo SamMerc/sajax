@@ -208,7 +208,7 @@ in Case 3's snippet, with
 
 Unlike active regions — which are spectral-contrast modulators and so overlap **additively** (Case 2) — planets are opaque occulters, so overlapping transits combine **multiplicatively**: the fraction of a pixel's flux surviving `nplanet` planets is `prod(1 - mask_i)`, not `1 - sum(mask_i)`. This keeps the occulted flux fraction physically bounded in `[0, 1]` even when two planets' discs overlap on the stellar grid, rather than letting their masks double-subtract past full occultation.
 
-### Case 5: Time-evolving active regions
+### Case 4: Time-evolving active regions
 
 `flux_active`/`ar_lat`/`ar_long`/`ar_size`/`ar_smoothness` may each independently carry an extra leading time axis (length = the number of `times` the model was built with) instead of their usual per-AR shape, to let that property evolve over the observations — a spot growing/decaying, drifting in latitude/longitude, or changing contrast:
 
