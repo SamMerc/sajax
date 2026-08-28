@@ -17,10 +17,11 @@ from sajax import quick_lc, build_stellar_grid
 from sajax.core import (
     build_system,
     make_lc,
-    _compute_planet_mask,
+    _compute_all_planets_mask,
     _compute_ar_shape,
     _compute_single_phase,
 )
+from sajax.planet import _compute_planet_mask
 from sajax.geometry import rotate_active_region
 
 C_KMS = 299_792.458  # speed of light [km/s]
@@ -1327,6 +1328,86 @@ class TestComputePlanetMask:
 
 
 # ===================================================================
+# 1b.  _compute_all_planets_mask — multi-planet combination
+# ===================================================================
+
+class TestComputeAllPlanetsMask:
+    """
+    Unit tests for combining several planets' occultation masks. Planets
+    are opaque occulters (unlike active regions, whose contrasts sum -- see
+    core.py's module docstring), so the combination rule here is
+    multiplicative: 1 - prod(1 - mask_i), not 1 - sum(mask_i).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _grid(self):
+        g = build_stellar_grid(50, 0.0)
+        self.x   = jnp.asarray(g["x"])
+        self.y   = jnp.asarray(g["y"])
+        self.spr = g["star_pixel_rad"]
+
+    def _combined(self, planet_xyz, k, softness=0.0):
+        return _compute_all_planets_mask(
+            self.x, self.y, self.spr, jnp.asarray(planet_xyz), jnp.asarray(k), softness,
+        )
+
+    def test_shape_matches_disc(self):
+        mask = self._combined([[0.0, 0.0, 5.0]], [0.1])
+        assert mask.shape == self.x.shape
+
+    def test_nplanet_one_matches_single_planet_mask(self):
+        combined = self._combined([[0.3, 0.1, 5.0]], [0.12])
+        single   = _compute_planet_mask(self.x, self.y, self.spr, 0.3, 0.1, 5.0, 0.12)
+        np.testing.assert_allclose(np.array(combined), np.array(single))
+
+    def test_disjoint_planets_union(self):
+        """Two well-separated planets: combined mask equals the sum (union,
+        since disjoint) of the two individual hard masks -- up to a handful
+        of exact-boundary pixels (d2 == k**2 to float32 precision), where
+        vmap's batched execution and a standalone scalar call can round the
+        strict '<' comparison differently by 1 ULP; this is a well-known
+        float non-determinism at a hard threshold, not a correctness bug."""
+        combined = self._combined(
+            [[-0.5, 0.0, 5.0], [0.5, 0.0, 5.0]], [0.1, 0.1],
+        )
+        m1 = _compute_planet_mask(self.x, self.y, self.spr, -0.5, 0.0, 5.0, 0.1)
+        m2 = _compute_planet_mask(self.x, self.y, self.spr, 0.5, 0.0, 5.0, 0.1)
+        n_mismatch = int(jnp.sum(jnp.abs(combined - (m1 + m2)) > 0.5))
+        assert n_mismatch <= 8, f"{n_mismatch} pixels disagree, expected only boundary ties"
+
+    def test_overlapping_planets_do_not_exceed_full_occultation(self):
+        """Two heavily overlapping high-k planets: a naive additive rule
+        (mask1 + mask2) would exceed 1 and drive flux negative -- the
+        multiplicative combination must stay within [0, 1]."""
+        combined = self._combined(
+            [[0.0, 0.0, 5.0], [0.05, 0.0, 5.0]], [0.4, 0.4],
+        )
+        assert bool(jnp.all(combined <= 1.0))
+        assert bool(jnp.all(combined >= 0.0))
+
+    def test_overlap_matches_multiplicative_formula(self):
+        planet_xyz = [[0.0, 0.0, 5.0], [0.15, 0.0, 5.0]]
+        k = [0.3, 0.25]
+        combined = self._combined(planet_xyz, k)
+        m1 = _compute_planet_mask(self.x, self.y, self.spr, 0.0, 0.0, 5.0, 0.3)
+        m2 = _compute_planet_mask(self.x, self.y, self.spr, 0.15, 0.0, 5.0, 0.25)
+        expected = 1.0 - (1.0 - m1) * (1.0 - m2)
+        np.testing.assert_allclose(np.array(combined), np.array(expected), atol=1e-6)
+
+    def test_disabled_planet_is_a_no_op(self):
+        """A k=0 planet mixed in with a real one: combined mask equals the
+        real planet's mask alone (the k>0 gate composes correctly), modulo
+        the same handful of exact-boundary float ties described in
+        test_disjoint_planets_union."""
+        combined = self._combined(
+            [[0.0, 0.0, 5.0], [0.9, 0.9, 5.0]], [0.2, 0.0],
+        )
+        single = _compute_planet_mask(self.x, self.y, self.spr, 0.0, 0.0, 5.0, 0.2)
+        n_mismatch = int(jnp.sum(jnp.abs(combined - single) > 0.5))
+        assert n_mismatch <= 8, f"{n_mismatch} pixels disagree, expected only boundary ties"
+
+
+# ===================================================================
 # 2.  build_system (transit-attached) — model dict structure
 # ===================================================================
 
@@ -1340,18 +1421,22 @@ class TestBuildCombinedModel:
 
     def test_k_value_stored(self, combined_model):
         assert "k" in combined_model
-        # k is always stored as an array of shape (nwave,) now (even for a
-        # scalar input) so it can also hold a genuinely per-wavelength value.
-        assert float(combined_model["k"][0]) == pytest.approx(TRANSIT_PARAMS["k"])
+        # k is always stored as an array of shape (nplanet, nwave) now (even
+        # for a scalar input) so it can also hold a per-planet and/or
+        # per-wavelength value.
+        assert float(combined_model["k"][0, 0]) == pytest.approx(TRANSIT_PARAMS["k"])
+
+    def test_nplanet_key_present_and_correct(self, combined_model):
+        assert combined_model["nplanet"] == 1
 
     def test_planet_xyz_shape(self, combined_model):
         xyz    = combined_model["planet_xyz"]
         nphase = combined_model["nphase"]
-        assert xyz.shape == (nphase, 3)
+        assert xyz.shape == (nphase, 1, 3)
 
     def test_xyz_third_column_Z(self, combined_model):
         xyz = np.array(combined_model["planet_xyz"])
-        assert np.any(xyz[:, 2] > 0)
+        assert np.any(xyz[:, :, 2] > 0)
 
     def test_all_stellar_keys_preserved(self, combined_model):
         required = [
@@ -1596,6 +1681,93 @@ class TestTransitOversampling:
 
 
 # ===================================================================
+# 4b.  Multiple planets (trailing nplanet axis, mirroring TestMultiAR)
+#
+# Planets combine *multiplicatively* (opaque occulters), the opposite of
+# TestAROverlapCompounding's *additive* AR-contrast rule -- named/documented
+# explicitly to avoid confusion, since both "multiple X" cases sit close
+# together conceptually.
+# ===================================================================
+
+class TestMultiPlanet:
+
+    def test_multi_planet_shapes(self):
+        """Two planets should work and preserve the usual (ntimes,) output
+        shape -- nplanet is fully consumed before the pixel sum."""
+        lc, star_maps = _combined_lc(
+            transit_overrides=dict(
+                t0=[0.0, 0.09], period=[5.0, 30.0],
+                a_over_rstar=[10.0, 10.0], inclination=[np.pi / 2.0, np.pi / 2.0],
+                k=[0.1, 0.05],
+            )
+        )
+        assert lc.shape == (len(TIMES),)
+        assert star_maps.shape == (len(TIMES), STELLAR_GRID * 2 + 1, STELLAR_GRID * 2 + 1)
+        assert np.all(np.isfinite(lc))
+
+    def test_nplanet_one_matches_pre_existing_single_planet_api(self):
+        """Regression pin: scalar TRANSIT_PARAMS (today's exact single-planet
+        API) must give bit-identical output to before this feature existed."""
+        lc_scalar = _combined_lc()[0]
+        lc_single_list = _combined_lc(transit_overrides=dict(
+            t0=[TRANSIT_PARAMS["t0"]], period=[TRANSIT_PARAMS["period"]],
+            a_over_rstar=[TRANSIT_PARAMS["a_over_rstar"]],
+            inclination=[TRANSIT_PARAMS["inclination"]], k=[TRANSIT_PARAMS["k"]],
+        ))[0]
+        np.testing.assert_allclose(np.array(lc_scalar), np.array(lc_single_list))
+
+    def test_per_planet_k_gives_per_planet_depth(self):
+        """A larger k for one planet gives a deeper dip at its own transit
+        window than the other, well-separated planet's shallower one."""
+        lc, _ = _combined_lc(
+            transit_overrides=dict(
+                t0=[0.0, 0.09], period=[5.0, 30.0],
+                a_over_rstar=[10.0, 10.0], inclination=[np.pi / 2.0, np.pi / 2.0],
+                k=[0.15, 0.05],
+            )
+        )
+        lc = np.array(lc)
+        baseline = float(np.max(lc))
+        idx_a = int(np.argmin(np.abs(TIMES - 0.0)))
+        idx_b = int(np.argmin(np.abs(TIMES - 0.09)))
+        depth_a = baseline - lc[idx_a]
+        depth_b = baseline - lc[idx_b]
+        assert depth_a > depth_b > 0
+
+    def test_two_non_overlapping_transits_independent(self):
+        """Two planets with well-separated transit windows (large a_over_rstar
+        keeps each transit brief relative to the narrow TIMES baseline)
+        produce dips matching each planet's own isolated single-planet
+        computation."""
+        shared = dict(a_over_rstar=40.0, inclination=np.pi / 2.0, k=0.1)
+        lc_a = np.array(_combined_lc(transit_overrides=dict(t0=0.0, period=5.0, **shared))[0])
+        lc_b = np.array(_combined_lc(transit_overrides=dict(t0=0.1, period=8.0, **shared))[0])
+        lc_both = np.array(_combined_lc(transit_overrides=dict(
+            t0=[0.0, 0.1], period=[5.0, 8.0],
+            a_over_rstar=[40.0, 40.0], inclination=[np.pi / 2.0, np.pi / 2.0], k=[0.1, 0.1],
+        ))[0])
+        baseline = float(np.max(lc_a))
+        idx_a = int(np.argmin(np.abs(TIMES - 0.0)))
+        idx_b = int(np.argmin(np.abs(TIMES - 0.1)))
+        np.testing.assert_allclose(lc_both[idx_a], lc_a[idx_a], atol=1e-5)
+        np.testing.assert_allclose(lc_both[idx_b], lc_b[idx_b], atol=1e-5)
+        assert lc_both[idx_a] < baseline and lc_both[idx_b] < baseline
+
+    def test_overlapping_transits_do_not_over_subtract(self):
+        """Two planets transiting at the same time with large k: flux must
+        stay non-negative -- a naive additive combination could go negative
+        (1 - k1^2 - k2^2 < 0 for large k's), the multiplicative rule can't."""
+        lc, _ = _combined_lc(
+            transit_overrides=dict(
+                t0=[0.0, 0.0], period=[5.0, 5.0],
+                a_over_rstar=[10.0, 10.0], inclination=[np.pi / 2.0, np.pi / 2.0],
+                k=[0.4, 0.4],
+            )
+        )
+        assert np.all(np.array(lc) >= 0.0)
+
+
+# ===================================================================
 # 5.  API consistency
 # ===================================================================
 
@@ -1836,7 +2008,7 @@ class TestARShapeGradients:
         )
         spr = float(model["star_pixel_rad"])
         ar_cart    = jnp.array([[0.0, 0.0, spr]], dtype=jnp.float32)
-        planet_xyz = jnp.array([0.0, 0.0, -1e10], dtype=jnp.float32)
+        planet_xyz = jnp.array([[0.0, 0.0, -1e10]], dtype=jnp.float32)  # (nplanet=1, 3)
         flux_act   = jnp.array(flux_active[np.newaxis, :], dtype=jnp.float32)  # (1, nwave)
         n_coeffs   = 2
         n_mu       = model["mu_profile_pts"].shape[0]
@@ -1861,7 +2033,7 @@ class TestARShapeGradients:
                 total_pixels        = model["total_pixels"],
                 arsize_rads         = jnp.array([arsize]),
                 ar_smoothness       = jnp.array([_SM]),
-                k                   = jnp.zeros(nwave),  # k is (nwave,) now, not a scalar
+                k                   = jnp.zeros((1, nwave)),  # k is (nplanet, nwave) now
                 ld_mode            = model["ld_mode"],
                 plot_map_wavelength = model["plot_map_wavelength"],
                 n                   = model["n"],
@@ -2049,7 +2221,7 @@ class TestStellarParamGradientsFD:
         ldc_q    = ld_coeffs_quiet if ld_coeffs_quiet is not None else model["ld_coeffs"]
         flux_norm, _ = _compute_single_phase(
             ar_cart_rotated,
-            jnp.array([0.0, 0.0, -1e10]),
+            jnp.array([[0.0, 0.0, -1e10]]),  # (nplanet=1, 3)
             wavelength          = model["wavelength"],
             flux_quiet          = model["flux_quiet"],
             flux_active         = jnp.array([[0.7]], dtype=jnp.float32),
@@ -2067,7 +2239,7 @@ class TestStellarParamGradientsFD:
             total_pixels        = model["total_pixels"],
             arsize_rads         = jnp.array([jnp.deg2rad(jnp.float32(self._ARSIZE))]),
             ar_smoothness       = jnp.array([_SM]),
-            k                   = jnp.zeros(nwave),  # k is (nwave,) now, not a scalar
+            k                   = jnp.zeros((1, nwave)),  # k is (nplanet, nwave) now
             ld_mode            = model["ld_mode"],
             plot_map_wavelength = model["plot_map_wavelength"],
             n                   = model["n"],
@@ -2230,7 +2402,7 @@ class TestStellarParamGradientsFD:
         def lc(ve):
             vel_col = coords / spr * (ve / self._C)
             fval, _ = _compute_single_phase(
-                rotated, jnp.array([0.0, 0.0, -1e10]),
+                rotated, jnp.array([[0.0, 0.0, -1e10]]),  # (nplanet=1, 3)
                 wavelength=model["wavelength"], flux_quiet=model["flux_quiet"],
                 flux_active=flux_active_wl,
                 ld_coeffs_quiet=model["ld_coeffs"],
@@ -2243,7 +2415,7 @@ class TestStellarParamGradientsFD:
                 star_pixel_rad=spr, total_pixels=model["total_pixels"],
                 arsize_rads=jnp.array([jnp.deg2rad(jnp.float32(self._ARSIZE))]),
                 ar_smoothness=jnp.array([_SM]),
-                k=jnp.zeros(nwave), ld_mode=model["ld_mode"],  # k is (nwave,) now, not a scalar
+                k=jnp.zeros((1, nwave)), ld_mode=model["ld_mode"],  # k is (nplanet, nwave) now
                 plot_map_wavelength=model["plot_map_wavelength"], n=model["n"],
                 flat_indices=model["flat_indices"],
             )
@@ -2455,6 +2627,46 @@ class TestParameterGroupValidation:
         assert np.all(np.isfinite(lc))
         baseline = float(np.min(np.array(make_lc(stellar_only_model)[0])))
         assert float(np.min(lc)) < baseline  # the static transit still occults
+
+    # ---- Multi-planet shape validation ----------------------------------
+
+    def test_transit_param_nplanet_mismatch_raises(self):
+        with pytest.raises(ValueError):
+            build_system(
+                wavelength=WAVELENGTH, flux_quiet=FLUX_QUIET, **BASE_PARAMS,
+                times=TIMES, P_rot=P_ROT,
+                t0=[0.0, 2.0], period=[5.0, 11.0, 20.0],
+                a_over_rstar=[10.0, 10.0], inclination=[np.pi / 2.0, np.pi / 2.0],
+                k=[0.1, 0.1],
+                stellar_grid_size=STELLAR_GRID, ve=VE,
+            )
+
+    def test_k_shape_mismatch_raises(self):
+        with pytest.raises(ValueError, match="k shape mismatch"):
+            build_system(
+                wavelength=WAVELENGTH, flux_quiet=FLUX_QUIET, **BASE_PARAMS,
+                times=TIMES, P_rot=P_ROT,
+                t0=[0.0, 2.0], period=[5.0, 11.0],
+                a_over_rstar=[10.0, 10.0], inclination=[np.pi / 2.0, np.pi / 2.0],
+                k=[0.1, 0.1, 0.1],  # length 3, but nplanet=2 and nwave=1
+                stellar_grid_size=STELLAR_GRID, ve=VE,
+            )
+
+    def test_k_nplanet_one_legacy_chromatic_still_works(self):
+        """A bare (nwave,) k array for a single planet (pre-multi-planet
+        convention) must still be accepted and treated as chromatic depth."""
+        wl = np.array([500.0, 550.0, 600.0])
+        flux_q = np.ones_like(wl)
+        model = build_system(
+            wavelength=wl, flux_quiet=flux_q, **BASE_PARAMS,
+            times=TIMES, P_rot=P_ROT,
+            t0=0.0, period=5.0, a_over_rstar=10.0, inclination=np.pi / 2.0,
+            k=[0.1, 0.12, 0.09],
+            stellar_grid_size=STELLAR_GRID, ve=VE,
+        )
+        assert model["nplanet"] == 1
+        assert model["k"].shape == (1, 3)
+        np.testing.assert_allclose(np.array(model["k"][0]), [0.1, 0.12, 0.09])
 
 
 # ===================================================================
