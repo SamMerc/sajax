@@ -17,11 +17,13 @@ from sajax import quick_lc, build_stellar_grid
 from sajax.core import (
     build_system,
     make_lc,
+    make_rv,
+    quick_rv,
     _compute_all_planets_mask,
     _compute_ar_shape,
-    _compute_single_phase,
+    _compute_single_phase_lc,
 )
-from sajax.planet import _compute_planet_mask
+from sajax.planet import _compute_planet_mask, planet_sky_position
 from sajax.geometry import rotate_active_region
 
 C_KMS = 299_792.458  # speed of light [km/s]
@@ -125,7 +127,7 @@ class TestBuildStellarGrid:
         assert float(mu.max()) <= 1.0 + 1e-5
 
     def test_mu_centre_pixel_is_one(self):
-        """The central pixel should have mu ≈ 1 (disc centre)."""
+        """The central pixel should have mu ~= 1 (disc centre)."""
         grid = build_stellar_grid(50, 2.0)
         centre_mask = (grid["x"] == 0) & (grid["y"] == 0)
         assert np.any(centre_mask), "Centre pixel not found in grid"
@@ -954,7 +956,7 @@ class TestSymmetry:
         )
         np.testing.assert_allclose(
             result_north[0], result_south[0], rtol=1e-4,
-            err_msg="N/S symmetric ARs should produce identical LCs at inc=90°",
+            err_msg="N/S symmetric ARs should produce identical LCs at inc=90deg",
         )
 
 
@@ -2014,7 +2016,7 @@ class TestARShapeGradients:
         n_mu       = model["mu_profile_pts"].shape[0]
 
         def flux_fn(arsize):
-            fval, _ = _compute_single_phase(
+            fval, _ = _compute_single_phase_lc(
                 ar_cart, planet_xyz,
                 wavelength          = model["wavelength"],
                 flux_quiet          = model["flux_quiet"],
@@ -2181,7 +2183,7 @@ class TestStellarParamGradientsFD:
     separately (finite-only) -- see note on ``test_ve_gradient_finite``.
 
     These parameters are baked into the model dict at build time (NumPy),
-    so tests call _compute_single_phase directly with the parameter as a
+    so tests call _compute_single_phase_lc directly with the parameter as a
     JAX-traced input, constructing whichever piece of the model that
     parameter feeds into (e.g. ld_coeffs_quiet for u1/u2, vel_col for ve).
     """
@@ -2219,7 +2221,7 @@ class TestStellarParamGradientsFD:
         n_coeffs = 2
         n_mu     = model["mu_profile_pts"].shape[0]
         ldc_q    = ld_coeffs_quiet if ld_coeffs_quiet is not None else model["ld_coeffs"]
-        flux_norm, _ = _compute_single_phase(
+        flux_norm, _ = _compute_single_phase_lc(
             ar_cart_rotated,
             jnp.array([[0.0, 0.0, -1e10]]),  # (nplanet=1, 3)
             wavelength          = model["wavelength"],
@@ -2401,7 +2403,7 @@ class TestStellarParamGradientsFD:
 
         def lc(ve):
             vel_col = coords / spr * (ve / self._C)
-            fval, _ = _compute_single_phase(
+            fval, _ = _compute_single_phase_lc(
                 rotated, jnp.array([[0.0, 0.0, -1e10]]),  # (nplanet=1, 3)
                 wavelength=model["wavelength"], flux_quiet=model["flux_quiet"],
                 flux_active=flux_active_wl,
@@ -3363,3 +3365,501 @@ class TestBjdReferenceEpoch:
 
         g = jax.grad(f)(self._T0_BJD)
         assert jnp.isfinite(g)
+
+
+# ===================================================================
+# Radial velocity -- make_rv / quick_rv
+# ===================================================================
+#
+# Covers the Keplerian reflex-RV term, the activity/Rossiter-McLaughlin
+# flux-weighted velocity term, their combination, oversampling, time-varying
+# active regions, autodiff, and planet_mass/stellar_mass validation.
+#
+# Reuses this file's shared WAVELENGTH/FLUX_QUIET/FLUX_SPOT/STELLAR_GRID/
+# P_ROT/TRANSIT_PARAMS/C_KMS (see "Shared test configuration" above).
+#
+# Orbital-mechanics-only correctness (the Keplerian formula's sign,
+# keplerian_rv_semi_amplitude's mass->K conversion) is covered in
+# tests/test_planet.py instead, since those are pure sajax.planet functions
+# with no dependency on the pixel grid.
+
+def _quick_rv(times, ve=0.0, ld_coeffs=(0.0, 0.0), ar_lat=(0.0,), ar_long=(180.0,),
+              ar_size=(0.001,), ar_smoothness=(2.0,), flux_active=None,
+              transit=False, **kw):
+    """Thin wrapper around quick_rv filling in defaults to keep test bodies
+    short -- the RV counterpart of _combined_lc. Returns just ``rv``
+    (discarding ``star_maps``) since none of these tests exercise it."""
+    tp = dict(TRANSIT_PARAMS) if transit else {}
+    rv, _ = quick_rv(
+        wavelength=WAVELENGTH, flux_quiet=FLUX_QUIET,
+        flux_active=flux_active if flux_active is not None else FLUX_SPOT,
+        ar_lat=list(ar_lat), ar_long=list(ar_long), ar_size=list(ar_size),
+        ar_smoothness=list(ar_smoothness),
+        times=np.atleast_1d(times), P_rot=P_ROT,
+        stellar_grid_size=STELLAR_GRID, ve=ve, ld_coeffs=list(ld_coeffs),
+        **tp, **kw,
+    )
+    return rv
+
+
+# ---------------------------------------------------------------------
+# 1.  Quiet, symmetric star -> zero activity/RM RV
+# ---------------------------------------------------------------------
+
+class TestQuietSymmetricStarZeroRv:
+
+    def test_zero_rv_no_ar_no_transit(self):
+        # Narrow window around phase 0 so the far-side (long=180) spot
+        # never rotates into view -- a full-rotation window would let it
+        # cross the visible disc and produce a genuine (if tiny) signal.
+        times = np.linspace(-0.5, 0.5, 25)
+        rv = _quick_rv(times, ve=5.0, ar_size=(0.001,))
+        np.testing.assert_allclose(rv, 0.0, atol=1e-6)
+
+    def test_rv_equals_gamma_when_no_transit(self):
+        times = np.linspace(0.0, P_ROT, 10)
+        rv = _quick_rv(times, ve=5.0, gamma=3.7)
+        np.testing.assert_allclose(rv, 3.7, atol=1e-6)
+
+    def test_mass_given_without_transit_raises(self):
+        times = np.array([0.0])
+        with pytest.raises(ValueError, match="no transit"):
+            _quick_rv(times, ve=5.0, planet_mass=1.0, stellar_mass=1.0)
+
+    def test_only_planet_mass_given_raises(self):
+        times = np.array([0.0])
+        with pytest.raises(ValueError, match="planet_mass and stellar_mass"):
+            _quick_rv(times, ve=5.0, planet_mass=1.0)
+
+    def test_only_stellar_mass_given_raises(self):
+        times = np.array([0.0])
+        with pytest.raises(ValueError, match="planet_mass and stellar_mass"):
+            _quick_rv(times, ve=5.0, stellar_mass=1.0)
+
+
+# ---------------------------------------------------------------------
+# 2.  Equatorial spot: sign arbiter for the activity RV term
+# ---------------------------------------------------------------------
+
+class TestEquatorialSpotRedLimbBlueshift:
+    """
+    The empirical arbiter for _compute_single_phase_rv's sign: a spot on
+    the receding (+x, redshifted) limb must produce a NEGATIVE (blueshift)
+    RV anomaly. Uses phase (not a transiting planet) to sweep an
+    equatorial spot across the disc -- per
+    TestDopplerFieldSign, increasing phase carries a disc-centre feature
+    toward +x.
+    """
+
+    def _rv_at_phase(self, phase_deg, ve=5.0, ar_size=15.0):
+        t = np.array([phase_deg / 360.0 * P_ROT])
+        rv = _quick_rv(t, ve=ve, ar_lat=(0.0,), ar_long=(0.0,), ar_size=(ar_size,),
+                       ar_smoothness=(6.0,))
+        return float(rv[0])
+
+    def test_spot_on_receding_limb_is_blueshifted(self):
+        assert self._rv_at_phase(30.0) < 0.0
+
+    def test_spot_on_approaching_limb_is_redshifted(self):
+        assert self._rv_at_phase(-30.0) > 0.0
+
+    def test_spot_at_disc_centre_is_zero(self):
+        np.testing.assert_allclose(self._rv_at_phase(0.0), 0.0, atol=1e-6)
+
+    def test_antisymmetric_about_disc_centre(self):
+        plus  = self._rv_at_phase(30.0)
+        minus = self._rv_at_phase(-30.0)
+        np.testing.assert_allclose(plus, -minus, rtol=1e-4)
+
+    def test_amplitude_scales_with_ve(self):
+        rv_lo = abs(self._rv_at_phase(30.0, ve=2.0))
+        rv_hi = abs(self._rv_at_phase(30.0, ve=8.0))
+        assert rv_hi > rv_lo
+
+
+# ---------------------------------------------------------------------
+# 3.  Rossiter-McLaughlin effect during transit
+# ---------------------------------------------------------------------
+
+class TestRossiterMcLaughlin:
+    """
+    No active regions: rv sweeping through a transit. planet_mass=0
+    isolates the pure activity/RM term (rv_kep is then identically zero,
+    since K depends linearly on planet_mass) -- a transit attached to the
+    model requires planet_mass/stellar_mass to be given at all (see
+    TestPlanetMassValidation), so a massless "ghost" planet is the way to
+    get a transit's occultation geometry without its Keplerian reflex RV.
+    """
+
+    _VE = 5.0
+
+    def _rv_curve(self, times):
+        return np.asarray(_quick_rv(
+            times, ve=self._VE, ar_size=(0.001,), transit=True,
+            planet_mass=0.0, stellar_mass=1.0,
+        ))
+
+    def test_zero_well_outside_transit(self):
+        times = np.array([-2.0, 2.0])   # +-2 d, transit duration << 1 d at these params
+        rv = self._rv_curve(times)
+        np.testing.assert_allclose(rv, 0.0, atol=1e-6)
+
+    def test_sign_matches_occulted_limb(self):
+        """
+        Occulting the receding (+x) limb removes high-velocity flux weight,
+        exactly like a spot there (TestEquatorialSpotRedLimbBlueshift) --
+        so rv < 0 when the planet's X > 0, and rv > 0 when X < 0. Uses
+        planet_sky_position (already independently tested) to know which
+        side the planet is on at each sampled time, rather than assuming a
+        literature sign convention.
+        """
+        times = np.linspace(-0.25, 0.25, 41)
+        rv = self._rv_curve(times)
+
+        X = np.array([
+            float(planet_sky_position(
+                jnp.float32(t), TRANSIT_PARAMS["t0"], TRANSIT_PARAMS["period"],
+                TRANSIT_PARAMS["a_over_rstar"], TRANSIT_PARAMS["inclination"],
+                TRANSIT_PARAMS["ecc"], TRANSIT_PARAMS["omega_peri"],
+            )[0])
+            for t in times
+        ])
+
+        # Only check points with an appreciable |rv| and |X| (near t0, X~0
+        # and the RM signal is itself ~0 -- see test_zero_near_mid_transit).
+        mask = (np.abs(rv) > 1e-4) & (np.abs(X) > 0.05)
+        assert mask.sum() > 5, "too few informative points to check the sign relation"
+        assert np.all(np.sign(rv[mask]) == -np.sign(X[mask])), (
+            "rv sign must be opposite the occulted limb's X sign "
+            f"(rv={rv[mask]}, X={X[mask]})"
+        )
+
+    def test_zero_near_mid_transit(self):
+        """At t0, X=0 (planet occults the disc centre, zero-velocity
+        pixels) for this zero-obliquity, edge-on, circular fixture."""
+        rv = self._rv_curve(np.array([TRANSIT_PARAMS["t0"]]))
+        np.testing.assert_allclose(rv, 0.0, atol=1e-3)
+
+    def test_antisymmetric_about_mid_transit(self):
+        dt = 0.08
+        rv_before = self._rv_curve(np.array([TRANSIT_PARAMS["t0"] - dt]))[0]
+        rv_after  = self._rv_curve(np.array([TRANSIT_PARAMS["t0"] + dt]))[0]
+        np.testing.assert_allclose(rv_before, -rv_after, rtol=1e-3)
+
+    def test_spot_crossing_perturbs_rm_curve(self):
+        """A spot placed where the planet crosses mid-transit measurably
+        perturbs the RV relative to the spot-free RM curve at that time."""
+        t = np.array([TRANSIT_PARAMS["t0"]])
+        rv_no_spot = _quick_rv(
+            t, ve=self._VE, ar_size=(0.001,), transit=True,
+            planet_mass=0.0, stellar_mass=1.0,
+        )[0]
+        rv_spot = _quick_rv(
+            t, ve=self._VE, ar_lat=(0.0,), ar_long=(0.0,), ar_size=(6.0,),
+            ar_smoothness=(6.0,), flux_active=FLUX_SPOT, transit=True,
+            planet_mass=0.0, stellar_mass=1.0,
+        )[0]
+        # Both the spot and (at exact mid-transit) the planet sit near the
+        # disc centre's low-velocity region, so the perturbation is small
+        # (observed ~7e-6 km/s at this file's FLUX_SPOT/STELLAR_GRID) but
+        # well above the ~1e-9 numerical noise floor (see
+        # TestQuietSymmetricStarZeroRv).
+        assert abs(float(rv_spot) - float(rv_no_spot)) > 1e-6
+
+
+# ---------------------------------------------------------------------
+# 4.  Oversampling
+# ---------------------------------------------------------------------
+
+class TestOversamplingSmoothsRm:
+
+    _MASS_KW = dict(planet_mass=0.0, stellar_mass=1.0)   # isolate the RM term
+
+    def test_oversampling_changes_ingress_egress_rv(self):
+        times = np.linspace(-0.12, -0.08, 5)   # near ingress for TRANSIT_PARAMS
+        rv_1 = np.asarray(_quick_rv(times, ve=5.0, ar_size=(0.001,), transit=True,
+                                     oversample=1, **self._MASS_KW))
+        rv_n = np.asarray(_quick_rv(times, ve=5.0, ar_size=(0.001,), transit=True,
+                                     oversample=8, **self._MASS_KW))
+        assert np.max(np.abs(rv_1 - rv_n)) > 1e-6, (
+            "oversample=8 should measurably differ from oversample=1 near ingress"
+        )
+
+    def test_oversample_1_is_identity(self):
+        times = np.linspace(-0.3, 0.3, 15)
+        rv_default = np.asarray(
+            _quick_rv(times, ve=5.0, ar_size=(0.001,), transit=True, **self._MASS_KW)
+        )
+        rv_explicit = np.asarray(
+            _quick_rv(times, ve=5.0, ar_size=(0.001,), transit=True, oversample=1,
+                      **self._MASS_KW)
+        )
+        np.testing.assert_array_equal(rv_default, rv_explicit)
+
+
+# ---------------------------------------------------------------------
+# 5.  Time-varying active regions
+# ---------------------------------------------------------------------
+
+class TestTimeVaryingArRv:
+
+    def test_growing_spot_grows_rv_amplitude(self):
+        # Tiny time separation (phase barely moves: 0.01/25*360 ~= 0.14deg)
+        # so the two epochs differ only in ar_size, not in the spot's
+        # rotational visibility -- isolates the size effect cleanly.
+        times = np.array([0.0, 0.01])
+        # ar_size grows from 5 to 20 degrees between the two epochs; place the
+        # spot off-centre in longitude so it carries nonzero velocity.
+        ar_lat  = np.array([[0.0], [0.0]])
+        ar_long = np.array([[90.0], [90.0]])
+        ar_size = np.array([[5.0], [20.0]])
+        ar_smoothness = np.array([[6.0], [6.0]])
+        flux_active = np.broadcast_to(FLUX_SPOT, (2, 1, 1))
+
+        model = build_system(
+            wavelength=WAVELENGTH, flux_quiet=FLUX_QUIET, times=times, P_rot=P_ROT,
+            stellar_grid_size=STELLAR_GRID, ve=5.0, ld_coeffs=[0.0, 0.0],
+        )
+        rv, _ = make_rv(
+            model, flux_active=jnp.asarray(flux_active),
+            ar_lat=jnp.asarray(ar_lat), ar_long=jnp.asarray(ar_long),
+            ar_size=jnp.asarray(ar_size), ar_smoothness=jnp.asarray(ar_smoothness),
+        )
+        rv = np.asarray(rv)
+        assert abs(rv[1]) > abs(rv[0]), (
+            f"a growing spot should grow |rv|: rv={rv}"
+        )
+
+
+# ---------------------------------------------------------------------
+# 6.  Autodiff
+# ---------------------------------------------------------------------
+
+class TestRvGradients:
+
+    def _model_no_transit(self):
+        """For gradients that don't need a Keplerian term -- no transit
+        means planet_mass/stellar_mass must stay omitted (see
+        TestPlanetMassValidation)."""
+        return build_system(
+            wavelength=WAVELENGTH, flux_quiet=FLUX_QUIET,
+            times=np.linspace(-0.2, 0.2, 20), P_rot=P_ROT,
+            stellar_grid_size=30, ve=5.0, ld_coeffs=[0.0, 0.0],
+        )
+
+    def _model_transit(self):
+        """
+        For gradients through the Keplerian term. Uses a time window
+        entirely on ONE side of t0 (not straddling it symmetrically): for
+        a circular (ecc=0) orbit, cos(f(t)+omega) is an odd function of
+        (t-t0) about t0 (see the derivation in
+        sajax.planet.compute_keplerian_rv), so a window symmetric about t0
+        makes d(sum(rv_kep))/dK exactly zero by cancellation -- a genuine
+        mathematical fact, not a bug, but one that would make
+        d(rv)/d(planet_mass) and d(rv)/d(stellar_mass) vanish by pure
+        accident of window choice rather than by any real degeneracy.
+        """
+        return build_system(
+            wavelength=WAVELENGTH, flux_quiet=FLUX_QUIET,
+            times=np.linspace(0.05, 0.3, 20), P_rot=P_ROT,
+            stellar_grid_size=30, ve=5.0, ld_coeffs=[0.0, 0.0],
+            **TRANSIT_PARAMS,
+        )
+
+    def _rv_sum(self, model, **kw):
+        rv, _ = make_rv(
+            model, flux_active=jnp.asarray(FLUX_SPOT).reshape(1, 1),
+            ar_lat=jnp.array([10.0]), ar_long=jnp.array([30.0]),
+            ar_size=jnp.array([8.0]), ar_smoothness=jnp.array([4.0]),
+            **kw,
+        )
+        return jnp.sum(rv)
+
+    def test_grad_wrt_planet_mass_finite_nonzero(self):
+        model = self._model_transit()
+        g = jax.grad(
+            lambda mp: self._rv_sum(model, planet_mass=mp, stellar_mass=1.0)
+        )(jnp.float32(1.0))
+        assert np.isfinite(float(g))
+        assert float(g) != 0.0
+
+    def test_grad_wrt_stellar_mass_finite_nonzero(self):
+        model = self._model_transit()
+        g = jax.grad(
+            lambda ms: self._rv_sum(model, planet_mass=1.0, stellar_mass=ms)
+        )(jnp.float32(1.0))
+        assert np.isfinite(float(g))
+        assert float(g) != 0.0
+
+    def test_grad_wrt_gamma_is_ntimes(self):
+        """d(sum(rv))/d(gamma) = ntimes exactly (gamma is an additive constant)."""
+        model = self._model_no_transit()
+        ntimes = model["nphase_original"]
+        g = jax.grad(lambda gam: self._rv_sum(model, gamma=gam))(jnp.float32(0.0))
+        np.testing.assert_allclose(float(g), float(ntimes), rtol=1e-5)
+
+    def test_grad_wrt_ar_size_finite(self):
+        model = self._model_no_transit()
+        g = jax.grad(
+            lambda sz: jnp.sum(make_rv(
+                model, flux_active=jnp.asarray(FLUX_SPOT).reshape(1, 1),
+                ar_lat=jnp.array([10.0]), ar_long=jnp.array([30.0]),
+                ar_size=jnp.array([sz]), ar_smoothness=jnp.array([4.0]),
+            )[0])
+        )(jnp.float32(8.0))
+        assert np.isfinite(float(g))
+
+    def test_grad_wrt_dynamic_period_finite(self):
+        model = self._model_transit()
+        g = jax.grad(
+            lambda p: self._rv_sum(
+                model, planet_mass=1.0, stellar_mass=1.0,
+                t0=TRANSIT_PARAMS["t0"], period=p,
+                a_over_rstar=TRANSIT_PARAMS["a_over_rstar"],
+                inclination=TRANSIT_PARAMS["inclination"], k=TRANSIT_PARAMS["k"],
+            )
+        )(jnp.float32(TRANSIT_PARAMS["period"]))
+        assert np.isfinite(float(g))
+
+
+# ---------------------------------------------------------------------
+# 7.  planet_mass/stellar_mass validation
+# ---------------------------------------------------------------------
+
+class TestPlanetMassValidation:
+
+    def _model(self, **transit_overrides):
+        tp = {**TRANSIT_PARAMS, **transit_overrides}
+        return build_system(
+            wavelength=WAVELENGTH, flux_quiet=FLUX_QUIET,
+            times=np.array([0.0, 1.0]), P_rot=P_ROT,
+            stellar_grid_size=20, ve=5.0, ld_coeffs=[0.0, 0.0], **tp,
+        )
+
+    def test_transit_present_masses_omitted_raises(self):
+        model = self._model()
+        with pytest.raises(ValueError, match="planet_mass and stellar_mass"):
+            make_rv(model)
+
+    def test_negative_planet_mass_raises(self):
+        model = self._model()
+        with pytest.raises(ValueError, match="planet_mass"):
+            make_rv(model, planet_mass=-1.0, stellar_mass=1.0)
+
+    def test_nonpositive_stellar_mass_raises(self):
+        model = self._model()
+        with pytest.raises(ValueError, match="stellar_mass"):
+            make_rv(model, planet_mass=1.0, stellar_mass=0.0)
+
+    def test_scalar_planet_mass_broadcasts_to_two_planets(self):
+        model = self._model(
+            t0=[0.0, 2.0], period=[5.0, 11.0], a_over_rstar=[10.0, 15.0],
+            inclination=[np.pi / 2.0, np.pi / 2.0], k=[0.1, 0.1],
+        )
+        rv, _ = make_rv(model, planet_mass=1.0, stellar_mass=1.0)
+        assert np.all(np.isfinite(np.asarray(rv)))
+
+    def test_planet_mass_length_mismatch_raises(self):
+        model = self._model(
+            t0=[0.0, 2.0], period=[5.0, 11.0], a_over_rstar=[10.0, 15.0],
+            inclination=[np.pi / 2.0, np.pi / 2.0], k=[0.1, 0.1],
+        )
+        with pytest.raises(ValueError):
+            make_rv(model, planet_mass=[1.0, 2.0, 3.0], stellar_mass=1.0)
+
+
+# ---------------------------------------------------------------------
+# 8.  make_rv / quick_rv return star_maps too -- true mirrors of make_lc/quick_lc
+# ---------------------------------------------------------------------
+
+class TestRvStarMaps:
+
+    def test_quick_rv_star_maps_shape_and_content(self):
+        times = np.linspace(-0.3, 0.3, 5)
+        rv, star_maps = quick_rv(
+            wavelength=WAVELENGTH, flux_quiet=FLUX_QUIET, flux_active=FLUX_SPOT,
+            ar_lat=[10.0], ar_long=[30.0], ar_size=[15.0], ar_smoothness=[4.0],
+            times=times, P_rot=P_ROT, stellar_grid_size=STELLAR_GRID, ve=5.0,
+            ld_coeffs=[0.4, 0.2],
+        )
+        n = 2 * STELLAR_GRID + 1
+        assert rv.shape == (5,)
+        assert star_maps.shape == (5, n, n)
+        assert np.count_nonzero(star_maps[0]) > 0
+
+    def test_make_rv_star_maps_is_a_velocity_map_not_a_flux_map(self):
+        """make_rv's star_maps is a per-pixel radial-velocity map, distinct
+        from make_lc's flux map: for a quiet, equator-on star it is
+        antisymmetric left-right (velocity flips sign with x, unlike flux)
+        and vanishes along the central meridian (x=0, zero LOS velocity
+        regardless of brightness there)."""
+        model = build_system(
+            wavelength=WAVELENGTH, flux_quiet=FLUX_QUIET,
+            times=np.linspace(-0.2, 0.2, 6), P_rot=P_ROT,
+            stellar_grid_size=STELLAR_GRID, ve=5.0, ld_coeffs=[0.4, 0.2],
+            inc_star=90.0,
+        )
+        lc, maps_lc = make_lc(model)
+        rv, maps_rv = make_rv(model)
+        maps_lc = np.asarray(maps_lc)
+        maps_rv = np.asarray(maps_rv)
+
+        assert maps_rv.shape == maps_lc.shape
+        assert not np.array_equal(maps_lc, maps_rv)
+
+        n = maps_rv.shape[-1]
+        mid = n // 2
+        np.testing.assert_allclose(maps_rv[:, :, mid], 0.0, atol=1e-10)
+        np.testing.assert_allclose(maps_rv, -maps_rv[:, :, ::-1], atol=1e-10)
+
+    def test_star_maps_oversample_takes_first_subexposure(self):
+        """Mirrors make_lc: oversample>1 keeps only the first sub-exposure's
+        map per original phase, not an average."""
+        times = np.linspace(-0.2, 0.2, 4)
+        model_os1 = build_system(
+            wavelength=WAVELENGTH, flux_quiet=FLUX_QUIET, times=times, P_rot=P_ROT,
+            stellar_grid_size=20, ve=5.0, ld_coeffs=[0.4, 0.2], oversample=1,
+        )
+        model_os8 = build_system(
+            wavelength=WAVELENGTH, flux_quiet=FLUX_QUIET, times=times, P_rot=P_ROT,
+            stellar_grid_size=20, ve=5.0, ld_coeffs=[0.4, 0.2], oversample=8,
+        )
+        ar_kwargs = dict(
+            flux_active=jnp.asarray(FLUX_SPOT).reshape(1, 1),
+            ar_lat=jnp.array([10.0]), ar_long=jnp.array([30.0]),
+            ar_size=jnp.array([15.0]), ar_smoothness=jnp.array([4.0]),
+        )
+        _, maps_os1 = make_rv(model_os1, **ar_kwargs)
+        _, maps_os8 = make_rv(model_os8, **ar_kwargs)
+        assert maps_os1.shape == maps_os8.shape == (4, 41, 41)
+
+
+# ---------------------------------------------------------------------
+# 9.  make_lc / make_rv non-interference regression
+# ---------------------------------------------------------------------
+
+class TestMakeRvDoesNotAffectMakeLc:
+    """
+    make_lc and make_rv now share _resolve_ar_params/_resolve_ld_coeffs/
+    _resolve_transit_params -- verify calling make_rv doesn't mutate any
+    shared model-dict state that would corrupt a subsequent make_lc call
+    on the same model.
+    """
+
+    def test_make_lc_unaffected_by_interleaved_make_rv_call(self):
+        model = build_system(
+            wavelength=WAVELENGTH, flux_quiet=FLUX_QUIET,
+            times=np.linspace(-0.2, 0.2, 20), P_rot=P_ROT,
+            stellar_grid_size=30, ve=5.0, ld_coeffs=[0.0, 0.0], **TRANSIT_PARAMS,
+        )
+        ar_kwargs = dict(
+            flux_active=jnp.asarray(FLUX_SPOT).reshape(1, 1),
+            ar_lat=jnp.array([10.0]), ar_long=jnp.array([30.0]),
+            ar_size=jnp.array([8.0]), ar_smoothness=jnp.array([4.0]),
+        )
+        lc_before, maps_before = make_lc(model, **ar_kwargs)
+        _ = make_rv(model, planet_mass=1.0, stellar_mass=1.0, **ar_kwargs)
+        lc_after, maps_after = make_lc(model, **ar_kwargs)
+
+        np.testing.assert_array_equal(np.asarray(lc_before), np.asarray(lc_after))
+        np.testing.assert_array_equal(np.asarray(maps_before), np.asarray(maps_after))

@@ -2,23 +2,23 @@
 
 ## Overview
 
-SAJAX computes light curves that include stellar contamination from active regions (spots and faculae), and can optionally include a planetary transit.
-It takes stellar, active region, and orbital parameters, as well as timing information to produce wavelength-resolved light curves.
+SAJAX computes spectroscopic and photometric time series that include stellar contamination from active regions (spots and faculae), and can optionally include a planetary transit.
+It takes stellar, active region, and orbital parameters, as well as timing information to produce wavelength-resolved light curves and radial velocity curves.
 
 ## Basic Workflow
 
 1. **Define spectra** — provide quiet-star and active-region flux as functions of wavelength
-2. **Set stellar parameters** — inclination, rotation velocity, limb darkening
+2. **Set stellar parameters** — inclination, rotation velocity, limb darkening, mass
 3. **Define active regions** *(optional)* — positions, sizes, and smoothness
-4. **Define a transit** *(optional)* — orbital geometry and planet-to-star radius ratio
-5. **Compute the light curve** — SAJAX returns disk-integrated flux at each requested time, per wavelength bin
+4. **Define a transit** *(optional)* — orbital geometry, planet-to-star radius ratio, planet mass
+5. **Compute the light curve / radial velocity curve** — SAJAX returns disk-integrated flux / radial velocity at each requested time, per wavelength bin
 
 ### Two-stage API
 
 - `build_system(...)` — call **once**. Builds the stellar grid and every array that stays fixed across model calls (spectra, grid, and, if given, the transit geometry).
-- `make_lc(model, ...)` — call at **every step** to produce the light curve(s). Pure JAX - accepts tracers, so it's compatible with `jit`/`vmap`/gradient-based samplers.
+- `make_lc(model, ...)`/`make_rv(model, ...)`/`make_lc_and_rv(model, ...)` — call at **every step** to produce the light curve(s) and/or radial velocity curve(s). Pure JAX - accepts tracers, so it's compatible with `jit`/`vmap`/gradient-based samplers.
 
-`quick_lc(...)` wraps both stages in a single call — convenient for quick, one-off evaluations.
+`quick_lc(...)`/`quick_rv(...)`/`quick_lc_and_rv(...)` wraps both stages in a single call — convenient for quick, one-off evaluations.
 
 ## Key Inputs
 
@@ -39,6 +39,8 @@ It takes stellar, active region, and orbital parameters, as well as timing infor
 | `t0`, `period`, `a_over_rstar`, `inclination`, `k` | Transit geometry (all-or-nothing) — mid-transit epoch [days], orbital period [days], a/R\*, orbital inclination [rad], and Rp/R\* | `k=0.1` |
 | `ecc`, `omega_peri` | Orbital eccentricity and argument of periastron [rad] *(optional, default circular)* | `0.0`, `0.0` |
 | `sp_orb` | Sky-projected spin-orbit angle λ [deg] — rotates the transit chord relative to the stellar spin axis *(optional, default 0.0 = aligned)* | `90.0` (polar) |
+| `planet_mass`, `stellar_mass` | Planet mass [M<sub>Jup</sub>] and stellar mass [M<sub>sun</sub>] — sets the Keplerian RV semi-amplitude. Required together by `make_rv`/`make_lc_and_rv` whenever a transit/orbit is attached | `planet_mass=1.0`, `stellar_mass=1.0` |
+| `gamma` | Systemic radial-velocity offset [km/s], added to `make_rv`/`make_lc_and_rv`'s output *(optional, default 0.0)* | `0.0` |
 
 `ar_lat`/`ar_long`/`ar_size`/`ar_smoothness`/`flux_active` are all-or-nothing: give every one of them to add active region(s), or omit all of them for a quiet star. Each carries a trailing `(nar,)` axis (`nar` inferred from `ar_lat`), so `ar_lat=[20.0, -20.0]` etc. adds two active regions.
 
@@ -53,6 +55,15 @@ It takes stellar, active region, and orbital parameters, as well as timing infor
 | `lc` | `(n_times, nwave)`, or `(n_times,)` if `nwave == 1` | Light curve (wavelength-resolved when `nwave > 1`) in the same units as `flux_quiet`/`flux_active` |
 | `star_maps` | `(n_times, n_px, n_px)` | 2D flux maps of the star (and transiting planet, if present) at each time |
 
+`make_rv`/`quick_rv` likewise return an `(rv, star_maps)` tuple:
+
+| Output | Shape | Description |
+|--------|-------|-------------|
+| `rv` | `(n_times, nwave)`, or `(n_times,)` if `nwave == 1` | Radial velocity (wavelength-resolved when `nwave > 1`) in [km/s] |
+| `star_maps` | `(n_times, n_px, n_px)` | 2D radial velocity maps of the star (and transit planet, if present) at each time |
+
+`make_lc_and_rv`/`quick_lc_and_rv` return an `(lc, rv, star_maps)` tuple: `lc` and `rv` as defined above, and `star_maps` is the flux map (as returned by `make_lc`/`quick_lc`) — shared between the two curves and computed only once, rather than paying for the expensive per-pixel flux computation twice by calling `make_lc` and `make_rv` separately with the same parameters.
+
 ## Limb-Darkening Modes
 
 SAJAX supports multiple limb-darkening laws:
@@ -64,8 +75,8 @@ SAJAX supports multiple limb-darkening laws:
 - `intensity_profile` — full I(μ) profile
 
 ## Common Use Cases
-
-### Case 1: Single active region
+### Light Curves
+#### Case 1: Single active region
 
 ```python
 import jax.numpy as jnp
@@ -87,7 +98,7 @@ lc, star_maps = quick_lc(
     flux_active        = flux_active,
     ld_coeffs          = [0.3, 0.1],       # quadratic law: [u1, u2]
     inc_star           = 90.0,             # stellar inclination [deg]  (equator-on)
-    ar_lat             = 20.0,           # one active region at 20° latitude
+    ar_lat             = 20.0,           # one active region at 20deg latitude
     ar_long            = 0.0,
     ar_size            = 10.0,           # angular radius [deg]
     ar_smoothness      = 4.0,            # super-Gaussian edge order
@@ -100,12 +111,12 @@ lc, star_maps = quick_lc(
 )
 ```
 
-### Case 2: Multiple active regions
+#### Case 2: Multiple active regions
 
 Replace
 
 ```python
-    ar_lat             = 20.0,           # one active region at 20° latitude
+    ar_lat             = 20.0,           # one active region at 20deg latitude
     ar_long            = 0.0,
     ar_size            = 10.0,           # angular radius [deg]
     ar_smoothness      = 4.0,
@@ -114,7 +125,7 @@ Replace
 in the previous code, with
 
 ```python
-    ar_lat             = [20.0, -45.0],          # two active regions at 20° and -45° latitude
+    ar_lat             = [20.0, -45.0],          # two active regions at 20deg and -45deg latitude
     ar_long            = [0.0, 15.0],
     ar_size            = [10.0, 5.0],            # angular radius [deg]
     ar_smoothness      = [4.0, 1.0],             # sharp-edged spot, soft-edged facula
@@ -122,8 +133,8 @@ in the previous code, with
 
 Active regions overlap additively — e.g. an umbra sitting inside a penumbra contributes on top of it, rather than one masking the other.
 
-### Case 3: Planetary transit
-#### a) Basic transit + stellar activity
+#### Case 3: Planetary transit
+##### a) Basic transit + stellar activity
 
 Transit parameters are individual keyword arguments, given all together alongside the active-region ones above:
 
@@ -151,9 +162,9 @@ lc, star_maps = quick_lc(
 )
 ```
 
-By default the occultation mask has a hard edge, which gives `jax.grad` (almost) zero gradient with respect to the transit-geometry parameters. For gradient-based retrieval of `t0`/`period`/`a_over_rstar`/`inclination`/`k`/`ecc`/`omega_peri`/`sp_orb` (_e.g._, a gradient-descent MAP approach), pass `transit_softness > 0` to `make_lc` (not exposed on `quick_lc`) — see the `inference.ipynb` example notebook for a full walkthrough.
+By default the occultation mask has a hard edge, which gives `jax.grad` (almost) zero gradient with respect to the transit-geometry parameters. For gradient-based retrieval of `t0`/`period`/`a_over_rstar`/`inclination`/`k`/`ecc`/`omega_peri`/`sp_orb` (_e.g._, a gradient-descent MAP approach), pass `transit_softness > 0` to `make_lc` (not exposed on `quick_lc`) — see the `inference_lc.ipynb` example notebook for a full walkthrough.
 
-#### b) Misaligned transit (spin-orbit angle)
+##### b) Misaligned transit (spin-orbit angle)
 
 SAJAX fixes the stellar spin axis along the sky's north-south direction, so by default (`sp_orb=0.0`) the transit chord runs parallel to the projected stellar equator. Passing `sp_orb` rotates the chord about the stellar centre, letting you model misaligned or even polar configurations:
 
@@ -178,13 +189,13 @@ lc, star_maps = quick_lc(
     a_over_rstar       = 15.0,
     inclination        = 1.55,
     k                  = 0.1,
-    sp_orb             = 90.0,    # polar transit, 90° from aligned [deg]
+    sp_orb             = 90.0,    # polar transit, 90deg from aligned [deg]
 )
 ```
 
-Since the active region's latitude/longitude are unaffected by `sp_orb` — only the planet's trajectory rotates — a spot that produces a clear crossing anomaly at `sp_orb=0` can end up entirely missed by a polar (`sp_orb≈90`) chord, even though the transit depth and duration are unchanged. See `introduction.ipynb`'s Case 6 for a full side-by-side comparison (light curve + stellar-disc animation) of an aligned vs. inclined transit of the same spot.
+Since the active region's latitude/longitude are unaffected by `sp_orb` — only the planet's trajectory rotates — a spot that produces a clear crossing anomaly at `sp_orb=0` can end up entirely missed by a polar (`sp_orb~90`) chord, even though the transit depth and duration are unchanged. See `introduction_lc.ipynb`'s Case 6 for a full side-by-side comparison (light curve + stellar-disc animation) of an aligned vs. inclined transit of the same spot — or `introduction_rv.ipynb`'s Case 6 for the same comparison in radial velocity, where `sp_orb` reshapes the Rossiter-McLaughlin anomaly itself (its peak amplitude scales as `cos(sp_orb)` for a central transit), which is usually how a real spin-orbit angle gets measured in the first place.
 
-#### c) Multiple planets
+##### c) Multiple planets
 
 Every transit-geometry parameter (`t0`/`period`/`a_over_rstar`/`inclination`/`k`, plus the optional `ecc`/`omega_peri`/`sp_orb`) carries a trailing `(nplanet,)` axis, exactly like `ar_lat`/`ar_long`/etc. do for active regions — `nplanet` is inferred from `t0`. A scalar (or size-1 array) among the others broadcasts to every planet. Replace
 
@@ -208,7 +219,7 @@ in Case 3's snippet, with
 
 Unlike active regions — which are spectral-contrast modulators and so overlap **additively** (Case 2) — planets are opaque occulters, so overlapping transits combine **multiplicatively**: the fraction of a pixel's flux surviving `nplanet` planets is `prod(1 - mask_i)`, not `1 - sum(mask_i)`. This keeps the occulted flux fraction physically bounded in `[0, 1]` even when two planets' discs overlap on the stellar grid, rather than letting their masks double-subtract past full occultation.
 
-### Case 4: Time-evolving active regions
+#### Case 4: Time-evolving active regions
 
 `flux_active`/`ar_lat`/`ar_long`/`ar_size`/`ar_smoothness` may each independently carry an extra leading time axis (length = the number of `times` the model was built with) instead of their usual per-AR shape, to let that property evolve over the observations — a spot growing/decaying, drifting in latitude/longitude, or changing contrast:
 
@@ -241,6 +252,95 @@ Only the parameters you want to evolve need the extra axis — the rest keep the
 
 Each `times` entry's active-region values are used exactly as given — the forward model does **not** couple them across epochs (no smoothness/continuity is enforced between one entry and the next). This is deliberate: it keeps the model as a per-epoch evaluation, allowing users full control over the dynamics. It also means nothing stops a naive fit from letting an active region changing unphysically between epochs. If you're doing inference on a dynamic active region, it's up to you to keep that from happening — _e.g._ with priors on the epoch-to-epoch differences (or on physical rates, like a maximum drift speed) that prevent implausible jumps.
 
+### Radial velocity
+
+`quick_rv` is `quick_lc`'s radial-velocity counterpart — same physical setup, same all-or-nothing active-region rules, same `(rv, star_maps)`-shaped output (see the Key Outputs section above for a full description).
+
+#### Case 1: Single active region
+
+```python
+from sajax import quick_rv
+
+rv, star_maps = quick_rv(
+    wavelength         = wavelength,
+    flux_quiet         = flux_quiet,
+    flux_active        = flux_active,
+    ld_coeffs          = [0.3, 0.1],
+    inc_star           = 90.0,
+    ar_lat             = 20.0,
+    ar_long            = 0.0,
+    ar_size            = 10.0,
+    ar_smoothness      = 4.0,
+    times              = times,
+    P_rot              = P_ROT,
+    stellar_grid_size  = 100,
+    ve                 = 2.0,
+    ld_mode            = "quadratic",
+)
+```
+
+#### Case 2: Planetary transit
+
+```python
+rv, star_maps = quick_rv(
+    wavelength         = wavelength,
+    flux_quiet         = flux_quiet,
+    flux_active        = flux_active,
+    ld_coeffs          = [0.3, 0.1],
+    inc_star           = 90.0,
+    ar_lat             = 20.0,
+    ar_long            = 0.0,
+    ar_size            = 10.0,
+    ar_smoothness      = 4.0,
+    times              = times,
+    P_rot              = P_ROT,
+    stellar_grid_size  = 100,
+    ve                 = 2.0,
+    ld_mode            = "quadratic",
+    t0                 = 5.0,
+    period             = 3.5,
+    a_over_rstar       = 15.0,
+    inclination        = 1.55,
+    k                  = 0.1,
+    planet_mass        = 1.0,     # M_Jup
+    stellar_mass       = 1.0,     # M_sun
+)
+```
+
+### Light curve and radial velocity together
+
+`quick_lc_and_rv` takes the identical arguments as `quick_lc`/`quick_rv` combined (active-region, transit, *and* `planet_mass`/`stellar_mass`/`gamma`) and returns `(lc, rv, star_maps)` in one call — useful when generating both datasets jointly, since it computes the shared, expensive per-pixel flux grid only once instead of twice:
+
+```python
+from sajax import quick_lc_and_rv
+
+lc, rv, star_maps = quick_lc_and_rv(
+    wavelength         = wavelength,
+    flux_quiet         = flux_quiet,
+    flux_active        = flux_active,
+    ld_coeffs          = [0.3, 0.1],
+    inc_star           = 90.0,
+    ar_lat             = 20.0,
+    ar_long            = 0.0,
+    ar_size            = 10.0,
+    ar_smoothness      = 4.0,
+    times              = times,
+    P_rot              = P_ROT,
+    stellar_grid_size  = 100,
+    ve                 = 2.0,
+    ld_mode            = "quadratic",
+    t0                 = 5.0,
+    period             = 3.5,
+    a_over_rstar       = 15.0,
+    inclination        = 1.55,
+    k                  = 0.1,
+    planet_mass        = 1.0,
+    stellar_mass       = 1.0,
+)
+```
+
+See `inference_combined.ipynb` for a full worked example fitting both curves jointly.
+
 ### Numerical precision for long baselines (absolute BJD times)
 
 JAX defaults to `float32`. If you pass absolute epochs in BJD (e.g. `2460123.45`) `float32`'s 24 mantissa bits leave a rounding error (on the order of hours) significant enough to blur or bias the transit shape. To avoid this issue, `build_system` **automatically** subtracts a reference epoch (`model["t_ref"] = floor(times.min())`) so any downstream numerical work benefits from the smaller magnitude. If the rounding error is still a meaningful fraction of your sampling cadence *after* this automatic shift, SAJAX emits a warning, and `jax_enable_x64` remains available as a fallback for that case:
@@ -255,6 +355,6 @@ from sajax import build_system, make_lc   # import sajax only after this
 
 ## Next Steps
 
-- 💾 **[Explore Tutorials](https://sajax.readthedocs.io/en/latest/examples/introduction.html)** — Check out full working examples with colorful plots, interesting use cases, and the full implementation of both an MCMC and a gradient-based retrieval!
+- 💾 **[Explore Tutorials](https://sajax.readthedocs.io/en/latest/examples/introduction_lc.html)** — Check out full working examples with colorful plots and interesting use cases, split across light-curve (`introduction_lc`) and radial-velocity (`introduction_rv`) notebooks, plus MCMC/gradient-based retrieval from the light curve alone, the RV curve alone, or both jointly (`inference_lc`, `inference_rv`, `inference_combined`)!
 
 - 📚 **{doc}`Read the API Reference <autoapi/index>`** — Learn about all available functions, classes, and parameters
