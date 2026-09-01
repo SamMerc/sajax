@@ -6,10 +6,10 @@ dependency from the original SAGE code with pure JAX, making all
 geometry operations differentiable and JIT-compilable.
 
 Geometry convention (identical to original SAGE):
-    - Observer is at z → +∞.  The plane of sky is X-Y.
+    - Observer is at z -> +inf.  The plane of sky is X-Y.
     - The stellar rotation axis is the y-axis.
-    - inc_star = 90°  →  equator-on  (observer sees the equator).
-    - inc_star =  0°  →  pole-on     (observer looks at the north pole).
+    - inc_star = 90deg  ->  equator-on  (observer sees the equator).
+    - inc_star =  0deg  ->  pole-on     (observer looks at the north pole).
 """
 
 import jax.numpy as jnp
