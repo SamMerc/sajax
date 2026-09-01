@@ -14,11 +14,35 @@ build_system
     anomaly is computed correctly.
 
 make_lc
-    Pure JAX evaluation — accepts JAX tracers, compatible with
-    jit, vmap, emcee_jax, and gradient-based samplers.
+    Pure JAX light curve evaluation, given a model from ``build_system``.
+    Accepts JAX tracers. Compatible with jit, vmap, emcee_jax, and gradient-based samplers.
 
 quick_lc
     Convenience wrapper: build_system + make_lc in one call.
+    Use for one-off evaluations outside MCMC.
+
+make_rv
+    Pure JAX radial-velocity evaluation, given a model from ``build_system``.
+    Accepts JAX tracers. Compatible with jit, vmap, emcee_jax, and gradient-based samplers.
+    Accepts the same setup as ``make_lc``, plus ``planet_mass``/``stellar_mass``
+    (for Keplerian RV semi-amplitude) and ``gamma`` (systemic velocity).
+
+quick_rv
+    Convenience wrapper: build_system + make_rv in one call.
+    Use for one-off evaluations outside MCMC.
+
+make_lc_and_rv
+    Pure JAX light curve + radial-velocity evaluation together, given a
+    model from ``build_system``. Accepts the identical parameter set as
+    ``make_lc``/``make_rv`` combined. Shares the expensive per-pixel-
+    per-wavelength flux computation between the two outputs instead of
+    computing it twice, so calling this once is roughly 2x cheaper than
+    calling ``make_lc`` and ``make_rv`` separately with the same
+    arguments -- useful for joint transit-photometry + radial-velocity
+    fits. Returns ``(lc, rv, star_maps)``.
+
+quick_lc_and_rv
+    Convenience wrapper: build_system + make_lc_and_rv in one call.
     Use for one-off evaluations outside MCMC.
 
 build_stellar_grid
@@ -41,9 +65,13 @@ LdMode
 """
 
 from .core import (
-    quick_lc,
     build_system,
     make_lc,
+    quick_lc,
+    make_rv,
+    quick_rv,
+    make_lc_and_rv,
+    quick_lc_and_rv,
     build_stellar_grid,
     LdMode,
 )
@@ -58,6 +86,10 @@ __all__ = [
     "build_system",
     "make_lc",
     "quick_lc",
+    "make_rv",
+    "quick_rv",
+    "make_lc_and_rv",
+    "quick_lc_and_rv",
     "rotate_active_region",
     "_compute_planet_mask",
     "_compute_all_planets_mask",
