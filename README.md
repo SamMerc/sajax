@@ -7,17 +7,11 @@
 ![Tests](https://github.com/SamMerc/sajax/actions/workflows/tests.yml/badge.svg)
 [![codecov](https://codecov.io/gh/SamMerc/sajax/branch/main/graph/badge.svg)](https://codecov.io/gh/SamMerc/sajax)
 
-SAJAX is a JAX-accelerated reimplementation of
-[SAGE](https://github.com/chakrah/sage) ([Chakraborty et al. 2024](https://www.aanda.org/articles/aa/abs/2024/05/aa47727-23/aa47727-23.html)), a code
-that models stellar contamination of exoplanet transmission spectra from
-active regions (ars, faculae) on the stellar surface.
+SAJAX is a package that models contamination of exoplanet photometric and spectroscopic time series by active regions (spots and faculae) on the stellar surface. Its core functionality builds on [SAGE](https://github.com/chakrah/sage) ([Chakraborty et al. 2024](https://www.aanda.org/articles/aa/abs/2024/05/aa47727-23/aa47727-23.html)), and it draws additional inspiration from [ANTARESS](https://gitlab.unige.ch/spice_dune/antaress) ([Bourrier et al. 2024](https://www.aanda.org/articles/aa/full_html/2024/11/aa49203-24/aa49203-24.html)).
 
-The key innovation over plain SAGE is that SAJAX vectorises the spectral
-loop with `jax.vmap`, making it fast on both CPU and GPU without any
-change to the calling code, and fully differentiable — enabling
-gradient-based inference with tools like NumPyro or Optax.
+The main innovation over SAGE is that SAJAX vectorises the spatial and spectral loops with `jax.vmap`, making it fast on both CPU and GPU — with no change to the calling code — and fully differentiable, enabling gradient-based inference with tools like NumPyro or Optax.
 
-Documentation can be found at [sajax.readthedocs.io](http://sajax.readthedocs.io/)
+The full documentation can be found at [sajax.readthedocs.io](http://sajax.readthedocs.io/)
 
 ## Installation
 
@@ -48,17 +42,20 @@ activate it with `source .venv/bin/activate`.
 sajax/
 ├── sajax/
 │   ├── __init__.py          # public API
-│   ├── core.py              # JAX light-curve engine
+│   ├── core.py              # JAX light-curve and radial velocity engine
 │   ├── planet.py            # planet orbital dynamics
-│   ├── geometry.py          # rotation matrices, coordinate transforms
+│   └── geometry.py          # rotation matrices, coordinate transforms
 ├── docs/
-│   ├── examples/
-│   │   ├── introduction.ipynb
-│   │   ├── comparison.ipynb
-│   │   ├── inference.ipynb
+│   └── examples/
+│       ├── introduction_lc.ipynb
+│       ├── introduction_rv.ipynb
+│       ├── comparison.ipynb
+│       ├── inference_lc.ipynb
+│       ├── inference_rv.ipynb
+│       └── inference_combined.ipynb
 ├── tests/
 │   ├── test_core.py
-│   ├── test_planet.py
+│   └── test_planet.py
 ├── pyproject.toml
 ├── .gitignore
 └── README.md
