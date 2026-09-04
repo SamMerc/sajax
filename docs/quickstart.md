@@ -243,7 +243,7 @@ Each `times` entry's active-region values are used exactly as given — the forw
 
 ### Case 6: Flares
 
-A flare is modeled with Case 5's time-evolving machinery: an active region whose *spectrum* varies in time. Combine two ingredients — a flare spectrum (e.g. a hot ~9,000 K blackbody sampled on the model's `wavelength` grid) and the time template of [Tovar Mendoza et al. (2022)](https://ui.adsabs.harvard.edu/abs/2022AJ....164...17T/abstract), available as `sajax.flare_template(t, tpeak, fwhm, ampl)` (peak time, FWHM in the units of `t`, peak amplitude; JAX-native and differentiable):
+A flare is modeled with Case 5's time-evolving machinery: an active region whose *spectrum* varies in time. Combine two ingredients — a flare spectrum (e.g. a hot ~9,000 K blackbody sampled on the model's `wavelength` grid) and a time template. Users can create their own or use the one of [Tovar Mendoza et al. (2022)](https://ui.adsabs.harvard.edu/abs/2022AJ....164...17T/abstract), available as `sajax.flare_template(t, tpeak, fwhm, ampl)` (peak time, FWHM in the units of `t`, peak amplitude; JAX-native and differentiable):
 
 ```python
 from sajax import flare_template
@@ -252,7 +252,7 @@ template = flare_template(times, tpeak=0.1, fwhm=0.01)       # (ntime,)
 flux_flaring = flux_quiet + template[:, None] * flux_flare   # (ntime, nwave)
 ```
 
-Pass `flux_flaring` as that region's column of a time-varying `flux_active` (shape `(ntime, nar, nwave)`, Case 5): its contrast rises and decays following the template, and outside the flare the contrast is exactly 1, so the region vanishes. Since flare emission is chromospheric rather than photospheric, turn off limb darkening for that region (zero coefficients in `ld_coeffs_active`). Because the flare lives on the stellar surface, it is foreshortened toward the limb, carried by rotation, and occulted by a transiting planet crossing it. See `introduction.ipynb`'s Case 9 for a full worked example.
+Pass `flux_flaring` as that region's time-varying `flux_active` (shape `(ntime, nar, nwave)`, Case 5): its contrast rises and decays following the template, and outside the flare the contrast is exactly 1, so the region vanishes. Since flare emission is chromospheric rather than photospheric, we recommend users turn off limb darkening for that region (zero coefficients in `ld_coeffs_active`). Because the flare lives on the stellar surface, it is foreshortened toward the limb, carried by rotation, and occulted by a transiting planet crossing it. See `introduction.ipynb`'s Case 9 for a full worked example.
 
 ### Numerical precision for long baselines (absolute BJD times)
 
