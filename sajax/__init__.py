@@ -24,6 +24,11 @@ quick_lc
 build_stellar_grid
     Pre-compute the static stellar pixel grid.
 
+flare_template
+    Continuous flare time template of Tovar Mendoza et al. (2022) — a
+    Gaussian convolved with a double exponential, parameterized by peak
+    time, FWHM, and amplitude.
+
 rotate_active_region
     Apply stellar rotation and inclination to a Cartesian active region
     position.
@@ -45,6 +50,7 @@ from .core import (
     build_system,
     make_lc,
     build_stellar_grid,
+    flare_template,
     LdMode,
 )
 from .geometry import rotate_active_region
@@ -58,6 +64,7 @@ __all__ = [
     "build_system",
     "make_lc",
     "quick_lc",
+    "flare_template",
     "rotate_active_region",
     "_compute_planet_mask",
     "_compute_all_planets_mask",

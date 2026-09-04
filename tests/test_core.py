@@ -17,6 +17,7 @@ from sajax import quick_lc, build_stellar_grid
 from sajax.core import (
     build_system,
     make_lc,
+    flare_template,
     _compute_all_planets_mask,
     _compute_ar_shape,
     _compute_single_phase,
@@ -99,6 +100,67 @@ def small_model(flat_spectra, base_params):
         ve=2.0,
         ld_mode="quadratic",
     )
+
+
+# ===================================================================
+# flare_template — Tovar Mendoza et al. (2022) flare time template
+# ===================================================================
+
+class TestFlareTemplate:
+
+    _T = jnp.linspace(-0.5, 1.0, 4001)   # dense grid, 15 FWHM wide
+
+    def test_peaks_near_tpeak_at_roughly_ampl(self):
+        """The published fit peaks at ~0.95*ampl within ~0.1 FWHM of tpeak."""
+        f = flare_template(self._T, 0.0, 0.1, ampl=2.0)
+        i = int(jnp.argmax(f))
+        assert abs(float(self._T[i])) < 0.01
+        assert float(f[i]) == pytest.approx(2.0, rel=0.1)
+
+    def test_fwhm_matches_requested_width(self):
+        f = flare_template(self._T, 0.0, 0.1)
+        above = self._T[f >= 0.5 * float(jnp.max(f))]
+        assert float(above[-1] - above[0]) == pytest.approx(0.1, rel=0.15)
+
+    def test_fast_rise_slow_decay(self):
+        """Classical flare asymmetry: gone 2 FWHM before the peak, still
+        visibly decaying 2 FWHM after."""
+        assert float(flare_template(jnp.asarray(-0.2), 0.0, 0.1)) == pytest.approx(0.0, abs=1e-6)
+        assert float(flare_template(jnp.asarray(0.2), 0.0, 0.1)) > 0.05
+
+    def test_linear_in_ampl(self):
+        f1 = flare_template(self._T, 0.0, 0.1, ampl=1.0)
+        f3 = flare_template(self._T, 0.0, 0.1, ampl=3.0)
+        np.testing.assert_allclose(np.array(f3), 3.0 * np.array(f1), rtol=1e-6)
+
+    def test_gradients_finite(self):
+        """The point of a JAX-native template: differentiable w.r.t. its
+        parameters, for gradient-based flare fitting."""
+        def total(params):
+            tpeak, fwhm, ampl = params
+            return jnp.sum(flare_template(self._T, tpeak, fwhm, ampl))
+        g = jax.grad(total)(jnp.array([0.0, 0.1, 1.0]))
+        assert bool(jnp.all(jnp.isfinite(g)))
+        assert bool(jnp.any(g != 0.0))
+
+    def test_long_baseline_finite(self):
+        """Regression: far before the peak the exp factor used to overflow
+        before erfc underflowed, giving inf * 0 = NaN values and NaN
+        gradients on long baselines (e.g. a 14-min-FWHM flare in the
+        middle of days of data)."""
+        t = jnp.linspace(0.0, 2.0, 2001)
+        f = flare_template(t, 1.0, 0.01)
+        assert bool(jnp.all(jnp.isfinite(f)))
+        # exactly zero well before the flare, still nonzero in the tail
+        assert float(f[0]) == 0.0
+        assert float(flare_template(jnp.asarray(1.05), 1.0, 0.01)) > 0.0
+
+        def total(params):
+            tpeak, fwhm, ampl = params
+            return jnp.sum(flare_template(t, tpeak, fwhm, ampl))
+        g = jax.grad(total)(jnp.array([1.0, 0.01, 1.0]))
+        assert bool(jnp.all(jnp.isfinite(g)))
+        assert bool(jnp.any(g != 0.0))
 
 
 # ===================================================================

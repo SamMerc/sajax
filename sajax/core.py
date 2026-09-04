@@ -114,6 +114,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 from jax import vmap
+from jax.scipy.special import erfc
 import interpax
 
 from .geometry import rotate_active_region
@@ -161,6 +162,45 @@ _LOG_ARG_MAX   = 50.0
 # F_quiet exactly 0 there; without a floor this causes NaN which corrupt arted_flux
 # even though that pixel's contribution is supposed to be 0.
 _FLUX_RATIO_EPS = 1e-12
+
+
+# ---------------------------------------------------------------------------
+# 0. Utilities
+# ---------------------------------------------------------------------------
+
+def flare_template(t, tpeak, fwhm, ampl=1.0):
+    """Continuous flare template of Tovar Mendoza et al. (2022): the
+    convolution of a Gaussian with a double exponential, evaluated at
+    times ``t`` with peak time ``tpeak``, full width at half maximum
+    ``fwhm`` (same units as ``t``), and peak amplitude ``ampl``.
+    Coefficients are the published MCMC fit from
+    https://github.com/lupitatovar/Llamaradas-Estelares -- with them the
+    template's actual maximum is ~0.95 * ``ampl``, at ``t`` ~ ``tpeak``
+    (matching the reference implementation, which is not renormalised
+    to peak at exactly ``ampl`` either).
+
+    Times more than 20 FWHM before the peak return exactly 0 (the true
+    template is ~1e-70 there): the rise-side time argument is clamped so
+    the ``exp * erfc`` product can never overflow to NaN — in value or in
+    gradient — on long baselines.
+    """
+    A, B, C, D1, D2, f1 = (0.9687734504375167, -0.251299705922117,
+                           0.22675974948468916, 0.15551880775110513,
+                           1.2150539528490194, 0.12695865022878844)
+    f2 = 1.0 - f1
+    # Time in units of FWHM from the peak. Clamped on the rise side: at
+    # tn = -20 the erfc factor has underflowed to exactly 0 while the exp
+    # factor is still finite, so the product is exactly 0 there and for
+    # all earlier times — and the clamp keeps exp from overflowing to
+    # inf (NaN forward values and gradients) further out.
+    tn = jnp.maximum((t - tpeak) / fwhm, -20.0)
+
+    def _piece(D, f):
+        return (0.5 * jnp.sqrt(jnp.pi) * A * C * f
+                * jnp.exp(-D * tn + (B / C + D * C / 2.0) ** 2)
+                * erfc((B - tn) / C + C * D / 2.0))
+
+    return ampl * (_piece(D1, f1) + _piece(D2, f2))
 
 
 # ---------------------------------------------------------------------------

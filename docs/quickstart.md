@@ -241,6 +241,19 @@ Only the parameters you want to evolve need the extra axis — the rest keep the
 
 Each `times` entry's active-region values are used exactly as given — the forward model does **not** couple them across epochs (no smoothness/continuity is enforced between one entry and the next). This is deliberate: it keeps the model as a per-epoch evaluation, allowing users full control over the dynamics. It also means nothing stops a naive fit from letting an active region changing unphysically between epochs. If you're doing inference on a dynamic active region, it's up to you to keep that from happening — _e.g._ with priors on the epoch-to-epoch differences (or on physical rates, like a maximum drift speed) that prevent implausible jumps.
 
+### Case 6: Flares
+
+A flare is modeled with Case 5's time-evolving machinery: an active region whose *spectrum* varies in time. Combine two ingredients — a flare spectrum (e.g. a hot ~9,000 K blackbody sampled on the model's `wavelength` grid) and a time template. Users can create their own or use the one of [Tovar Mendoza et al. (2022)](https://ui.adsabs.harvard.edu/abs/2022AJ....164...17T/abstract), available as `sajax.flare_template(t, tpeak, fwhm, ampl)` (peak time, FWHM in the units of `t`, peak amplitude; JAX-native and differentiable):
+
+```python
+from sajax import flare_template
+
+template = flare_template(times, tpeak=0.1, fwhm=0.01)       # (ntime,)
+flux_flaring = flux_quiet + template[:, None] * flux_flare   # (ntime, nwave)
+```
+
+Pass `flux_flaring` as that region's time-varying `flux_active` (shape `(ntime, nar, nwave)`, Case 5): its contrast rises and decays following the template, and outside the flare the contrast is exactly 1, so the region vanishes. Since flare emission is chromospheric rather than photospheric, we recommend users turn off limb darkening for that region (zero coefficients in `ld_coeffs_active`). Because the flare lives on the stellar surface, it is foreshortened toward the limb, carried by rotation, and occulted by a transiting planet crossing it. See `introduction.ipynb`'s Case 9 for a full worked example.
+
 ### Numerical precision for long baselines (absolute BJD times)
 
 JAX defaults to `float32`. If you pass absolute epochs in BJD (e.g. `2460123.45`) `float32`'s 24 mantissa bits leave a rounding error (on the order of hours) significant enough to blur or bias the transit shape. To avoid this issue, `build_system` **automatically** subtracts a reference epoch (`model["t_ref"] = floor(times.min())`) so any downstream numerical work benefits from the smaller magnitude. If the rounding error is still a meaningful fraction of your sampling cadence *after* this automatic shift, SAJAX emits a warning, and `jax_enable_x64` remains available as a fallback for that case:
