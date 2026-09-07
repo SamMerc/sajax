@@ -3,94 +3,6 @@ core.py -- JAX-accelerated stellar active region light-curve engine.
 
 This module is a complete rewrite of ``SAGE1/sage.py`` in JAX.
 
-Key differences from the original NumPy/SciPy implementation
--------------------------------------------------------------
-1. **No wavelength loop.**
-   The original code iterated over wavelengths with a Python ``for`` loop.
-   Here the entire spectral axis is handled by ``jax.vmap``, which maps
-   the single-channel computation across all wavelengths in parallel.
-
-2. **No phase loop.**
-   The original code iterated over rotational phases with a Python loop.
-   Here all phases are computed in a single ``jax.vmap`` call -- this is
-   the main source of speedup over the original code.
-
-3. **Contrast-surface active region model.**
-   Each active region's contrast is described by a super-Gaussian function
-   which can be used to control the region's smoothness. For a given pixel
-   p, the flux at that pixel is given by:
-
-       F_p/F_quiet = 1 - sum_a (1 - C_a) * exp(-(x_a/r_a)^(2*n_a))
-
-   where ``x_a`` is the angular distance from active region ``a``'s centre,
-   ``r_a``/``n_a`` are its angular radius and super-Gaussian order, and
-   ``C_a = F_a/F_quiet`` is its spectral contrast. Components are summed,
-   not selected by a winner-take-all rule, so overlapping active regions
-   (e.g. an umbra sitting inside a penumbra) contribute simultaneously--
-   the combined dip can be deeper than either component's own contrast.
-   The super-gaussian goes from n_a=1 to inf, ranging from a pure gaussian
-   curve, to a top-hat function.
-
-4. **Per-active-region spectra and limb darkening.**
-   Each active region carries its own spectrum and its own limb-darkening
-   coefficients (same law as the quiet photosphere, different values),
-   independent of every other active region and of the quiet photosphere.
-   The contrast value used for the computation of F_p at each pixel and 
-   wavelength is extracted directly from each active region's ratio of 
-   F_a to F_quiet.
-
-5. **Rotational broadening applied at the spectral level.**
-   Rather than a first-order ``(1 + v/c)`` intensity scaling, each pixel's
-   local radial velocity Doppler-shifts the spectrum itself before the
-   contrast at the requested wavelength bin is extracted -- i.e. the
-   spectrum is resampled at ``lambda * (1 - v/c)`` for that pixel's own
-   velocity v. The stellar rotation axis is the y-axis in Carthesian
-   coordinates, so the sky-projected line-of-sight velocity is
-   ``v_z = -(ve/R) * sin(i_star) * x``: it depends only on a pixel's
-   x-coordinate, and all pixels in the same grid column share one velocity --
-   the (expensive) spectral resampling is done once per column (``n``
-   columns) rather than once per pixel (``~n^2``), then broadcast back out to
-   pixels.
-
-6. **No scatter-index active region placement.**
-   The original code located active region pixels via integer scatter indices
-   (fancy indexing with ``.astype(int)``), which is not differentiable
-   and incompatible with ``jit``.  SAJAX instead computes an analytic
-   angular-distance shape over the full pixel arrays using ``jnp.where``.
-
-7. **No class state mutation.**
-   The original ``sage_class.rotate_star()`` mutated ``self.phases_rot``
-   inside a loop -- a latent bug.  SAJAX uses pure functions throughout.
-
-8. **No astropy dependency for geometry.**
-   Rotation matrices are implemented directly in JAX (see geometry.py).
-
-9. **No transit-geometry parameters.**
-   The original SAGE grid was sized using ``planet_pixel_size``,
-   ``radiusratio``, and ``semimajor`` -- artifacts of its transit-fitting
-   origin.  SAJAX replaces these with a single ``stellar_grid_size``
-   parameter: the stellar radius in pixels.  No planet required.
-
-10. **Pre-masked grid.**
-    ``build_stellar_grid`` applies the stellar disc mask immediately and
-    returns 1D arrays containing only the in-disc pixels.  No starmask is
-    ever passed to JAX functions -- the mask is implicit in the data shape.
-    The only 2D reconstruction happens at output time for ``star_maps``,
-    using stored flat indices.
-
-11. **Differentiable end-to-end.**
-    All operations are JAX-native, so ``jax.grad`` / ``jax.jacobian``
-    work on the full pipeline -- useful for gradient-based retrieval.
-
-12. **Phase oversampling.**
-    Real observations integrate photons over a finite exposure time.
-    When an active region crosses the stellar limb, the discrete pixel
-    grid can produce sharp discontinuities in the light curve.
-    The ``oversample`` parameter (default 1, i.e. off) spreads each
-    requested phase into multiple sub-exposures and averages the result,
-    mimicking finite-exposure integration and smoothing limb-crossing
-    artefacts.
-
 JIT compilation
 ---------------
 *Do NOT jit(make_lc) directly* -- it contains Python-level
@@ -267,13 +179,13 @@ def build_stellar_grid(
     r2     = xg ** 2 + yg ** 2
     starmask = r2 <= star_pixel_rad ** 2
 
-    # Apply mask → 1D in-disc arrays
+    # Apply mask -> 1D in-disc arrays
     flat_indices = np.flatnonzero(starmask)   # (total_pixels,)
     x_disc = xg.ravel()[flat_indices].astype(np.float32)
     y_disc = yg.ravel()[flat_indices].astype(np.float32)
     r_disc = np.sqrt(r2.ravel()[flat_indices]).astype(np.float32)
 
-    # mu = cos θ = sqrt(1 - (r/R)²), clamped for float32 safety
+    # mu = cos theta = sqrt(1 - (r/R)^2), clamped for float32 safety
     mu_disc = np.sqrt(
         np.clip(1.0 - (r_disc / star_pixel_rad) ** 2, 0.0, 1.0)
     ).astype(np.float32)
@@ -281,7 +193,7 @@ def build_stellar_grid(
     # coords[0] = -n//2, so col_idx = x + n//2 maps x onto {0, ..., n-1}.
     col_idx = (x_disc + n // 2).astype(np.int32)
 
-    # Sky-frame spin axis (0, sin i, cos i) → v_z = -(ve/R)*sin(i)*x, a function of x alone; +x recedes.
+    # Sky-frame spin axis (0, sin i, cos i) -> v_z = -(ve/R)*sin(i)*x, a function of x alone; +x recedes.
     vel_col = (
         coords / star_pixel_rad * (ve / C) * np.sin(np.deg2rad(inc_star))
     ).astype(np.float32)
@@ -344,7 +256,7 @@ def _make_oversampled_phases(
     offsets = np.linspace(-dp / 2, dp / 2, oversample, endpoint=False)
     offsets += dp / (2 * oversample)  # centre within each sub-bin
 
-    # Broadcast: (nphase, 1) + (1, oversample) → (nphase, oversample)
+    # Broadcast: (nphase, 1) + (1, oversample) -> (nphase, oversample)
     oversampled = phases_rot[:, None] + offsets[None, :]
 
     return oversampled.ravel()
@@ -459,24 +371,24 @@ def _evaluate_ldc(
         result = jnp.interp(mu_disc, mu_profile_pts, I_prof_wl,
                              left=0.0, right=0.0)
     elif ld_mode == "linear":
-        # I(μ) = 1 - u*(1 - μ)
+        # I(mu) = 1 - u*(1 - mu)
         result = 1.0 - ld_coeffs_wl[0] * (1.0 - mu_disc)
     elif ld_mode == "quadratic":
-        # I(μ) = 1 - u1*(1-μ) - u2*(1-μ)^2
+        # I(mu) = 1 - u1*(1-mu) - u2*(1-mu)^2
         result = (1.0
                   - ld_coeffs_wl[0] * (1.0 - mu_disc)
                   - ld_coeffs_wl[1] * (1.0 - mu_disc) ** 2)
     elif ld_mode == "power2":
-        # I(μ) = 1 - a*(1 - μ^b)
+        # I(mu) = 1 - a*(1 - mu^b)
         result = 1.0 - ld_coeffs_wl[0] * (1.0 - mu_disc ** ld_coeffs_wl[1])
     elif ld_mode == "kipping3":
-        # I(μ) = 1 - c1*(1-μ^0.5) - c2*(1-μ) - c3*(1-μ^(3/2))
+        # I(mu) = 1 - c1*(1-mu^0.5) - c2*(1-mu) - c3*(1-mu^(3/2))
         result = (1.0
                   - ld_coeffs_wl[0] * (1.0 - mu_disc ** 0.5)
                   - ld_coeffs_wl[1] * (1.0 - mu_disc)
                   - ld_coeffs_wl[2] * (1.0 - mu_disc ** 1.5))
     else:  # "nonlinear4"  -- Claret (2000) four-parameter law
-        # I(μ) = 1 - Σ_{k=1}^{4} c_k*(1 - μ^(k/2))
+        # I(mu) = 1 - sum_{k=1}^{4} c_k*(1 - mu^(k/2))
         result = (1.0
                   - ld_coeffs_wl[0] * (1.0 - mu_disc ** 0.5)
                   - ld_coeffs_wl[1] * (1.0 - mu_disc)
@@ -1055,7 +967,7 @@ def build_system(
     ``times``/``P_rot`` -- not a bare rotational-phase array -- are the
     only user-facing time input: the internal rotational phase grid
     (``phases_rot = (times / P_rot * 360) % 360``) is always derived from
-    them, since a bare phase array wraps every 360° and can't recover the
+    them, since a bare phase array wraps every 360deg and can't recover the
     absolute time reference a transit needs.
 
     Transit (optional, all-or-nothing) -- give every one of ``t0``,
@@ -1106,7 +1018,7 @@ def build_system(
         ``ld_mode`` here.
     inc_star : float, optional
         Stellar inclination in degrees (default: 90.0).
-        90° = equator-on, 0° = pole-on.
+        90deg = equator-on, 0deg = pole-on.
     mu_profile : array-like, optional
         Monotonically increasing mu grid points for
         ``ld_mode="intensity_profile"`` (default: [0, 1]).
@@ -1195,7 +1107,7 @@ def build_system(
         if verbose:
             print(
                 f"build_system: oversampling enabled - {oversample} sub-exposures "
-                f"per phase ({nphase} phases → {nphase_compute} sub-phases)."
+                f"per phase ({nphase} phases -> {nphase_compute} sub-phases)."
             )
     else:
         phases_oversampled = phases_rot
@@ -1977,7 +1889,7 @@ def make_lc(
 
     # ---- Oversample averaging --------------------------------------------
     if oversample > 1:
-        # lc_raw: (nphase_compute, nwave) → (nphase_original, oversample, nwave) → mean
+        # lc_raw: (nphase_compute, nwave) -> (nphase_original, oversample, nwave) -> mean
         lc_raw = lc_raw.reshape(nphase_original, oversample, nwave).mean(axis=1)
 
         # star_maps: take only the first sub-exposure per original phase
@@ -2116,7 +2028,7 @@ def quick_lc(
         ``ld_mode`` here.
     inc_star : float, optional
         Stellar inclination in degrees (default: 90.0).
-        90° = equator-on, 0° = pole-on.
+        90deg = equator-on, 0deg = pole-on.
     mu_profile : array-like, optional
         Monotonically increasing mu grid points for
         ``ld_mode="intensity_profile"`` (default: [0, 1]).

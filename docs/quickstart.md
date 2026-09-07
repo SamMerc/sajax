@@ -2,7 +2,7 @@
 
 ## Overview
 
-SAJAX computes light curves that include stellar contamination from active regions (spots and faculae), and can optionally include a planetary transit.
+SAJAX computes light curves that include stellar contamination from active regions (spots, faculae, and flares), and can optionally include a planetary transit.
 It takes stellar, active region, and orbital parameters, as well as timing information to produce wavelength-resolved light curves.
 
 ## Basic Workflow
@@ -24,7 +24,7 @@ It takes stellar, active region, and orbital parameters, as well as timing infor
 
 | Parameter | Description | Example |
 |-----------|-------------|---------|
-| `wavelength` | Wavelength grid [μm] | `jnp.linspace(0.3, 5.0, 200)` |
+| `wavelength` | Wavelength grid [micron] | `jnp.linspace(0.3, 5.0, 200)` |
 | `flux_quiet` | Quiet star spectrum | Model atmosphere or measured spectrum |
 | `flux_active` | Active region spectrum | Cooler (dimmer) or hotter (brighter) than quiet star |
 | `ld_coeffs`, `ld_mode` | Quiet-photosphere limb-darkening coefficients and law | `[0.5, 0.2] #for [u1, u2]`, `"quadratic"` |
@@ -61,7 +61,7 @@ SAJAX supports multiple limb-darkening laws:
 - `quadratic` — 2 coefficients (most common)
 - `power2`, `kipping3` — alternative parameterizations
 - `nonlinear4` — 4-coefficient law
-- `intensity_profile` — full I(μ) profile
+- `intensity_profile` — full I(mu) profile
 
 ## Common Use Cases
 
@@ -87,7 +87,7 @@ lc, star_maps = quick_lc(
     flux_active        = flux_active,
     ld_coeffs          = [0.3, 0.1],       # quadratic law: [u1, u2]
     inc_star           = 90.0,             # stellar inclination [deg]  (equator-on)
-    ar_lat             = 20.0,           # one active region at 20° latitude
+    ar_lat             = 20.0,           # one active region at 20deg latitude
     ar_long            = 0.0,
     ar_size            = 10.0,           # angular radius [deg]
     ar_smoothness      = 4.0,            # super-Gaussian edge order
@@ -105,7 +105,7 @@ lc, star_maps = quick_lc(
 Replace
 
 ```python
-    ar_lat             = 20.0,           # one active region at 20° latitude
+    ar_lat             = 20.0,           # one active region at 20deg latitude
     ar_long            = 0.0,
     ar_size            = 10.0,           # angular radius [deg]
     ar_smoothness      = 4.0,
@@ -114,7 +114,7 @@ Replace
 in the previous code, with
 
 ```python
-    ar_lat             = [20.0, -45.0],          # two active regions at 20° and -45° latitude
+    ar_lat             = [20.0, -45.0],          # two active regions at 20deg and -45deg latitude
     ar_long            = [0.0, 15.0],
     ar_size            = [10.0, 5.0],            # angular radius [deg]
     ar_smoothness      = [4.0, 1.0],             # sharp-edged spot, soft-edged facula
@@ -178,11 +178,11 @@ lc, star_maps = quick_lc(
     a_over_rstar       = 15.0,
     inclination        = 1.55,
     k                  = 0.1,
-    sp_orb             = 90.0,    # polar transit, 90° from aligned [deg]
+    sp_orb             = 90.0,    # polar transit, 90deg from aligned [deg]
 )
 ```
 
-Since the active region's latitude/longitude are unaffected by `sp_orb` — only the planet's trajectory rotates — a spot that produces a clear crossing anomaly at `sp_orb=0` can end up entirely missed by a polar (`sp_orb≈90`) chord, even though the transit depth and duration are unchanged. See `introduction.ipynb`'s Case 6 for a full side-by-side comparison (light curve + stellar-disc animation) of an aligned vs. inclined transit of the same spot.
+Since the active region's latitude/longitude are unaffected by `sp_orb` — only the planet's trajectory rotates — a spot that produces a clear crossing anomaly at `sp_orb=0` can end up entirely missed by a polar (`sp_orb~90`) chord, even though the transit depth and duration are unchanged. See `introduction.ipynb`'s Case 6 for a full side-by-side comparison (light curve + stellar-disc animation) of an aligned vs. inclined transit of the same spot.
 
 #### c) Multiple planets
 
@@ -241,9 +241,9 @@ Only the parameters you want to evolve need the extra axis — the rest keep the
 
 Each `times` entry's active-region values are used exactly as given — the forward model does **not** couple them across epochs (no smoothness/continuity is enforced between one entry and the next). This is deliberate: it keeps the model as a per-epoch evaluation, allowing users full control over the dynamics. It also means nothing stops a naive fit from letting an active region changing unphysically between epochs. If you're doing inference on a dynamic active region, it's up to you to keep that from happening — _e.g._ with priors on the epoch-to-epoch differences (or on physical rates, like a maximum drift speed) that prevent implausible jumps.
 
-### Case 6: Flares
+### Case 5: Flares
 
-A flare is modeled with Case 5's time-evolving machinery: an active region whose *spectrum* varies in time. Combine two ingredients — a flare spectrum (e.g. a hot ~9,000 K blackbody sampled on the model's `wavelength` grid) and a time template. Users can create their own or use the one of [Tovar Mendoza et al. (2022)](https://ui.adsabs.harvard.edu/abs/2022AJ....164...17T/abstract), available as `sajax.flare_template(t, tpeak, fwhm, ampl)` (peak time, FWHM in the units of `t`, peak amplitude; JAX-native and differentiable):
+A flare is modeled with Case 4's time-evolving machinery: an active region whose *spectrum* varies in time. Combine two ingredients — a flare spectrum (e.g. a hot ~9,000 K blackbody sampled on the model's `wavelength` grid) and a time template. Users can create their own or use the one of [Tovar Mendoza et al. (2022)](https://ui.adsabs.harvard.edu/abs/2022AJ....164...17T/abstract), available as `sajax.flare_template(t, tpeak, fwhm, ampl)` (peak time, FWHM in the units of `t`, peak amplitude; JAX-native and differentiable):
 
 ```python
 from sajax import flare_template
@@ -252,7 +252,7 @@ template = flare_template(times, tpeak=0.1, fwhm=0.01)       # (ntime,)
 flux_flaring = flux_quiet + template[:, None] * flux_flare   # (ntime, nwave)
 ```
 
-Pass `flux_flaring` as that region's time-varying `flux_active` (shape `(ntime, nar, nwave)`, Case 5): its contrast rises and decays following the template, and outside the flare the contrast is exactly 1, so the region vanishes. Since flare emission is chromospheric rather than photospheric, we recommend users turn off limb darkening for that region (zero coefficients in `ld_coeffs_active`). Because the flare lives on the stellar surface, it is foreshortened toward the limb, carried by rotation, and occulted by a transiting planet crossing it. See `introduction.ipynb`'s Case 9 for a full worked example.
+Pass `flux_flaring` as that region's time-varying `flux_active` (shape `(ntime, nar, nwave)`, Case 4): its contrast rises and decays following the template, and outside the flare the contrast is exactly 1, so the region vanishes. Since flare emission is chromospheric rather than photospheric, we recommend users turn off limb darkening for that region (zero coefficients in `ld_coeffs_active`). Because the flare lives on the stellar surface, it is foreshortened toward the limb, carried by rotation, and occulted by a transiting planet crossing it. See `introduction.ipynb`'s Case 9 for a full worked example.
 
 ### Numerical precision for long baselines (absolute BJD times)
 

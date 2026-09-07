@@ -21,7 +21,7 @@ Orbital convention  (Winn 2010 / Eastman et al. 2013)
 
 - **X** — sky-plane east-west (positive east)
 - **Y** — sky-plane north-south (positive north, foreshortened by cos i)
-- **Z** — line-of-sight toward observer (Z > 0 ⟹ planet in front of star)
+- **Z** — line-of-sight toward observer (Z > 0 -> planet in front of star)
 
 All sky positions are in units of the stellar radius R*.
 
@@ -40,8 +40,8 @@ Minimum parameter set
 ``ecc``
    orbital eccentricity [0, 1)
 ``omega_peri``
-   argument of periastron [rad] (ω = 0deg → periapsis at ascending
-   node; ω = 90deg → periapsis at inferior conjunction / transit
+   argument of periastron [rad] (ω = 0deg -> periapsis at ascending
+   node; ω = 90deg -> periapsis at inferior conjunction / transit
    centre for a circular orbit)
 ``sp_orb``
    sky-projected spin-orbit angle, λ [rad]. ``sp_orb`` rotates the
@@ -88,11 +88,11 @@ def _kepler(M: jnp.ndarray, ecc: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]
 
     Implementation details
     ~~~~~~~~~~~~~~~~~~~~~~
-    * Symmetry fold: M is mapped into [0, π) then restored afterwards,
+    * Symmetry fold: M is mapped into [0, pi) then restored afterwards,
       which halves the domain and removes sign ambiguity.
     * Starter: E0 = M + e sin M  (good for e ≲ 0.5; adequate for e < 0.9).
     * Refinement: 6 Halley iterations (3rd-order convergence) — the residual
-      drops from O(e²) to < 1e-15 in ≤ 4 steps even at e = 0.95.
+      drops from O(e^2) to < 1e-15 in <= 4 steps even at e = 0.95.
     * All operations are JAX primitives.  The fixed unrolled iteration graph
       is fully differentiable via JAX's default automatic differentiation.
       No ``custom_jvp`` hook is needed; the iteration count is small enough
@@ -107,16 +107,16 @@ def _kepler(M: jnp.ndarray, ecc: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]
     -------
     sinf, cosf : sin and cos of the true anomaly  (same shape as M)
     """
-    # Wrap into [0, 2π) and exploit the symmetry sin(2π − M) = −sin(M)
+    # Wrap into [0, 2pi) and exploit the symmetry sin(2pi − M) = −sin(M)
     M = M % (2.0 * jnp.pi)
     flip = M > jnp.pi
-    M_ = jnp.where(flip, 2.0 * jnp.pi - M, M)   # now in [0, π)
+    M_ = jnp.where(flip, 2.0 * jnp.pi - M, M)   # now in [0, pi)
 
     # Initial guess
     E = M_ + ecc * jnp.sin(M_)
 
-    # Halley's method:  f = E − e sin E − M,   f′ = 1 − e cos E,   f′′ = e sin E
-    #   ΔE = −f / (f′ − f·f′′ / (2 f′))  =  −f·f′ / (f′² − f·f′′/2)
+    # Halley's method:  f = E − e sin E − M,   f' = 1 − e cos E,   f'' = e sin E
+    #   ΔE = −f / (f' − fxf'' / (2 f'))  =  −fxf' / (f'^2 − fxf''/2)
     for _ in range(6):
         sE  = jnp.sin(E)
         cE  = jnp.cos(E)
@@ -160,7 +160,7 @@ def planet_sky_position(
     t0            : mid-transit epoch (inferior conjunction)
     period        : orbital period
     a_over_rstar  : semimajor axis / R*  (dimensionless, > 1 for non-grazing)
-    inclination   : orbital inclination [rad]   (π/2 = edge-on)
+    inclination   : orbital inclination [rad]   (pi/2 = edge-on)
     ecc           : eccentricity  [0, 1)
     omega_peri    : argument of periastron  [rad]
                     Measured from the ascending node to periapsis.
@@ -174,7 +174,7 @@ def planet_sky_position(
     X, Y, Z : sky-plane coordinates in units of R*
         X  — east-west (positive east) at sp_orb = 0
         Y  — north-south projected  (= r sin(ω+f) cos i) at sp_orb = 0
-        Z  — toward observer  (Z > 0 ⟹ transit;  Z < 0 ⟹ occultation)
+        Z  — toward observer  (Z > 0 -> transit;  Z < 0 -> occultation)
         For nonzero sp_orb, (X, Y) are the sp_orb = 0 values rotated
         by λ.
 
@@ -192,19 +192,19 @@ def planet_sky_position(
         Y' = X sin(λ) + Y cos(λ)
 
     λ = 0 leaves (X, Y) untouched.
-    λ = π/2 (polar transit) swaps the roles of X and Y, so a central
+    λ = pi/2 (polar transit) swaps the roles of X and Y, so a central
     (b = 0) transit chord that used to sweep through X = 0 now sweeps
     through Y = 0 instead.
     Positive λ rotates the orbit counterclockwise on the sky as seen by the observer.
     """
     # ---- True anomaly at mid-transit ----------------------------------------
-    # At inferior conjunction (transit centre): ω + f_transit = π/2
-    # ⟹  f_transit = π/2 − ω
+    # At inferior conjunction (transit centre): ω + f_transit = pi/2
+    # ->  f_transit = pi/2 − ω
     f_transit = 0.5 * jnp.pi - omega_peri
 
     # ---- Time of periastron passage -----------------------------------------
-    # Convert f_transit → E_transit via
-    #   tan(E/2) = sqrt((1−e)/(1+e)) · tan(f/2)
+    # Convert f_transit -> E_transit via
+    #   tan(E/2) = sqrt((1−e)/(1+e)) x tan(f/2)
     # Use arctan2 for correct quadrant handling.
     half_f    = 0.5 * f_transit
     E_transit = 2.0 * jnp.arctan2(
@@ -372,7 +372,7 @@ def _compute_planet_mask(
     star_pixel_rad: float,
     X: jnp.ndarray,        # planet sky-plane x  [R*]
     Y: jnp.ndarray,        # planet sky-plane y  [R*]
-    Z: jnp.ndarray,        # planet line-of-sight  [R*]  — Z > 0 ⟹ transit
+    Z: jnp.ndarray,        # planet line-of-sight  [R*]  if Z > 0 -> transit
     k: float,              # Rp / R*
     softness: float = 0.0, # transition width [R*]; 0.0 = exact hard edge
 ) -> jnp.ndarray:
@@ -647,7 +647,7 @@ def stellar_density_to_a_over_rstar(
     Convert mean stellar density and orbital period to a / R* via
     Kepler's third law  (Seager & Mallén-Ornelas 2003):
 
-        a / R* = ( G ρ★ P^2 / (3π) )^(1/3)
+        a / R* = ( G rho_star P^2 / (3pi) )^(1/3)
 
     Parameters
     ----------
@@ -670,7 +670,7 @@ def a_over_rstar_to_stellar_density(
     """
     Inverse of ``stellar_density_to_a_over_rstar``:
 
-        ρ★ = 3π / (G P^2) · (a / R*)^3
+        rho_star = 3pi / (G P^2) x (a / R*)^3
 
     Parameters
     ----------

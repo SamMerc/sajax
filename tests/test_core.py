@@ -187,7 +187,7 @@ class TestBuildStellarGrid:
         assert float(mu.max()) <= 1.0 + 1e-5
 
     def test_mu_centre_pixel_is_one(self):
-        """The central pixel should have mu ≈ 1 (disc centre)."""
+        """The central pixel should have mu ~= 1 (disc centre)."""
         grid = build_stellar_grid(50, 2.0)
         centre_mask = (grid["x"] == 0) & (grid["y"] == 0)
         assert np.any(centre_mask), "Centre pixel not found in grid"
@@ -1016,7 +1016,7 @@ class TestSymmetry:
         )
         np.testing.assert_allclose(
             result_north[0], result_south[0], rtol=1e-4,
-            err_msg="N/S symmetric ARs should produce identical LCs at inc=90°",
+            err_msg="N/S symmetric ARs should produce identical LCs at inc=90deg",
         )
 
 
