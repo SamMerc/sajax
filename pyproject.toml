@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "sajax"
 dynamic = ["version"]
-description = "Stellar Activity Grid for Exoplanets — JAX implementation"
+description = "Stellar Activity Grid for Exoplanets - JAX implementation"
 authors = [
     { name = "Samson Mercier", email = "merci228@mit.edu" },
     { name = "Lucas Arthur", email = "lmarthur@mit.edu" },

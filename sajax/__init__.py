@@ -1,5 +1,5 @@
 """
-SAJAX — Stellar Activity Grid for Exoplanets in JAX.
+SAJAX - Stellar Activity Grid for Exoplanets in JAX.
 
 Public API
 ----------
@@ -14,7 +14,7 @@ build_system
     anomaly is computed correctly.
 
 make_lc
-    Pure JAX evaluation — accepts JAX tracers, compatible with
+    Pure JAX evaluation - accepts JAX tracers, compatible with
     jit, vmap, emcee_jax, and gradient-based samplers.
 
 quick_lc
@@ -25,7 +25,7 @@ build_stellar_grid
     Pre-compute the static stellar pixel grid.
 
 flare_template
-    Continuous flare time template of Tovar Mendoza et al. (2022) — a
+    Continuous flare time template of Tovar Mendoza et al. (2022) - a
     Gaussian convolved with a double exponential, parameterized by peak
     time, FWHM, and amplitude.
 

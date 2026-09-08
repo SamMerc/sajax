@@ -1,5 +1,5 @@
 """
-tests/test_core.py — Tests for the SAJAX core engine.
+tests/test_core.py - Tests for the SAJAX core engine.
 
 Run with:
     pytest tests/
@@ -69,7 +69,7 @@ def _quiet_baseline(wl, flux_quiet, base_params, times, stellar_grid_size=50, ve
 
 @pytest.fixture
 def flat_spectra():
-    """Flat spectra on a small wavelength grid — fast for tests.
+    """Flat spectra on a small wavelength grid - fast for tests.
 
     Uses float64 throughout to match build_system's internal dtype.
     """
@@ -103,7 +103,7 @@ def small_model(flat_spectra, base_params):
 
 
 # ===================================================================
-# flare_template — Tovar Mendoza et al. (2022) flare time template
+# flare_template - Tovar Mendoza et al. (2022) flare time template
 # ===================================================================
 
 class TestFlareTemplate:
@@ -187,7 +187,7 @@ class TestBuildStellarGrid:
         assert float(mu.max()) <= 1.0 + 1e-5
 
     def test_mu_centre_pixel_is_one(self):
-        """The central pixel should have mu ≈ 1 (disc centre)."""
+        """The central pixel should have mu ~= 1 (disc centre)."""
         grid = build_stellar_grid(50, 2.0)
         centre_mask = (grid["x"] == 0) & (grid["y"] == 0)
         assert np.any(centre_mask), "Centre pixel not found in grid"
@@ -1016,7 +1016,7 @@ class TestSymmetry:
         )
         np.testing.assert_allclose(
             result_north[0], result_south[0], rtol=1e-4,
-            err_msg="N/S symmetric ARs should produce identical LCs at inc=90°",
+            err_msg="N/S symmetric ARs should produce identical LCs at inc=90deg",
         )
 
 
@@ -1325,7 +1325,7 @@ def _combined_lc(transit_overrides=None, ar_lat=None, ar_long=None, ar_size=None
         flux_active       = np.atleast_2d(flux_active if flux_active is not None else FLUX_QUIET),
         **(params or BASE_PARAMS),
         ar_lat            = ar_lat  or [0.0],
-        ar_long           = ar_long or [180.0],  # far side — invisible by default
+        ar_long           = ar_long or [180.0],  # far side - invisible by default
         ar_size           = ar_size or [0.001],
         ar_smoothness     = ar_smoothness or [_SM],
         times             = TIMES,
@@ -1338,7 +1338,7 @@ def _combined_lc(transit_overrides=None, ar_lat=None, ar_long=None, ar_size=None
 
 
 # ===================================================================
-# 1.  _compute_planet_mask — pixel-level occultation mask
+# 1.  _compute_planet_mask - pixel-level occultation mask
 # ===================================================================
 
 class TestComputePlanetMask:
@@ -1390,7 +1390,7 @@ class TestComputePlanetMask:
 
 
 # ===================================================================
-# 1b.  _compute_all_planets_mask — multi-planet combination
+# 1b.  _compute_all_planets_mask - multi-planet combination
 # ===================================================================
 
 class TestComputeAllPlanetsMask:
@@ -1470,7 +1470,7 @@ class TestComputeAllPlanetsMask:
 
 
 # ===================================================================
-# 2.  build_system (transit-attached) — model dict structure
+# 2.  build_system (transit-attached) - model dict structure
 # ===================================================================
 
 class TestBuildCombinedModel:
@@ -1722,7 +1722,7 @@ class TestObliquity:
 
 
 # ===================================================================
-# 4.  Oversampling — transit path
+# 4.  Oversampling - transit path
 # ===================================================================
 
 class TestTransitOversampling:

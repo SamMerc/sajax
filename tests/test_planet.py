@@ -1,5 +1,5 @@
 """
-tests/test_planet.py — Tests for the planet.py orbital module.
+tests/test_planet.py - Tests for the planet.py orbital module.
 """
 
 import warnings
@@ -46,7 +46,7 @@ def _r3d(t, **overrides):
 # ===================================================================
 
 class TestKepler:
-    """Tests for _kepler(M, ecc) → (sin f, cos f)."""
+    """Tests for _kepler(M, ecc) -> (sin f, cos f)."""
 
     # --- Identities for e = 0 -------------------------------------------
 
@@ -68,7 +68,7 @@ class TestKepler:
 
     @pytest.mark.parametrize("ecc", [0.0, 0.1, 0.3, 0.5, 0.7, 0.85])
     def test_unit_norm(self, ecc):
-        """sin²f + cos²f = 1 for all M and all valid eccentricities."""
+        """sin^2f + cos^2f = 1 for all M and all valid eccentricities."""
         M = jnp.linspace(0.0, 2 * jnp.pi, 200)
         sinf, cosf = _kepler(M, ecc)
         norm2 = np.array(sinf**2 + cosf**2)
@@ -86,25 +86,25 @@ class TestKepler:
 
     @pytest.mark.parametrize("ecc", [0.0, 0.2, 0.5, 0.7])
     def test_apoapsis_at_M_pi(self, ecc):
-        """At M=π (apoapsis), f=π so sin f≈0, cos f≈-1."""
+        """At M=pi (apoapsis), f=pi so sin f~=0, cos f~=-1."""
         sinf, cosf = _kepler(jnp.float32(np.pi), ecc)
-        assert abs(float(sinf))       < 1e-4, f"e={ecc}: sin f should be 0 at M=π"
-        assert abs(float(cosf) + 1.0) < 1e-4, f"e={ecc}: cos f should be -1 at M=π"
+        assert abs(float(sinf))       < 1e-4, f"e={ecc}: sin f should be 0 at M=pi"
+        assert abs(float(cosf) + 1.0) < 1e-4, f"e={ecc}: cos f should be -1 at M=pi"
 
     # --- Kepler's equation residual -----------------------------------------
 
     def test_kepler_equation_satisfied(self):
         """Reconstructed M = E - e sin E must match the input M.
 
-        We convert (sin f, cos f) → E via
-            tan(E/2) = sqrt((1-e)/(1+e)) · tan(f/2)
+        We convert (sin f, cos f) -> E via
+            tan(E/2) = sqrt((1-e)/(1+e)) x tan(f/2)
         and verify M = E - e sin E holds.
         """
         M   = jnp.linspace(0.02, 2 * jnp.pi - 0.02, 300)
         ecc = 0.55
         sinf, cosf = _kepler(M, ecc)
 
-        # (sin f, cos f) → E
+        # (sin f, cos f) -> E
         half_f = jnp.arctan2(sinf, 1.0 + cosf)
         E = 2.0 * jnp.arctan2(
             jnp.sqrt(1.0 - ecc) * jnp.sin(half_f),
@@ -112,7 +112,7 @@ class TestKepler:
         )
         M_reconstructed = E - ecc * jnp.sin(E)
 
-        # Wrap to [-π, π] for robust comparison
+        # Wrap to [-pi, pi] for robust comparison
         wrap = lambda x: (x + np.pi) % (2 * np.pi) - np.pi
         np.testing.assert_allclose(
             np.array(wrap(M_reconstructed)), np.array(wrap(M)),
@@ -129,7 +129,7 @@ class TestKepler:
             err_msg="High-e Kepler solver: unit-norm violated")
 
     def test_output_finite_for_all_M(self):
-        """(sinf, cosf) should be finite for all M ∈ [0, 2π) and valid e."""
+        """(sinf, cosf) should be finite for all M in [0, 2pi) and valid e."""
         M = jnp.linspace(0.0, 2 * jnp.pi, 200)
         for ecc in [0.0, 0.3, 0.6, 0.9]:
             sinf, cosf = _kepler(M, ecc)
@@ -160,7 +160,7 @@ class TestKepler:
 
 
 # ===================================================================
-# 2.  planet_sky_position — single epoch
+# 2.  planet_sky_position - single epoch
 # ===================================================================
 
 class TestPlanetSkyPosition:
@@ -168,9 +168,9 @@ class TestPlanetSkyPosition:
     # --- At mid-transit (t = t0) ----------------------------------------
 
     def test_mid_transit_X_near_zero(self):
-        """At t=t0, the planet crosses the sky centre: X ≈ 0."""
+        """At t=t0, the planet crosses the sky centre: X ~= 0."""
         X, Y, Z = _sky_pos(0.0)
-        assert abs(float(X)) < 0.1, f"Mid-transit X should ≈ 0, got {float(X):.4f}"
+        assert abs(float(X)) < 0.1, f"Mid-transit X should ~= 0, got {float(X):.4f}"
 
     def test_mid_transit_Z_positive(self):
         """At t=t0, the planet is in front of the star: Z > 0."""
@@ -178,15 +178,15 @@ class TestPlanetSkyPosition:
         assert float(Z) > 0, f"Mid-transit Z should be > 0, got {float(Z):.4f}"
 
     def test_mid_transit_edge_on_Y_near_zero(self):
-        """For i=π/2 at t=t0 (inferior conjunction): Y ≈ 0."""
+        """For i=pi/2 at t=t0 (inferior conjunction): Y ~= 0."""
         X, Y, Z = _sky_pos(0.0)
-        assert abs(float(Y)) < 0.1, f"Edge-on mid-transit Y should ≈ 0, got {float(Y):.4f}"
+        assert abs(float(Y)) < 0.1, f"Edge-on mid-transit Y should ~= 0, got {float(Y):.4f}"
 
     # --- At opposition (t = t0 + P/2) ------------------------------------
 
     def test_opposition_Z_negative(self):
         """At t = t0 + P/2, the planet is behind the star: Z < 0."""
-        X, Y, Z = _sky_pos(5.0)   # period = 10.0 → half-period = 5.0
+        _, _, Z = _sky_pos(5.0)   # period = 10.0 -> half-period = 5.0
         assert float(Z) < 0, f"Opposition Z should be < 0, got {float(Z):.4f}"
 
     # --- Circular orbit geometry -----------------------------------------
@@ -199,19 +199,19 @@ class TestPlanetSkyPosition:
         for t in np.linspace(0.0, P, 50, endpoint=False):
             r = _r3d(t)
             assert abs(r - a) < 0.05, (
-                f"Circular orbit: r = {r:.4f} ≠ a = {a} at t={t:.2f}"
+                f"Circular orbit: r = {r:.4f} != a = {a} at t={t:.2f}"
             )
 
     # --- Impact parameter -----------------------------------------------
 
     def test_impact_parameter_inclined_orbit(self):
-        """At mid-transit, |Y| ≈ a cos(i) (impact parameter b)."""
+        """At mid-transit, |Y| ~= a cos(i) (impact parameter b)."""
         inc = np.deg2rad(80.0)
         a   = 15.0
         expected_b = a * np.cos(inc)
         X, Y, Z = _sky_pos(0.0, inclination=inc)
         assert abs(abs(float(Y)) - expected_b) < 0.5, (
-            f"Impact parameter: expected ≈{expected_b:.3f}, got |Y|={abs(float(Y)):.3f}"
+            f"Impact parameter: expected ~={expected_b:.3f}, got |Y|={abs(float(Y)):.3f}"
         )
 
     # --- Periodicity -------------------------------------------------------
@@ -230,7 +230,7 @@ class TestPlanetSkyPosition:
     # --- Sky separation monotone near transit ----------------------------
 
     def test_sky_separation_decreases_toward_transit(self):
-        """Sky separation √(X²+Y²) should decrease as t → t0."""
+        """Sky separation sqrt(X^2+Y^2) should decrease as t -> t0."""
         sep = lambda t: float(jnp.sqrt(sum(v**2 for v in _sky_pos(t)[:2])))
         assert sep(-2.0) > sep(-0.1), \
             "Sky separation should decrease as planet approaches transit"
@@ -238,7 +238,7 @@ class TestPlanetSkyPosition:
     # --- Eccentric orbit periapsis / apoapsis radii ----------------------
 
     def test_eccentric_periapsis_apoapsis_radii(self):
-        """For an eccentric orbit, min/max 3-D radii should equal a(1±e)."""
+        """For an eccentric orbit, min/max 3-D radii should equal a(1+/-e)."""
         ecc = 0.4
         a   = 15.0
         P   = 10.0
@@ -340,14 +340,14 @@ class TestObliquity:
             err_msg="spin-orbit angle must not affect Z (line-of-sight position)")
 
     def test_quarter_turn_swaps_axes(self):
-        """sp_orb=π/2 must map (X, Y) -> (-Y, X)."""
+        """sp_orb=pi/2 must map (X, Y) -> (-Y, X)."""
         X0, Y0, Z0 = _sky_pos(0.3)
         X, Y, Z = _sky_pos(0.3, sp_orb=np.pi / 2.0)
         np.testing.assert_allclose(float(X), -float(Y0), atol=1e-4)
         np.testing.assert_allclose(float(Y),  float(X0), atol=1e-4)
 
     def test_full_turn_is_identity(self):
-        """sp_orb=2π must reproduce sp_orb=0 (rotation is periodic)."""
+        """sp_orb=2pi must reproduce sp_orb=0 (rotation is periodic)."""
         X0, Y0, Z0 = _sky_pos(0.4)
         X, Y, Z = _sky_pos(0.4, sp_orb=2.0 * np.pi)
         np.testing.assert_allclose(float(X), float(X0), atol=1e-3)
@@ -370,9 +370,9 @@ class TestObliquity:
 
     def test_polar_obliquity_swaps_null_axis_at_central_transit(self):
         """
-        For an edge-on, b≈0 orbit, sp_orb=0 keeps Y≈0 across the whole
+        For an edge-on, b~=0 orbit, sp_orb=0 keeps Y~=0 across the whole
         transit (the chord runs along the projected stellar equator, where
-        v_los is maximal at the limbs). sp_orb=π/2 instead keeps X≈0
+        v_los is maximal at the limbs). sp_orb=pi/2 instead keeps X~=0
         (the chord runs along the spin axis instead, crossing every
         latitude but staying near the v_los=0 meridian) -- the geometric
         picture underlying the suppressed classic Rossiter-McLaughlin
@@ -401,7 +401,7 @@ class TestObliquity:
 
 
 # ===================================================================
-# 3.  compute_planet_sky_positions — vectorised
+# 3.  compute_planet_sky_positions - vectorised
 # ===================================================================
 
 class TestComputePlanetSkyPositions:
@@ -795,7 +795,7 @@ class TestTimePrecision:
 
 
 # ===================================================================
-# 5.  Unit conversion: density ↔ a/R★
+# 5.  Unit conversion: density <-> a/R*
 # ===================================================================
 
 class TestDensityConversions:
@@ -803,16 +803,16 @@ class TestDensityConversions:
     # --- Known value: Earth / Sun ----------------------------------------
 
     def test_earth_orbit_a_over_rstar(self):
-        """Solar density + 1-year period should give a/R★ ≈ 215."""
-        rho_sun = 1.41          # g cm⁻³
+        """Solar density + 1-year period should give a/R* ~= 215."""
+        rho_sun = 1.41          # g cm^-3
         P_earth = 365.25        # days
         a       = stellar_density_to_a_over_rstar(rho_sun, P_earth)
-        assert 200 < a < 230, f"Expected a/R★ ≈ 215 (Earth), got {a:.1f}"
+        assert 200 < a < 230, f"Expected a/R* ~= 215 (Earth), got {a:.1f}"
 
     # --- Round-trip tests ------------------------------------------------
 
     def test_round_trip_density_to_a(self):
-        """ρ → a/R★ → ρ should recover the original density."""
+        """rho_star -> a/R* -> rho_star should recover the original density."""
         rho_in  = 1.41
         P       = 5.0
         a       = stellar_density_to_a_over_rstar(rho_in, P)
@@ -820,7 +820,7 @@ class TestDensityConversions:
         assert abs(rho_out - rho_in) / rho_in < 1e-8
 
     def test_round_trip_a_to_density(self):
-        """a/R★ → ρ → a/R★ should recover the original a/R★."""
+        """a/R* -> rho_star -> a/R* should recover the original a/R*."""
         a_in = 12.5
         P    = 4.0
         rho  = a_over_rstar_to_stellar_density(a_in, P)
@@ -830,25 +830,25 @@ class TestDensityConversions:
     # --- Monotonicity (Kepler's 3rd law) ----------------------------------
 
     def test_longer_period_gives_larger_a(self):
-        """P ∝ a^(3/2) → longer period → larger a/R★."""
+        """P proportional to a^(3/2) -> longer period -> larger a/R*."""
         rho = 1.0
         a1  = stellar_density_to_a_over_rstar(rho, 1.0)
         a10 = stellar_density_to_a_over_rstar(rho, 10.0)
         assert a10 > a1
 
     def test_kepler_third_law_exponent(self):
-        """a/R★ should scale as P^(2/3) for fixed density."""
+        """a/R* should scale as P^(2/3) for fixed density."""
         rho   = 1.0
         P1, P2 = 2.0, 8.0
         a1 = stellar_density_to_a_over_rstar(rho, P1)
         a2 = stellar_density_to_a_over_rstar(rho, P2)
-        # a ∝ P^(2/3) → a2/a1 = (P2/P1)^(2/3)
+        # a proportional to P^(2/3) -> a2/a1 = (P2/P1)^(2/3)
         ratio_expected = (P2 / P1) ** (2.0 / 3.0)
         np.testing.assert_allclose(a2 / a1, ratio_expected, rtol=1e-6,
-            err_msg="a/R★ should scale as P^(2/3) (Kepler's 3rd law)")
+            err_msg="a/R* should scale as P^(2/3) (Kepler's 3rd law)")
 
     def test_denser_star_larger_a_for_fixed_period(self):
-        """For fixed P, denser star gives larger a/R★ (smaller physical R★)."""
+        """For fixed P, denser star gives larger a/R* (smaller physical R*)."""
         P    = 3.0
         a_lo = stellar_density_to_a_over_rstar(0.5, P)
         a_hi = stellar_density_to_a_over_rstar(5.0, P)
@@ -863,9 +863,9 @@ class TestDensityConversions:
         (10.0, 365.0),
     ])
     def test_output_positive(self, rho, P):
-        """a/R★ must always be positive for positive ρ and P."""
+        """a/R* must always be positive for positive rho and P."""
         a = stellar_density_to_a_over_rstar(rho, P)
-        assert a > 0, f"a/R★ should be positive (rho={rho}, P={P})"
+        assert a > 0, f"a/R* should be positive (rho={rho}, P={P})"
 
 
 # ===================================================================
@@ -880,15 +880,15 @@ class TestPlanetGradients:
     1. Analytical comparison (planet_sky_position):
        For a circular edge-on orbit at mid-transit the sky coordinates are
        exact trig functions of inclination:
-           Y = a·cos(i)   →   dY/di = −a·sin(i)
-           Z = a·sin(i)   →   dZ/di =  a·cos(i)
+           Y = a cos(i)   ->   dY/di = -a sin(i)
+           Z = a sin(i)   ->   dZ/di =  a cos(i)
        JAX autodiff is checked against these closed-form expressions.
 
     2. Physical sign + calibrated FD (_compute_planet_mask):
        The transit-edge sigmoid has transition width
-           softness_transit = 1 / (10 · star_pixel_rad)  [R★ units]
-       For spr=50 this is 0.002 R★.  A finite-difference step of h=0.1 in
-       planet position (or inclination converted to planet shift) is ~50×
+           softness_transit = 1 / (10 x star_pixel_rad)  [R* units]
+       For spr=50 this is 0.002 R*.  A finite-difference step of h=0.1 in
+       planet position (or inclination converted to planet shift) is ~50x
        this width, making FD completely unreliable.  The FD tests here use
        h = 1 % of the transition width where the chord approximation is valid.
     """
@@ -903,7 +903,7 @@ class TestPlanetGradients:
 
     def test_dY_di_matches_analytical_at_mid_transit(self):
         """
-        At mid-transit with circular orbit:  Y = a·cos(i)  →  dY/di = −a·sin(i).
+        At mid-transit with circular orbit:  Y = a cos(i)  ->  dY/di = -a sin(i).
         """
         a   = jnp.float32(15.0)
         inc = jnp.float32(np.deg2rad(87.0))
@@ -923,7 +923,7 @@ class TestPlanetGradients:
 
     def test_dZ_di_matches_analytical_at_mid_transit(self):
         """
-        At mid-transit with circular orbit:  Z = a·sin(i)  →  dZ/di = a·cos(i).
+        At mid-transit with circular orbit:  Z = a sin(i)  ->  dZ/di = a cos(i).
         """
         a   = jnp.float32(15.0)
         inc = jnp.float32(np.deg2rad(87.0))
@@ -943,7 +943,7 @@ class TestPlanetGradients:
 
     def test_dY_da_matches_analytical_at_mid_transit(self):
         """
-        At mid-transit with circular orbit:  Y = a·cos(i)  →  dY/da = cos(i).
+        At mid-transit with circular orbit:  Y = a cos(i)  ->  dY/da = cos(i).
         Tests differentiability through the orbital radius calculation.
         """
         a   = jnp.float32(15.0)
@@ -966,7 +966,7 @@ class TestPlanetGradients:
 
     def test_planet_mask_large_h_gives_wrong_result(self):
         """
-        Documents that h=0.1 R★ — ~50x the transit transition width — yields a
+        Documents that h=0.1 R* - ~50x the transit transition width - yields a
         FD estimate that is unreliable, explaining sign/value mismatches in
         external test suites that use h=0.1 in unconstrained parameter space.
         """
@@ -996,7 +996,7 @@ class TestPlanetGradients:
         sign_flip = float(np.sign(grad_jax)) != float(np.sign(fd_large))
         assert ratio < 0.1 or ratio > 10.0 or sign_flip, (
             f"h=0.1 FD unexpectedly agrees with JAX (ratio={ratio:.3f}). "
-            "Transition may be wider than expected — check spr."
+            "Transition may be wider than expected - check spr."
         )
 
     def test_default_softness_is_exact_hard_edge(self):
@@ -1044,24 +1044,24 @@ class TestPlanetGradients:
 class TestOrbitalParamGradientsFD:
     """
     Verify that JAX autodiff agrees with calibrated finite differences for
-    five Keplerian orbital parameters: a/R★, period, orbital inclination,
+    five Keplerian orbital parameters: a/R*, period, orbital inclination,
     eccentricity, and argument of periastron.
 
     Strategy
     --------
-    a/R★, period, inclination, ecc, omega_peri:
+    a/R*, period, inclination, ecc, omega_peri:
         Tested through planet_sky_position (pure trig / Kepler solver).
         The output scalar X+Y+Z is smooth in all parameters, so a standard
         h = 0.01 in natural units is safe everywhere.
 
-    Orbit geometry: inc=89° so impact parameter b = a·cos(i) ≈ 0.26 R★
-    is non-zero, making gradients w.r.t. inclination and a/R★ non-trivial.
+    Orbit geometry: inc=89deg so impact parameter b = a cos(i) ~= 0.26 R*
+    is non-zero, making gradients w.r.t. inclination and a/R* non-trivial.
     For period and ecc tests the planet is evaluated at t=0.5 d (off
     mid-transit) so the mean-anomaly derivatives are non-zero.
     """
 
     _A   = 15.0
-    _INC = float(np.deg2rad(89.0))   # b ≈ 0.26 R★
+    _INC = float(np.deg2rad(89.0))   # b ~= 0.26 R*
     _P   = 5.0
     _ECC = 0.0
     _OMG = 0.0
@@ -1101,7 +1101,7 @@ class TestOrbitalParamGradientsFD:
     # ---- a_over_rstar -------------------------------------------------------
 
     def test_a_gradient_finite_and_nonzero(self):
-        """d(X+Y+Z)/d(a) must be finite and non-zero (Y = r·sin(ω+f)·cos i ∝ a)."""
+        """d(X+Y+Z)/d(a) must be finite and non-zero (Y = r x sin(ω+f) x cos i proportional to a)."""
         g = float(jax.grad(
             lambda a: self._scalar(self._xyz(a_over_rstar=a))
         )(jnp.float32(self._A)))
@@ -1109,7 +1109,7 @@ class TestOrbitalParamGradientsFD:
         assert abs(g) > 0,     "d/d(a) is zero"
 
     def test_a_gradient_fd_agreement(self):
-        """FD at h=0.01 R★; smooth trig → rtol=1e-3 (observed rel_err < 5e-5)."""
+        """FD at h=0.01 R*; smooth trig -> rtol=1e-3 (observed rel_err < 5e-5)."""
         h = 0.01
         jax_g = float(jax.grad(
             lambda a: self._scalar(self._xyz(a_over_rstar=a))
@@ -1125,7 +1125,7 @@ class TestOrbitalParamGradientsFD:
     def test_period_gradient_finite_and_nonzero(self):
         """
         At t=0.5 d (off mid-transit) d(X+Y+Z)/d(period) is non-zero.
-        At t=t0 the mean anomaly M=0 and dM/dP = −(2π/P²)·(t−t_peri) = 0,
+        At t=t0 the mean anomaly M=0 and dM/dP = -(2pi/P^2)x(t-t_peri) = 0,
         so the off-transit evaluation is essential.
         """
         g = float(jax.grad(
@@ -1135,7 +1135,7 @@ class TestOrbitalParamGradientsFD:
         assert abs(g) > 0,     "d/d(period) is zero at t=0.5 d"
 
     def test_period_gradient_fd_agreement(self):
-        """FD at h=0.01 d; smooth trig → rtol=1e-3 (observed rel_err < 4e-4)."""
+        """FD at h=0.01 d; smooth trig -> rtol=1e-3 (observed rel_err < 4e-4)."""
         h = 0.01
         jax_g = float(jax.grad(
             lambda P: self._scalar(self._xyz(t=0.5, period=P))
@@ -1150,17 +1150,17 @@ class TestOrbitalParamGradientsFD:
 
     def test_inclination_gradient_finite_and_nonzero(self):
         """
-        Y = r·sin(ω+f)·cos(i), so d(Y)/d(i) = −r·sin(ω+f)·sin(i) ≠ 0
-        at i=89°.  The non-zero impact parameter makes this non-trivial.
+        Y = r x sin(ω+f) x cos(i), so d(Y)/d(i) = -r x sin(ω+f) x sin(i) != 0
+        at i=89deg.  The non-zero impact parameter makes this non-trivial.
         """
         g = float(jax.grad(
             lambda i: self._scalar(self._xyz(inclination=i))
         )(jnp.float32(self._INC)))
         assert np.isfinite(g), f"d/d(inc) non-finite: {g}"
-        assert abs(g) > 0,     "d/d(inc) is zero at inc=89°"
+        assert abs(g) > 0,     "d/d(inc) is zero at inc=89deg"
 
     def test_inclination_gradient_fd_agreement(self):
-        """FD at h=1e-4 rad; smooth trig → rtol=1e-3 (observed rel_err < 3e-4)."""
+        """FD at h=1e-4 rad; smooth trig -> rtol=1e-3 (observed rel_err < 3e-4)."""
         h = 1e-4
         jax_g = float(jax.grad(
             lambda i: self._scalar(self._xyz(inclination=i))
@@ -1176,7 +1176,7 @@ class TestOrbitalParamGradientsFD:
     def test_ecc_gradient_finite_and_nonzero(self):
         """
         d(X+Y+Z)/d(ecc) at ecc=0.1, t=0.5 d (off mid-transit).
-        The orbital radius r = a(1−e²)/(1+e·cos f) depends on ecc through
+        The orbital radius r = a(1-e^2)/(1+e x cos f) depends on ecc through
         both the Kepler solver and the radius formula.
         """
         g = float(jax.grad(
@@ -1186,7 +1186,7 @@ class TestOrbitalParamGradientsFD:
         assert abs(g) > 0,     "d/d(ecc) is zero"
 
     def test_ecc_gradient_fd_agreement(self):
-        """FD at h=0.01; smooth Kepler solver → rtol=1e-3 (observed rel_err < 2e-4)."""
+        """FD at h=0.01; smooth Kepler solver -> rtol=1e-3 (observed rel_err < 2e-4)."""
         h = 0.01
         jax_g = float(jax.grad(
             lambda e: self._scalar(self._xyz(t=0.5, ecc=e))
@@ -1201,7 +1201,7 @@ class TestOrbitalParamGradientsFD:
 
     def test_omega_gradient_finite_and_nonzero(self):
         """
-        d(X+Y+Z)/d(omega_peri) at ω=π/4, ecc=0.1, t=0.5 d.
+        d(X+Y+Z)/d(omega_peri) at ω=pi/4, ecc=0.1, t=0.5 d.
         For a circular orbit (ecc=0) ω cancels in the expression ω+f, so
         ecc=0.1 is required to make the projected position depend on ω.
         """
@@ -1213,7 +1213,7 @@ class TestOrbitalParamGradientsFD:
         assert abs(g) > 0,     "d/d(omega_peri) is zero at ecc=0.1"
 
     def test_omega_gradient_fd_agreement(self):
-        """FD at h=0.01 rad; smooth trig → rtol=1e-3 (observed rel_err < 6e-5)."""
+        """FD at h=0.01 rad; smooth trig -> rtol=1e-3 (observed rel_err < 6e-5)."""
         omega0 = float(np.pi / 4.0)
         h = 0.01
         jax_g = float(jax.grad(
