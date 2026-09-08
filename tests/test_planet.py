@@ -1,5 +1,5 @@
 """
-tests/test_planet.py — Tests for the planet.py orbital module.
+tests/test_planet.py - Tests for the planet.py orbital module.
 """
 
 import warnings
@@ -129,7 +129,7 @@ class TestKepler:
             err_msg="High-e Kepler solver: unit-norm violated")
 
     def test_output_finite_for_all_M(self):
-        """(sinf, cosf) should be finite for all M ∈ [0, 2pi) and valid e."""
+        """(sinf, cosf) should be finite for all M in [0, 2pi) and valid e."""
         M = jnp.linspace(0.0, 2 * jnp.pi, 200)
         for ecc in [0.0, 0.3, 0.6, 0.9]:
             sinf, cosf = _kepler(M, ecc)
@@ -160,7 +160,7 @@ class TestKepler:
 
 
 # ===================================================================
-# 2.  planet_sky_position — single epoch
+# 2.  planet_sky_position - single epoch
 # ===================================================================
 
 class TestPlanetSkyPosition:
@@ -230,7 +230,7 @@ class TestPlanetSkyPosition:
     # --- Sky separation monotone near transit ----------------------------
 
     def test_sky_separation_decreases_toward_transit(self):
-        """Sky separation √(X^2+Y^2) should decrease as t -> t0."""
+        """Sky separation sqrt(X^2+Y^2) should decrease as t -> t0."""
         sep = lambda t: float(jnp.sqrt(sum(v**2 for v in _sky_pos(t)[:2])))
         assert sep(-2.0) > sep(-0.1), \
             "Sky separation should decrease as planet approaches transit"
@@ -238,7 +238,7 @@ class TestPlanetSkyPosition:
     # --- Eccentric orbit periapsis / apoapsis radii ----------------------
 
     def test_eccentric_periapsis_apoapsis_radii(self):
-        """For an eccentric orbit, min/max 3-D radii should equal a(1±e)."""
+        """For an eccentric orbit, min/max 3-D radii should equal a(1+/-e)."""
         ecc = 0.4
         a   = 15.0
         P   = 10.0
@@ -401,7 +401,7 @@ class TestObliquity:
 
 
 # ===================================================================
-# 3.  compute_planet_sky_positions — vectorised
+# 3.  compute_planet_sky_positions - vectorised
 # ===================================================================
 
 class TestComputePlanetSkyPositions:
@@ -795,7 +795,7 @@ class TestTimePrecision:
 
 
 # ===================================================================
-# 5.  Unit conversion: density ↔ a/R★
+# 5.  Unit conversion: density <-> a/R*
 # ===================================================================
 
 class TestDensityConversions:
@@ -804,7 +804,7 @@ class TestDensityConversions:
 
     def test_earth_orbit_a_over_rstar(self):
         """Solar density + 1-year period should give a/R* ~= 215."""
-        rho_sun = 1.41          # g cm⁻³
+        rho_sun = 1.41          # g cm^-3
         P_earth = 365.25        # days
         a       = stellar_density_to_a_over_rstar(rho_sun, P_earth)
         assert 200 < a < 230, f"Expected a/R* ~= 215 (Earth), got {a:.1f}"
@@ -837,7 +837,7 @@ class TestDensityConversions:
         assert a10 > a1
 
     def test_kepler_third_law_exponent(self):
-        """a/R★ should scale as P^(2/3) for fixed density."""
+        """a/R* should scale as P^(2/3) for fixed density."""
         rho   = 1.0
         P1, P2 = 2.0, 8.0
         a1 = stellar_density_to_a_over_rstar(rho, P1)
@@ -845,10 +845,10 @@ class TestDensityConversions:
         # a proportional to P^(2/3) -> a2/a1 = (P2/P1)^(2/3)
         ratio_expected = (P2 / P1) ** (2.0 / 3.0)
         np.testing.assert_allclose(a2 / a1, ratio_expected, rtol=1e-6,
-            err_msg="a/R★ should scale as P^(2/3) (Kepler's 3rd law)")
+            err_msg="a/R* should scale as P^(2/3) (Kepler's 3rd law)")
 
     def test_denser_star_larger_a_for_fixed_period(self):
-        """For fixed P, denser star gives larger a/R★ (smaller physical R★)."""
+        """For fixed P, denser star gives larger a/R* (smaller physical R*)."""
         P    = 3.0
         a_lo = stellar_density_to_a_over_rstar(0.5, P)
         a_hi = stellar_density_to_a_over_rstar(5.0, P)
@@ -863,9 +863,9 @@ class TestDensityConversions:
         (10.0, 365.0),
     ])
     def test_output_positive(self, rho, P):
-        """a/R★ must always be positive for positive ρ and P."""
+        """a/R* must always be positive for positive rho and P."""
         a = stellar_density_to_a_over_rstar(rho, P)
-        assert a > 0, f"a/R★ should be positive (rho={rho}, P={P})"
+        assert a > 0, f"a/R* should be positive (rho={rho}, P={P})"
 
 
 # ===================================================================
@@ -887,7 +887,7 @@ class TestPlanetGradients:
     2. Physical sign + calibrated FD (_compute_planet_mask):
        The transit-edge sigmoid has transition width
            softness_transit = 1 / (10 x star_pixel_rad)  [R* units]
-       For spr=50 this is 0.002 R★.  A finite-difference step of h=0.1 in
+       For spr=50 this is 0.002 R*.  A finite-difference step of h=0.1 in
        planet position (or inclination converted to planet shift) is ~50x
        this width, making FD completely unreliable.  The FD tests here use
        h = 1 % of the transition width where the chord approximation is valid.
@@ -966,7 +966,7 @@ class TestPlanetGradients:
 
     def test_planet_mask_large_h_gives_wrong_result(self):
         """
-        Documents that h=0.1 R★ — ~50x the transit transition width — yields a
+        Documents that h=0.1 R* - ~50x the transit transition width - yields a
         FD estimate that is unreliable, explaining sign/value mismatches in
         external test suites that use h=0.1 in unconstrained parameter space.
         """
@@ -996,7 +996,7 @@ class TestPlanetGradients:
         sign_flip = float(np.sign(grad_jax)) != float(np.sign(fd_large))
         assert ratio < 0.1 or ratio > 10.0 or sign_flip, (
             f"h=0.1 FD unexpectedly agrees with JAX (ratio={ratio:.3f}). "
-            "Transition may be wider than expected — check spr."
+            "Transition may be wider than expected - check spr."
         )
 
     def test_default_softness_is_exact_hard_edge(self):
@@ -1044,18 +1044,18 @@ class TestPlanetGradients:
 class TestOrbitalParamGradientsFD:
     """
     Verify that JAX autodiff agrees with calibrated finite differences for
-    five Keplerian orbital parameters: a/R★, period, orbital inclination,
+    five Keplerian orbital parameters: a/R*, period, orbital inclination,
     eccentricity, and argument of periastron.
 
     Strategy
     --------
-    a/R★, period, inclination, ecc, omega_peri:
+    a/R*, period, inclination, ecc, omega_peri:
         Tested through planet_sky_position (pure trig / Kepler solver).
         The output scalar X+Y+Z is smooth in all parameters, so a standard
         h = 0.01 in natural units is safe everywhere.
 
     Orbit geometry: inc=89deg so impact parameter b = a cos(i) ~= 0.26 R*
-    is non-zero, making gradients w.r.t. inclination and a/R★ non-trivial.
+    is non-zero, making gradients w.r.t. inclination and a/R* non-trivial.
     For period and ecc tests the planet is evaluated at t=0.5 d (off
     mid-transit) so the mean-anomaly derivatives are non-zero.
     """

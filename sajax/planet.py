@@ -1,10 +1,10 @@
 """
-planet.py — Keplerian planet orbit and pixel-level transit geometry for sajax.
+planet.py - Keplerian planet orbit and pixel-level transit geometry for sajax.
 
 This module is a standalone companion to sajax/core.py.  It can be used
 independently to compute transit light curves, or integrated with sajax
 via ``build_system`` / ``quick_lc`` (defined in core.py, transit
-parameters optional) to correctly model active-region crossing events —
+parameters optional) to correctly model active-region crossing events -
 i.e. cases where the planet occultes a starspot or facula during transit.
 
 Architecture
@@ -14,14 +14,14 @@ on the sky at each epoch and which stellar-disc pixels it occults.  The flux
 integration (limb darkening, active-region weighting) is handled by the
 existing sajax machinery in core.py.  This clean separation means that the
 transit model inherits sajax's full limb-darkening parametrisation
-automatically — no extra parameters are required.
+automatically - no extra parameters are required.
 
 Orbital convention  (Winn 2010 / Eastman et al. 2013)
 ------------------------------------------------------
 
-- **X** — sky-plane east-west (positive east)
-- **Y** — sky-plane north-south (positive north, foreshortened by cos i)
-- **Z** — line-of-sight toward observer (Z > 0 -> planet in front of star)
+- **X** - sky-plane east-west (positive east)
+- **Y** - sky-plane north-south (positive north, foreshortened by cos i)
+- **Z** - line-of-sight toward observer (Z > 0 -> planet in front of star)
 
 All sky positions are in units of the stellar radius R*.
 
@@ -53,18 +53,18 @@ Minimum parameter set
 Limb darkening
 --------------
 The same LDC law stored in the sajax model dict is applied automatically
-to occulted pixels — no separate transit LDC parameters are required.
+to occulted pixels - no separate transit LDC parameters are required.
 
 Public API
 ----------
-  ``_kepler(M, ecc)``                         — differentiable Kepler solver
-  ``planet_sky_position(...)``                — single-epoch sky coords (X, Y, Z)
-  ``compute_planet_sky_positions(...)``       — vectorised over an array of times
-  ``compute_multi_planet_sky_positions(...)`` — vectorised over times AND planets
-  ``_compute_planet_mask(...)``               — per-pixel occultation mask, one planet
-  ``_compute_all_planets_mask(...)``          — per-pixel occultation mask, over multiple planets
-  ``build_transit_model(...)``                — pre-compute positions for all times/planets
-  ``stellar_density_to_a_over_rstar()``       — unit-conversion convenience
+  ``_kepler(M, ecc)``                         - differentiable Kepler solver
+  ``planet_sky_position(...)``                - single-epoch sky coords (X, Y, Z)
+  ``compute_planet_sky_positions(...)``       - vectorised over an array of times
+  ``compute_multi_planet_sky_positions(...)`` - vectorised over times AND planets
+  ``_compute_planet_mask(...)``               - per-pixel occultation mask, one planet
+  ``_compute_all_planets_mask(...)``          - per-pixel occultation mask, over multiple planets
+  ``build_transit_model(...)``                - pre-compute positions for all times/planets
+  ``stellar_density_to_a_over_rstar()``       - unit-conversion convenience
 """
 
 from __future__ import annotations
@@ -90,8 +90,8 @@ def _kepler(M: jnp.ndarray, ecc: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]
     ~~~~~~~~~~~~~~~~~~~~~~
     * Symmetry fold: M is mapped into [0, pi) then restored afterwards,
       which halves the domain and removes sign ambiguity.
-    * Starter: E0 = M + e sin M  (good for e ≲ 0.5; adequate for e < 0.9).
-    * Refinement: 6 Halley iterations (3rd-order convergence) — the residual
+    * Starter: E0 = M + e sin M  (good for e <= 0.5; adequate for e < 0.9).
+    * Refinement: 6 Halley iterations (3rd-order convergence) - the residual
       drops from O(e^2) to < 1e-15 in <= 4 steps even at e = 0.95.
     * All operations are JAX primitives.  The fixed unrolled iteration graph
       is fully differentiable via JAX's default automatic differentiation.
@@ -100,14 +100,14 @@ def _kepler(M: jnp.ndarray, ecc: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]
 
     Parameters
     ----------
-    M   : mean anomaly [rad]  — scalar or array
-    ecc : orbital eccentricity [0, 1)  — scalar
+    M   : mean anomaly [rad]  - scalar or array
+    ecc : orbital eccentricity [0, 1)  - scalar
 
     Returns
     -------
     sinf, cosf : sin and cos of the true anomaly  (same shape as M)
     """
-    # Wrap into [0, 2pi) and exploit the symmetry sin(2pi − M) = −sin(M)
+    # Wrap into [0, 2pi) and exploit the symmetry sin(2pi - M) = -sin(M)
     M = M % (2.0 * jnp.pi)
     flip = M > jnp.pi
     M_ = jnp.where(flip, 2.0 * jnp.pi - M, M)   # now in [0, pi)
@@ -115,8 +115,8 @@ def _kepler(M: jnp.ndarray, ecc: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]
     # Initial guess
     E = M_ + ecc * jnp.sin(M_)
 
-    # Halley's method:  f = E − e sin E − M,   f' = 1 − e cos E,   f'' = e sin E
-    #   ΔE = −f / (f' − fxf'' / (2 f'))  =  −fxf' / (f'^2 − fxf''/2)
+    # Halley's method:  f = E - e sin E - M,   f' = 1 - e cos E,   f'' = e sin E
+    #   ΔE = -f / (f' - fxf'' / (2 f'))  =  -fxf' / (f'^2 - fxf''/2)
     for _ in range(6):
         sE  = jnp.sin(E)
         cE  = jnp.cos(E)
@@ -172,9 +172,9 @@ def planet_sky_position(
     Returns
     -------
     X, Y, Z : sky-plane coordinates in units of R*
-        X  — east-west (positive east) at sp_orb = 0
-        Y  — north-south projected  (= r sin(ω+f) cos i) at sp_orb = 0
-        Z  — toward observer  (Z > 0 -> transit;  Z < 0 -> occultation)
+        X  - east-west (positive east) at sp_orb = 0
+        Y  - north-south projected  (= r sin(ω+f) cos i) at sp_orb = 0
+        Z  - toward observer  (Z > 0 -> transit;  Z < 0 -> occultation)
         For nonzero sp_orb, (X, Y) are the sp_orb = 0 values rotated
         by λ.
 
@@ -199,12 +199,12 @@ def planet_sky_position(
     """
     # ---- True anomaly at mid-transit ----------------------------------------
     # At inferior conjunction (transit centre): ω + f_transit = pi/2
-    # ->  f_transit = pi/2 − ω
+    # ->  f_transit = pi/2 - ω
     f_transit = 0.5 * jnp.pi - omega_peri
 
     # ---- Time of periastron passage -----------------------------------------
     # Convert f_transit -> E_transit via
-    #   tan(E/2) = sqrt((1−e)/(1+e)) x tan(f/2)
+    #   tan(E/2) = sqrt((1-e)/(1+e)) x tan(f/2)
     # Use arctan2 for correct quadrant handling.
     half_f    = 0.5 * f_transit
     E_transit = 2.0 * jnp.arctan2(
@@ -221,10 +221,10 @@ def planet_sky_position(
     sinf, cosf = _kepler(M, ecc)
 
     # ---- Orbital radius in units of R* --------------------------------------
-    # r = a (1 − e^2) / (1 + e cos f)
+    # r = a (1 - e^2) / (1 + e cos f)
     r = a_over_rstar * (1.0 - ecc ** 2) / (1.0 + ecc * cosf)
 
-    # ---- Sky-plane projection (Winn 2010, eqs. 1–3) -------------------------
+    # ---- Sky-plane projection (Winn 2010, eqs. 1-3) -------------------------
     # Expand cos(ω+f) and sin(ω+f) via angle-addition formulae to avoid
     # computing arctan2(sinf, cosf) (preserves differentiability).
     cos_w  = jnp.cos(omega_peri)
@@ -232,8 +232,8 @@ def planet_sky_position(
     cos_wf = cosf * cos_w - sinf * sin_w   # cos(ω + f)
     sin_wf = sinf * cos_w + cosf * sin_w   # sin(ω + f)
 
-    X =  r * (-cos_wf)                          # east–west
-    Y =  r *  sin_wf * jnp.cos(inclination)     # north–south (projected)
+    X =  r * (-cos_wf)                          # east-west
+    Y =  r *  sin_wf * jnp.cos(inclination)     # north-south (projected)
     Z =  r *  sin_wf * jnp.sin(inclination)     # toward observer
 
     # ---- Spin-orbit angle: rotate (X, Y) relative to the (sky-Y-fixed)
@@ -271,7 +271,7 @@ def compute_planet_sky_positions(
 
     Returns
     -------
-    xyz : (ntime, 3) array  —  columns are [X, Y, Z] in units of R*
+    xyz : (ntime, 3) array  -  columns are [X, Y, Z] in units of R*
     """
     _pos = vmap(
         lambda t: jnp.stack(
@@ -507,7 +507,7 @@ def _compute_all_planets_mask(
 
 
 # ---------------------------------------------------------------------------
-# 5. build_transit_model — pre-compute positions for all (oversampled) epochs
+# 5. build_transit_model - pre-compute positions for all (oversampled) epochs
 # ---------------------------------------------------------------------------
 
 def _warn_if_precision_insufficient(times: np.ndarray) -> None:
@@ -567,7 +567,7 @@ def build_transit_model(
 
     The returned dict should be stored in the sajax model dict under the key
     ``"transit"``.  ``build_system()`` (in core.py) does this automatically
-    when its transit parameters are given — end users typically do not need
+    when its transit parameters are given - end users typically do not need
     to call this function directly.
 
     Parameters
@@ -612,9 +612,9 @@ def build_transit_model(
     -------
     dict with keys
     ~~~~~~~~~~~~~~
-    ``planet_xyz`` : (ntime, nplanet, 3) jnp.ndarray — each planet's (X, Y, Z) per epoch
-    ``k``          : jnp.ndarray, as given — planet-to-star radius ratio
-    ``nplanet``    : int — number of planets, inferred from t0's trailing axis
+    ``planet_xyz`` : (ntime, nplanet, 3) jnp.ndarray - each planet's (X, Y, Z) per epoch
+    ``k``          : jnp.ndarray, as given - planet-to-star radius ratio
+    ``nplanet``    : int - number of planets, inferred from t0's trailing axis
     """
     _warn_if_precision_insufficient(times)
     times_jax = jnp.asarray(times)
@@ -645,7 +645,7 @@ def stellar_density_to_a_over_rstar(
 ) -> float:
     """
     Convert mean stellar density and orbital period to a / R* via
-    Kepler's third law  (Seager & Mallén-Ornelas 2003):
+    Kepler's third law  (Seager & Mallen-Ornelas 2003):
 
         a / R* = ( G rho_star P^2 / (3pi) )^(1/3)
 

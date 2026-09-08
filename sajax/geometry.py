@@ -1,5 +1,5 @@
 """
-geometry.py — JAX rotation matrices and coordinate transforms.
+geometry.py - JAX rotation matrices and coordinate transforms.
 
 Replaces the ``astropy.coordinates.matrix_utilities.rotation_matrix``
 dependency from the original SAGE code with pure JAX, making all

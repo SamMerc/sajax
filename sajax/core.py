@@ -93,8 +93,8 @@ def flare_template(t, tpeak, fwhm, ampl=1.0):
 
     Times more than 20 FWHM before the peak return exactly 0 (the true
     template is ~1e-70 there): the rise-side time argument is clamped so
-    the ``exp * erfc`` product can never overflow to NaN — in value or in
-    gradient — on long baselines.
+    the ``exp * erfc`` product can never overflow to NaN - in value or in
+    gradient - on long baselines.
     """
     A, B, C, D1, D2, f1 = (0.9687734504375167, -0.251299705922117,
                            0.22675974948468916, 0.15551880775110513,
@@ -103,7 +103,7 @@ def flare_template(t, tpeak, fwhm, ampl=1.0):
     # Time in units of FWHM from the peak. Clamped on the rise side: at
     # tn = -20 the erfc factor has underflowed to exactly 0 while the exp
     # factor is still finite, so the product is exactly 0 there and for
-    # all earlier times — and the clamp keeps exp from overflowing to
+    # all earlier times - and the clamp keeps exp from overflowing to
     # inf (NaN forward values and gradients) further out.
     tn = jnp.maximum((t - tpeak) / fwhm, -20.0)
 
@@ -649,7 +649,7 @@ def _compute_all_phases(
     total_pixels:        int,
     arsize_rads:         jnp.ndarray,
     ar_smoothness:       jnp.ndarray,
-    k:                   jnp.ndarray,  # (nplanet, nwave) Rp / R★, one value per planet per wavelength
+    k:                   jnp.ndarray,  # (nplanet, nwave) Rp / R*, one value per planet per wavelength
     ld_mode:            LdMode,
     plot_map_wavelength: float,
     n:                   int,
