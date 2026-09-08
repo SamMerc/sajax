@@ -880,8 +880,8 @@ class TestPlanetGradients:
     1. Analytical comparison (planet_sky_position):
        For a circular edge-on orbit at mid-transit the sky coordinates are
        exact trig functions of inclination:
-           Y = acos(i)   ->   dY/di = -asin(i)
-           Z = asin(i)   ->   dZ/di =  acos(i)
+           Y = a cos(i)   ->   dY/di = -a sin(i)
+           Z = a sin(i)   ->   dZ/di =  a cos(i)
        JAX autodiff is checked against these closed-form expressions.
 
     2. Physical sign + calibrated FD (_compute_planet_mask):
@@ -903,7 +903,7 @@ class TestPlanetGradients:
 
     def test_dY_di_matches_analytical_at_mid_transit(self):
         """
-        At mid-transit with circular orbit:  Y = acos(i)  ->  dY/di = -asin(i).
+        At mid-transit with circular orbit:  Y = a cos(i)  ->  dY/di = -a sin(i).
         """
         a   = jnp.float32(15.0)
         inc = jnp.float32(np.deg2rad(87.0))
@@ -923,7 +923,7 @@ class TestPlanetGradients:
 
     def test_dZ_di_matches_analytical_at_mid_transit(self):
         """
-        At mid-transit with circular orbit:  Z = asin(i)  ->  dZ/di = acos(i).
+        At mid-transit with circular orbit:  Z = a sin(i)  ->  dZ/di = a cos(i).
         """
         a   = jnp.float32(15.0)
         inc = jnp.float32(np.deg2rad(87.0))
@@ -943,7 +943,7 @@ class TestPlanetGradients:
 
     def test_dY_da_matches_analytical_at_mid_transit(self):
         """
-        At mid-transit with circular orbit:  Y = acos(i)  ->  dY/da = cos(i).
+        At mid-transit with circular orbit:  Y = a cos(i)  ->  dY/da = cos(i).
         Tests differentiability through the orbital radius calculation.
         """
         a   = jnp.float32(15.0)
@@ -1054,7 +1054,7 @@ class TestOrbitalParamGradientsFD:
         The output scalar X+Y+Z is smooth in all parameters, so a standard
         h = 0.01 in natural units is safe everywhere.
 
-    Orbit geometry: inc=89deg so impact parameter b = acos(i) ~= 0.26 R*
+    Orbit geometry: inc=89deg so impact parameter b = a cos(i) ~= 0.26 R*
     is non-zero, making gradients w.r.t. inclination and a/R★ non-trivial.
     For period and ecc tests the planet is evaluated at t=0.5 d (off
     mid-transit) so the mean-anomaly derivatives are non-zero.

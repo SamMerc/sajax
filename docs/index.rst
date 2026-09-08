@@ -10,7 +10,7 @@ Key Features
 
 - **Spectroscopic light curves** — provide a spectrum for the quiet star and the active region; SAJAX returns a light curve at every wavelength.
 - **Multi-planet systems** — transits from several planets are modeled simultaneously, each with independent orbital and radius parameters.
-- **Time-evolving active regions** — spot/faculae latitude, longitude, size, and contrast can vary over the course of an observation instead of staying fixed. Through this features, flares can be modeled (see Case 9 in :doc:`examples/introduction`).
+- **Time-evolving active regions** — spot/faculae latitude, longitude, size, and contrast can vary over the course of an observation instead of staying fixed. This feature can be used to model flares (see Case 9 in :doc:`examples/introduction`).
 - **Multiple limb-darkening modes** — provide coefficients for your favorite laws (``linear``, ``quadratic``, ``power2``, ``kipping3``, ``nonlinear4``) or a full intensity profile (``intensity_profile``).
 - **Stellar rotation, inclination, and obliquity** — arbitrary rotational phases, stellar-axis inclinations, and a sky-projected spin-orbit angle (``sp_orb``) for aligned or misaligned transits are all supported.
 - **JAX-native** — ``jit``, ``vmap``, and ``grad`` work out of the box.
