@@ -1,6 +1,5 @@
 ---
-title: '`SAJAX`: Stellar Activity Grid for Exoplanets in JAX'
-tags:
+title: '`SAJAX`: Stellar Activity grid for exoplanets in JAX'
 authors:
   - name: Samson J. Mercier
     orcid: 0000-0002-0962-7585
@@ -11,46 +10,116 @@ authors:
 affiliations:
   - name: Department of Earth, Atmospheric and Planetary Sciences, Massachusetts Institute of Technology, 77 Massachusetts Avenue, Cambridge, MA 02139, USA
     index: 1
-date: XXXXXX
+date: 26 September 2026
 bibliography: paper.bib
 
 ---
 
 # Summary
-
-The transit method is a ubiquitous method for detecting exoplanets and provides key opportunities to charracterizes exoplanets and their weird characteristics. Conversely, this method also gives us a window in the stars these worlds orbit: by passing across the stellar disk, we can probe the local stellar surface occulted during the transit chord. These two sides of exoplanet transits are intertwined and must be modeled synchronously to draw precise and accurate conclusions on the properties of these distant systems. An important piece of the puzzle is stellar activity and in particular, magnetic active regions:  variable magnetic activity across the stellar surface can lead to the birth of dark or bright regions (commonly referred to as spots and faculae). These regions play an important role in shaping the stellar disk crossed by the transit and must therefore be modeled. Sajax represents a novel framework in modeling these active regions and their impact on exoplanet transits. 
+When a planet passes in front of its host star, the resulting flux dip reveals the planet's size, orbit and, across wavelengths, its atmosphere. 
+However, the stellar surface is not uniform: magnetic activity produces dark spots, bright faculae and short-lived flares that bias the measured transit depth, and leave their own spectral signatures. 
+`SAJAX` is a Python package that simulates these effects. 
+It places any number of active regions, each with its own spectrum and limb-darkening coefficients, on a pixellated grid of the visible stellar disk, rotates the star, and optionally transits one or more planets across it.
+`SAJAX` offers active regions with tunable ede smoothness, from Gaussian to hard-edged, and properties that can evolve in time, capturing phenomena such as spot growth, latitudinal drift and flares. 
+Written in `JAX` [@jax2018github], it returns spectroscopic light curves, runs on CPUs and GPUs, and provides exact gradients for modern inference tools.
 
 # Statement of Need
-xxxxx
-# Documentation
+The transit method has grown from a detection technique into a versatile tool for characterizing exoplanets and their atmospheres.
+Early applications were limited by instrumental precision, a barrier that next-generation facilities such as the James Webb Space Telescope have largely lifted [@Rustamkulov2023]. 
+At this new level of precision, our imperfect knowledge of host stars has become the primary source of systematic error in transit spectrophotometery.
+Of the many forms of stellar contamination, the most impactful for transits are magnetic active regions, such as spots, faculae and flares.
+Unocculted regions produce wavelength-dependent biases in the transit depth through the transit light source effect [@Rackham2017; @Rackham2018; @Rackham2019; @Rackham2023], while occulted ones lead to in-transit bumps that skew the measured depth if not modeled [@Murray2026]. 
+The planet and stellar surface are intrinsically linked and must therefore be modelled together to constrain the planet's orbital and atmospheric properties. 
+Conversely, because the transit chord scans the stellar disk, this joint modelling also turns each transit into a direct probe of the stellar surface.
 
-Documentation for SAJAX is available at https://sajax.readthedocs.io/en/latest/.
+`SAJAX` is designed for this joint problem. 
+It provides a fast and flexible tool for exoplanet and stellar astronomers who need to (i) forward-model spectrophotometric time series of active stars, with or without transiting planets, and (ii) fit such models to data.
 
-# Similar Tools and Comparison
 
-While sajax is by no means the only such transit modeling tool out there, we are indeed standing on the shoulders of giants that came before us, it provides some key features that place it at the forefront of the field and could combine seamlessly with the stream of high-quality data delivered by next-generation telescopes.
+# State of the field
+`SAJAX` joins an established ecosystem of codes that model the effect of stellar activity on transit light curves. 
+These fall into three broad families, distinguished by how they represent active regions. 
+*Analytic and semi-analytic* tools, such as `macula` [@Kipping2012], `spotrod` [@Beky2014], `STSP` [@Morris2017] and `fleck` [@Morris2020], describe circular active regions in closed or nearly closed form. 
+*Spherical-harmonic* codes such as `starry` [@Luger2019], `starry_process` [@Luger2021], and `StarryStarryProcess` [@Sagynbayeva2025] expand the stellar surface map into spherical harmonics, reducing inference to fitting the expansion coefficients. 
+This allows active regions of arbitrary shape, but it has some drawbacks: small regions require computationally-demanding, high-degree terms, a truncated expansion can produce ringing effects, and certain combinations can produce negative intensities. 
+Finally, *grid-based* codes tessellate the surface and assign properties to each cell; examples include `PyTranSpot` [@Juvan2018], `SAGE` [@Chakraborty2024], `spot-model` [@Cracchiolo2021a; @Cracchiolo2021b], and `spotter` [@Garcia2025]. 
+The `SOAP` family [@Boisse2012;@Oshagh2013;@Dumusque2014;@Akinsanmi2018;@Serrano2020;@Cristo2025] and `ANTARESS` [@Bourrier2024] also model heterogeneous stellar surfaces, but with a primary focus on spectroscopic and radial-velocity observations.
 
-It is important for us to first adress the list of tools that are out there and do the same thing to sajax: 
-- fleck
-- spotter
-- starry
-- starrystarryprocess
-- pytranspot
-- SAGE
-- spotrod
-- spot-model
-- SOAP
-- ANTARESS
+The two codes closest to `SAJAX` are `fleck` and `spotter`, both of which offer `JAX` implementations.
+`fleck` computes each active region's flux from its projected area and the limb-darkening at its centre, and treats an active region as visible or hidden according to where its centre lies is on the visible hemisphere. 
+This is efficient and accurate for small active regions, but breaks down for large ones, such as those found on active M dwarfs. 
+`spotter` is built on a HEALPix map of the whole sphere [@Gorski2005]. It supports arbitrarily shaped active regions and Gaussian-process surface models. 
 
-These codes can be broadly categorizes into three families based on their treatment of active regions: grid-based, analytical, and spherical harmonics. While the two last ones can be combined together we separate them as they are fundamentally different in their implementation. As the name makes it sound, the grid-based codes rely on tesselating the stellar surface with a grid, and parameterizing spots are regions of low flux on this grid. In contrast, the analytical approach aims to provide a closed-form solution for the transit light curve in the presence of a contaminated stellar surface. The spherical harmonics code act as a subset of this where rather than describing the active regions as hard-edged regions on the stellar surface, they instead decompose the flux of the stellar surface through spherical harmonics thus allowing for a reduction of dimensionality in that only the spherical harmonic coefficients must be provided rather than the positional arguments of each active region.
+`SAJAX` extends `SAGE`, a grid-based `NumPy` code that assigns separate spectra to the quiet photosphere and spots but runs as Python loops and does not model planetary occultations. 
+Its guiding philosophy is to be a lightweight, inference-focused model: each active region is described by a small set of physically interpretable parameters (position, size, edge smoothness, spectrum and limb-darkening) rather than a free-form surface map, the model is differentiable and cheap to evaluate, and every optional feature costs nothing when unused.
 
-All these codes differ on their language of implementation (C, Rust, Python, Python accelerated with JAX) and in the complexity of phenomena they account for (spherical projection, differential rotation, single-band vs multi-band vs fully chromatic, distinct active region properties from the quiet photosphere, treatment of multiple active regions, dynamics of active region properties, ...). Ours adds to this list, but aims to provide implementations both at the forefront of computation time, and at modeling.
 
-Regarding the former, sajax is implemented in JAX. This allows it to implement the diversity of modern hardware available to accelerate model evaluations, while benefiting from the interpretability of ease of access of python code. As discussed later on (or above) we also develop our code with *inference* in mind: the light curve model can be evaluated in two ways, one leveraging the just-in-time compilation advantage of JAX to speed-up the most time intensive aspect of grid-based stellar surface modeling: the building of the grid and operations done relying on this grid. The other pathway trades this JIT compilation for ease of use, combining the two function evluations into one, and providing a slick altrernative for quick and dirty model evaluation, as is needed for plotting for example (it is in fact this latter model evaluation that we use to produce the plots in most of our documentation).
+# Software design
+Here, we describe `SAJAX`'s key features that underline its core philosophy.
+
+**Two-stage interface** - Inference requires thousands of model evaluations or more, and `SAJAX` is built around this use case. 
+The light curve model is split in two functions. 
+`build_system` runs once in `NumPy` and performs the most expensive, parameter-independent work: building the stellar grid, limb-darkening angles, rotational velocity field, and, for a fixed orbit, planet positions. 
+`make_lc` then takes the output of `build_system`, together with the active region, limb-darkening and (optionally) planetary parameters, and produces the light curve(s). 
+As a pure `JAX` function, `make_lc` can be passed to `jit`, `vmap` and `grad`, making it ideal for inference software that aim to parallelize operations, leverage modern hardware, and benefit from gradient-based methods. `quick_lc` combines both steps for one-off use.
+
+**Grid** - `SAJAX` keeps `SAGE`'s sky-plane Cartesian grid: a disc of radius $R$ pixels in which every pixel has the same projected area, so disc integration is a plain sum. 
+Only the visible hemisphere is stored. 
+We chose this grid over a HEALPix sphere for computational reasons: at matched resolution at disc centre, it needs half as many pixels on the visible hemisphere and a quarter of the total storage. 
+The cost is that resolution on the stellar surface degrades towards the limb.
+
+**Active regions** - Each region is a super-Gaussian with respect to the spherical distance $\theta$ from its centre,
+$$S_a(\theta) = \exp\left[-\left(\frac{1-\cos\theta}{1-\cos r_a}\right)^{n_a}\right],$$
+with angular radius $r_a$ and smoothness $n_a$. 
+$n_a = 1$ gives a Gaussian, and $n_a \to \infty$ recovers the hard-edged parameterization. 
+Because the profile is smooth for finite $n_a$, gradients with respect to position and size are well defined. 
+At each pixel and wavelength the local flux is
+$$F = F_\mathrm{quiet}\,I_\mathrm{quiet}(\mu)\left[1 - \sum_a \left(1 - \frac{F_a I_a(\mu)}{F_\mathrm{quiet} I_\mathrm{quiet}(\mu)}\right) S_a\right],$$
+where each region $a$ has its own spectrum $F_a$ and limb-darkening coefficients, entering in $I_a$. The limb-darkening law is shared by the whole star. 
+Overlapping regions add, so an umbra inside a penumbra needs no special treatment. 
+Spectra are sampled at each pixel's rotationally Doppler-shifted wavelength.
+
+**Planets** - Planets on Keplerian orbits occult pixels directly, so active region crossings follow naturally from the geometry. 
+By default, each planet is a hard pixel mask which leads to no passage of gradient information for the orbital parameters. To restore the gradient flow, `SAJAX` includes an optional sigmoid edge at the cost of a small bias in transit depth that scales with edge width. 
+Each planet also has a sky-projected spin–orbit angle, since repeated crossings of the same active region can constrain orbital geometry [@SanchisOjeda2011].
+
+**Optional features at no cost** - Any active region property can carry a time axis, describing regions that grow, drift, brighten or dim. 
+A brightening region models a flare, and `SAJAX` include a built-in flare template to do so based on @TovarMendoza2022. 
+Multiple transiting planets are also supported. 
+In keeping with `SAJAX`'s focus on inference, these features use separate code paths, so models that do not use them run no slower.
+
+# Research impact statement 
+`SAJAX` has not yet been used in a published study. 
+Its expected significance rests on three points. 
+First, it re-implements the pixel model of `SAGE`, which was developed to quantify stellar contamination of transmission spectra [@Chakraborty2024] and has been used to predict photometric variability of TOI-3884 [@Chakraborty2025], and adds planet–spot crossings, gradients and the potential for GPU execution broadening its applicability.
+Second, `SAJAX` is released on PyPI under the MIT licence, with versioned releases, documentation and tutorials on Read the Docs, and a public issue tracker, allowing for easy adoption by the community.
+Finally, we provide examples of both forward modeling and inference. 
+The inference example follows a well-established approach, fitting the white light curve for the orbit and spot geometry and then each wavelength channel of a chromatic transit with a spot crossing, with both a maximum a posteriori fit and a Markov Chain Monte Carlo, and compare the retrieved spot, orbit and transmission spectrum with the injected values.
+
+While tools such as `fleck` and `spotter` are widely used in the community and still remain powerful tools for a wide range of applications, we hope that `SAJAX` can serve the community as a complimentary tool. In particular, `SAJAX` should shine when analyzing lights of planets around active stars, such as AU Mic, V1298 Tau, TOI-3884, and TRAPPIST-1. These targets, as well as the Giant Exoplanet around M-Dwarfs (GEMS) are perfect applications for `SAJAX` as they are the most likely targets where per-region spectra and limb darkening, large or overlapping regions, and time-varying activity can be constrained.
+
+We see `SAJAX` as complementary to widely used tools such as `fleck` and `spotter`, designed for light curves of planets around particularly active stars, where per-region spectra and limb darkening, large or overlapping regions, and time-varying activity are most likely to be constrained.
+
+# Future directions
+`SAJAX` will be maintained as a lightweight, fast tool compatible with evolving inference software, and plan to extend it in two directions. 
+The first, and most substantial, is producing radial-velocity time series, capturing the range of phenomena required of such models. 
+Building this directly into `SAJAX` will reduce the cost of joints fits to transit and radial-velocity data (e.g. Rossiter-McLaughlin analyses): instead of two separate model evaluations per likelihood call, the light-curve and radial-velocity models could share a single pass over the grid built by `build_system`.
+The second is modelling oblate planets. 
+To our knowledge, no existing software computes the transit of an oblate planet across a star with active regions. 
+JWST data are only beginning to constrain planetary oblateness [@Cassese2024; @Dholakia2025], and having a differentiable `JAX` framework for such cases would allow the information content of such observations to be explored directly.
+
+# AI Usage disclosure
+The authors used Claude Code (versions 2.1.245–2.1.281, with Claude Sonnet 5) to assist with the initial port of `SAGE` to `JAX`, and the implementation of key features, unit tests, example notebooks and documentation. 
+The authors made all design and scientific decisions, and reviewed, tested and validated every AI-assisted change. 
+The authors take full responsibility for the software and the content of this manuscript.
 
 # Acknowledgements
-SAJAX makes use of the following dependencies: XXXXXX.
-We would also like to acknowledge the base code that SAJAX was built on, SAGE, as well as ANTARESS, the code of which inspired some of the core functionalities of SAJAX.
-SJM and LA would also like to thank Julien de Wit, Benjamin V. Rackham, Catriona Murray, and Zoe de Beurs for fruitful discussion that helped in the developement of SAJAX's core philosophy and functionalities.
+`SAJAX` builds on `SAGE` [@Chakraborty2024] and draws inspiration from `ANTARESS` [@Bourrier2024]. 
+Its core depends on `JAX` [@jax2018github], `NumPy` [@Harris2020], `SciPy` [@Virtanen2020], `Matplotlib` [@Hunter2007] and `interpax`. 
+The example notebooks additionally use `NumPyro` [@Phan2019], `ArviZ` [@Kumar2019], `corner` [@ForemanMackey2016], `ExoTiC-LD` [@Grant2024], `speclib` [Rackham2024], `fleck` [@Morris2020], `spotter` [@Garcia2025], `batman` [@Kreidberg2015] and `jaxoplanet` [@Hattori2024].
+
+We thank Julien de Wit, Benjamin V. Rackham, Catriona Murray, Zoe de Beurs, Prajwal Niraula and other members of the Disruptive Planets team for fruitful discussions during the developement of `SAJAX`. 
+S.J.M. acknowledges support from the Massachusetts Institute of Technology through the Hurley Fellowship. 
+L.A. acknowledges support XXXXX.
 
 # References
