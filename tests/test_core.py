@@ -431,6 +431,7 @@ class TestAROverlapCompounding:
         result = make_lc(
             model, flux_active, jnp.array([0.0, 0.0]), jnp.array([0.0, 0.0]),
             jnp.array([15.0, 15.0]), jnp.array([50.0, 50.0]),
+            compute_map=True,
         )
         star_map = np.array(result[1][0])
         centre = star_map.shape[0] // 2
@@ -2988,6 +2989,7 @@ class TestTimeVaryingAR:
             evolving_model_oversampled, flux_active=jnp.array(FLUX_SPOT),
             ar_lat=jnp.array([0.0]), ar_long=jnp.array([0.0]), ar_size=ar_size_t,
             ar_smoothness=jnp.array([_SM]),
+            compute_map=True,
         )
         assert np.array(lc).shape == (self._NTIME,)  # nwave == 1: axis already dropped
         assert star_maps.shape[0] == self._NTIME
