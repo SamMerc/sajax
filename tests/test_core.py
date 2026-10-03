@@ -17,6 +17,7 @@ from sajax import quick_lc, build_stellar_grid
 from sajax.core import (
     build_system,
     make_lc,
+    calibrate_transit_softness,
     flare_template,
     _compute_all_planets_mask,
     _compute_ar_shape,
@@ -3427,3 +3428,124 @@ class TestBjdReferenceEpoch:
 
         g = jax.grad(f)(self._T0_BJD)
         assert jnp.isfinite(g)
+
+
+# ========================================================================
+# 11.  calibrate_transit_softness - bisection search for the largest
+# transit_softness whose hard-edge bias stays within a certain ppm budget.
+# ========================================================================
+
+class TestCalibrateTransitSoftness:
+
+    _N_STEPS = 12  # fewer than the default 40
+    _MAX_BIAS_PPM = 200.0
+
+    @staticmethod
+    def _kwargs(**overrides):
+        """make_lc_kwargs for an AR that's inert plus a concrete transit
+        """
+        kwargs = dict(
+            flux_active=jnp.array(FLUX_QUIET),
+            ar_lat=jnp.array([0.0]), ar_long=jnp.array([180.0]),
+            ar_size=jnp.array([0.0]), ar_smoothness=jnp.array([_SM]),
+            **TRANSIT_PARAMS,
+        )
+        kwargs.update(overrides)
+        return kwargs
+
+    def test_returns_value_within_search_range(self, combined_model):
+        softness = calibrate_transit_softness(
+            combined_model, wrt="k", verbose=False, n_bisection_steps=self._N_STEPS,
+            max_bias_ppm=self._MAX_BIAS_PPM, **self._kwargs(),
+        )
+        assert 1e-6 <= softness <= 0.3
+
+    def test_selected_softness_satisfies_bias_budget(self, combined_model):
+        """The returned softness's own induced bias must satisfy the
+        requested max_bias_ppm budget"""
+        max_bias_ppm = self._MAX_BIAS_PPM
+        softness = calibrate_transit_softness(
+            combined_model, wrt="k", verbose=False, max_bias_ppm=max_bias_ppm,
+            n_bisection_steps=self._N_STEPS, **self._kwargs(),
+        )
+        lc_hard = np.array(make_lc(combined_model, transit_softness=0.0, **self._kwargs())[0])
+        lc_soft = np.array(make_lc(combined_model, transit_softness=softness, **self._kwargs())[0])
+        baseline = float(np.median(lc_hard))
+        bias_ppm = float(np.max(np.abs(lc_soft - lc_hard))) / baseline * 1e6
+        assert bias_ppm <= max_bias_ppm + 1e-6
+
+    def test_tighter_budget_gives_smaller_or_equal_softness(self, combined_model):
+        """Bias grows roughly monotonically with softness, so a tighter ppm budget
+        must not return a *larger* softness than a looser one."""
+        common = dict(n_bisection_steps=self._N_STEPS, verbose=False, **self._kwargs())
+        loose = calibrate_transit_softness(combined_model, wrt="k", max_bias_ppm=5000.0, **common)
+        tight = calibrate_transit_softness(combined_model, wrt="k", max_bias_ppm=self._MAX_BIAS_PPM, **common)
+        assert tight <= loose + 1e-9
+
+    def test_softness_max_within_budget_is_returned_as_is(self, combined_model):
+        """When even softness_max satisfies the budget, it's returned
+        directly, with no bisection needed."""
+        softness = calibrate_transit_softness(
+            combined_model, wrt="k", verbose=False, max_bias_ppm=1e9,
+            n_bisection_steps=self._N_STEPS, **self._kwargs(),
+        )
+        assert softness == pytest.approx(0.3)
+
+    def test_softness_min_already_over_budget_raises(self, combined_model):
+        with pytest.raises(RuntimeError, match="softness_min"):
+            calibrate_transit_softness(
+                combined_model, wrt="k", verbose=False, max_bias_ppm=1e-12,
+                softness_min=0.3, softness_max=0.3, n_bisection_steps=self._N_STEPS,
+                **self._kwargs(),
+            )
+
+    def test_flat_light_curve_raises_valueerror(self, combined_model):
+        """No transit (k=0) and an inert AR: the hard-edge light curve is
+        exactly flat, so there's no edge to calibrate against."""
+        with pytest.raises(ValueError, match="flat"):
+            calibrate_transit_softness(
+                combined_model, wrt="k", verbose=False, **self._kwargs(k=0.0),
+            )
+
+    def test_wrt_missing_from_kwargs_raises(self, combined_model):
+        kwargs = self._kwargs()
+        del kwargs["k"]
+        with pytest.raises(ValueError, match="wrt"):
+            calibrate_transit_softness(combined_model, wrt="k", verbose=False, **kwargs)
+
+    def test_wrt_value_none_raises(self, combined_model):
+        with pytest.raises(ValueError, match="wrt"):
+            calibrate_transit_softness(
+                combined_model, wrt="k", verbose=False, **self._kwargs(k=None),
+            )
+
+    @pytest.mark.parametrize("bad_kwarg", ["transit_softness", "compute_map"])
+    def test_internal_kwargs_rejected(self, combined_model, bad_kwarg):
+        with pytest.raises(ValueError, match=bad_kwarg):
+            calibrate_transit_softness(
+                combined_model, wrt="k", verbose=False,
+                **self._kwargs(**{bad_kwarg: 0.0}),
+            )
+
+    def test_wrt_t0_also_supported(self, combined_model):
+        """check other wrt parameters work with the make_lc 
+        transit keyword, e.g. differentiating against t0 instead."""
+        softness = calibrate_transit_softness(
+            combined_model, wrt="t0", verbose=False, n_bisection_steps=self._N_STEPS,
+            max_bias_ppm=self._MAX_BIAS_PPM, **self._kwargs(),
+        )
+        assert 1e-6 <= softness <= 0.3
+
+    def test_verbose_false_prints_nothing(self, combined_model, capsys):
+        calibrate_transit_softness(
+            combined_model, wrt="k", verbose=False, n_bisection_steps=self._N_STEPS,
+            max_bias_ppm=self._MAX_BIAS_PPM, **self._kwargs(),
+        )
+        assert capsys.readouterr().out == ""
+
+    def test_verbose_true_prints_selected_softness(self, combined_model, capsys):
+        calibrate_transit_softness(
+            combined_model, wrt="k", verbose=True, n_bisection_steps=self._N_STEPS,
+            max_bias_ppm=self._MAX_BIAS_PPM, **self._kwargs(),
+        )
+        assert "Selected transit_softness" in capsys.readouterr().out
