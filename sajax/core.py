@@ -1839,25 +1839,6 @@ def make_lc(
         k_val          = 0.0
         transit_softness = 0.0
 
-    # ---- Verbose warnings/recommendations ----------------
-    if transit_softness == 0.0 and (_transit_given or model.get("has_transit", False)):
-        print(
-            "sajax: transit_softness=0.0 -- you are using a hard-edged planet "
-            "occultation mask. While this matches the physical simulation exactly, "
-            "if you are running a fit and want gradient information (e.g. a NUTS MCMC) "
-            "you should instead use transit_softness!=0. In this case, use the "
-            "calibrate_transit_softness() function to find the ideal softness value "
-            "for your system."
-        )
-    if not compute_map:
-        print(
-            "sajax: compute_map=False -- make_lc will not return the "
-            "2D stellar flux map (star_maps will be None). This is the "
-            "recommended, faster setting for light-curve-only use "
-            "(e.g. inside a fit's log-likelihood); pass compute_map=True if "
-            "you need the per-phase map for plotting or diagnostics."
-        )
-
     # ---- Broadcast k to (nplanet, nwave): see _prepare_transit_k for the
     # full shape convention. A scalar means the same (achromatic) radius
     # ratio at every planet/wavelength; a genuinely chromatic and/or
