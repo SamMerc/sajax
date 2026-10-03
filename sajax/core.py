@@ -1935,7 +1935,7 @@ def calibrate_transit_softness(
     softness_min: float = 1e-6,
     softness_max: float = 0.3,
     max_bias_ppm: float = 1.0,
-    n_bisection_steps: int = 40,
+    n_bisection_steps: int = 16,
     verbose: bool = True,
     **make_lc_kwargs,
 ) -> float:
@@ -1973,9 +1973,9 @@ def calibrate_transit_softness(
         Maximum allowed pointwise flux bias, in parts per million
         with respect to the hard-edge baseline flux (default 1.0).
     n_bisection_steps : int, optional
-        Number of bisection iterations (default 40; each halves the
-        remaining search interval, so 40 steps resolve ``softness`` to
-        about ``(softness_max - softness_min) / 2**40``.
+        Number of bisection iterations (default 16; each halves the
+        remaining search interval, so 16 steps resolve ``softness`` to
+        about ``(softness_max - softness_min) / 2**16``.
     verbose : bool, optional
         Print each bisection probe and the final selected value (default True).
     **make_lc_kwargs
