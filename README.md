@@ -49,7 +49,6 @@ sajax/
 ├── docs/
 │   ├── examples/
 │   │   ├── introduction.ipynb
-│   │   ├── comparison.ipynb
 │   │   ├── inference.ipynb
 ├── tests/
 │   ├── test_core.py

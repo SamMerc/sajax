@@ -3,17 +3,6 @@ core.py -- JAX-accelerated stellar active region light-curve engine.
 
 This module is a complete rewrite of ``SAGE1/sage.py`` in JAX.
 
-JIT compilation
----------------
-*Do NOT jit(make_lc) directly* -- it contains Python-level
-control flow on model metadata.  Instead, the inner _compute_all_phases
-is the hot path and is safe to JIT via::
-
-    from jax import jit
-    _compute_all_phases_jit = jit(_compute_all_phases, static_argnames=[
-        "star_pixel_rad", "total_pixels", "ld_mode",
-        "plot_map_wavelength", "n", "transit_softness"
-    ])
 """
 
 from __future__ import annotations
@@ -431,7 +420,8 @@ def _flux_at_wavelength(
     col_idx:         jnp.ndarray, # (total_pixels,) int
     vel_col:         jnp.ndarray, # (n,)
     ld_mode:        LdMode,
-) -> tuple[float, jnp.ndarray]:
+    compute_map:     bool = False,
+) -> tuple[float, Optional[jnp.ndarray]]:
     """
     Compute disc-integrated flux for a single wavelength channel.
 
@@ -464,10 +454,16 @@ def _flux_at_wavelength(
     The combined planet mask is 1 for pixels occulted by any planet; those
     pixels contribute zero flux regardless of active-region status.
 
+    ``compute_map`` (default False): ``arted_flux`` is only needed to
+    visually plot the 2D stellar map -- the light curve itself only needs
+    the scalar ``total_flux``. Thus, ``compute_map`` is default False to skip
+    the creation of ``arted_flux`` and avoid un-necessary computation.
+
     Returns
     -------
     total_flux : float            - active-region'ed integrated flux
-    arted_flux : (total_pixels,)  - per-pixel flux values (for map output)
+    arted_flux : (total_pixels,) or None    - per-pixel flux (for map output),
+                                               None when compute_map=False
     """
     planet_mask = _compute_all_planets_mask(
         x_disc, y_disc, star_pixel_rad, planet_xyz, k_wl, transit_softness,
@@ -514,8 +510,10 @@ def _flux_at_wavelength(
     # Multiplication (not jnp.where) so gradients flow through the planet mask.
     arted_flux = arted_flux * (1.0 - planet_mask)
 
-    total_flux = jnp.sum(arted_flux) / jnp.float32(total_pixels)
-    return total_flux, arted_flux
+    # Experimentation revealed that the following dot product
+    # is measurably faster than jnp.sum.
+    total_flux = jnp.dot(arted_flux, jnp.ones_like(arted_flux)) / jnp.float32(total_pixels)
+    return total_flux, (arted_flux if compute_map else None)
 
 
 # ---------------------------------------------------------------------------
@@ -549,7 +547,8 @@ def _compute_single_phase(
     n:                   int,         # full grid side (for map scatter)
     flat_indices:        jnp.ndarray, # (total_pixels,) scatter indices
     transit_softness:    float = 0.0, # see _compute_planet_mask
-) -> tuple[jnp.ndarray, jnp.ndarray]:
+    compute_map:         bool = False,
+) -> tuple[jnp.ndarray, Optional[jnp.ndarray]]:
     """
     Full spectral computation for one rotational phase, including optional
     pixel-level planet occultation.
@@ -569,7 +568,8 @@ def _compute_single_phase(
                              to the quiet-star baseline -- divide by that
                              yourself, e.g. via a quiet-star-only call to
                              ``make_lc``, if you want relative flux)
-    star_map              : (n, n)  flux map at plot_map_wavelength
+    star_map              : (n, n) or None  flux map at plot_map_wavelength,
+                             None when compute_map=False
     """
     # ---- active region shapes: (nar, total_pixels) -----------------------
     ar_shapes = vmap(
@@ -603,6 +603,7 @@ def _compute_single_phase(
             col_idx          = col_idx,
             vel_col          = vel_col,
             ld_mode         = ld_mode,
+            compute_map      = compute_map,
         ),
         in_axes=(0, 0, 1, 0, 1, 1),
     )
@@ -615,6 +616,9 @@ def _compute_single_phase(
         I_profile_active,
         k,
     )
+
+    if not compute_map:
+        return flux_per_wavelength, None
 
     # ---- Reconstruct 2D map at plot_map_wavelength ----------------------
     map_idx   = jnp.argmin(jnp.abs(wavelength - plot_map_wavelength))
@@ -655,7 +659,8 @@ def _compute_all_phases(
     n:                   int,
     flat_indices:        jnp.ndarray,
     transit_softness:    float = 0.0,
-) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    compute_map:         bool = False,
+) -> tuple[jnp.ndarray, Optional[jnp.ndarray]]:
     """
     vmap ``_compute_single_phase`` over the phase axis.
 
@@ -664,10 +669,13 @@ def _compute_all_phases(
     ``jnp.full((nphase, 1, 3), [0, 0, -1e10])`` and an all-zero ``k`` to
     disable transit (no performance overhead).
 
+    ``compute_map=False`` skips the per-phase 2D map reconstruction inside
+    ``_compute_single_phase`` to save on computation.
+
     Returns
     -------
     lc_raw    : (nphase, nwave)
-    star_maps : (nphase, n, n)
+    star_maps : (nphase, n, n), or None when compute_map=False
     """
     _phase_vmap = vmap(
         functools.partial(
@@ -695,6 +703,7 @@ def _compute_all_phases(
             n                   = n,
             flat_indices        = flat_indices,
             transit_softness    = transit_softness,
+            compute_map         = compute_map,
         ),
         in_axes=(0,0), # vmap over both ar_carts and planet_xyz
     )
@@ -735,7 +744,8 @@ def _compute_all_phases_evolving(
     n:                  int,
     flat_indices:       jnp.ndarray,
     transit_softness:   float = 0.0,
-) -> tuple[jnp.ndarray, jnp.ndarray]:
+    compute_map:        bool = False,
+) -> tuple[jnp.ndarray, Optional[jnp.ndarray]]:
     """
     Time-varying counterpart to ``_compute_all_phases``. Used only when make_lc() is given at least
     one AR parameter with a time axis. Identical to _compute_all_phases except
@@ -743,10 +753,13 @@ def _compute_all_phases_evolving(
     position is rebuilt and rotated fresh every phase. This function's existence adds no cost to 
     _compute_all_phases or any caller that doesn't use it.
 
+    ``compute_map=False`` skips the per-phase 2D map reconstruction inside
+    ``_compute_single_phase`` to save on computation.
+
     Returns
     -------
     lc_raw    : (nphase, nwave)
-    star_maps : (nphase, n, n)
+    star_maps : (nphase, n, n), or None when compute_map=False
     """
     def _single_phase(ar_lat_ph, ar_long_ph, arsize_ph, smooth_ph, flux_ph,
                        planet_xyz_ph, phase_deg):
@@ -770,7 +783,7 @@ def _compute_all_phases_evolving(
             star_pixel_rad=star_pixel_rad, total_pixels=total_pixels,
             arsize_rads=arsize_ph, ar_smoothness=smooth_ph, k=k, ld_mode=ld_mode,
             plot_map_wavelength=plot_map_wavelength, n=n, flat_indices=flat_indices,
-            transit_softness=transit_softness,
+            transit_softness=transit_softness, compute_map=compute_map,
         )
 
     _phase_vmap = vmap(_single_phase, in_axes=(0, 0, 0, 0, 0, 0, 0))
@@ -1268,6 +1281,7 @@ def make_lc(
     sp_orb: Optional[float | jnp.ndarray] = None,
     k: Optional[float | jnp.ndarray] = None,
     transit_softness: float = 0.0,
+    compute_map: bool = False,
 ) -> tuple:
     """
     Evaluate the light curve for a given set of active region and planetary parameters.
@@ -1394,10 +1408,15 @@ def make_lc(
         transit-geometry parameter on the fixed pixel grid, so
         ``jax.grad`` w.r.t. ``k``/``a_over_rstar``/``inclination``/``t0``/
         ``period``/``ecc``/``omega_peri`` is exactly 0 almost everywhere
-        regardless of the values passed in above. Set this > 0 (e.g. a few
-        tenths of a pixel in R* units) to get a smooth, non-zero gradient
-        for gradient-based retrieval of those parameters. See
-        ``_compute_planet_mask`` for details and trade-offs.
+        regardless of the values passed in above. Set this > 0 to get a
+        smooth, non-zero gradient for gradient-based retrieval of those
+        parameters. To find the optimal value of this parameter for your
+        model/parameter regime, use ``calibrate_transit_softness``.
+    compute_map : bool, optional
+        Default False. The per-phase ``(n, n)`` stellar pixel map
+        (``star_maps`` below) is useful for plotting/diagnostics but constructing
+        it roughly doubles this function's wall-clock cost. Thus, it is set to False
+        by default. Users can set it to True when they want the map.
 
     Returns
     -------
@@ -1818,6 +1837,7 @@ def make_lc(
         nplanet        = 1
         planet_xyz_all = jnp.zeros((nphase_compute, 1, 3)).at[:, :, 2].set(-1e10)
         k_val          = 0.0
+        transit_softness = 0.0
 
     # ---- Broadcast k to (nplanet, nwave): see _prepare_transit_k for the
     # full shape convention. A scalar means the same (achromatic) radius
@@ -1855,6 +1875,7 @@ def make_lc(
             n                   = model["n"],
             flat_indices        = model["flat_indices"],
             transit_softness    = transit_softness,
+            compute_map         = compute_map,
         )
     else:
         lc_raw, star_maps = _compute_all_phases_evolving(
@@ -1885,6 +1906,7 @@ def make_lc(
             n                   = model["n"],
             flat_indices        = model["flat_indices"],
             transit_softness    = transit_softness,
+            compute_map         = compute_map,
         )
 
     # ---- Oversample averaging --------------------------------------------
@@ -1893,8 +1915,10 @@ def make_lc(
         lc_raw = lc_raw.reshape(nphase_original, oversample, nwave).mean(axis=1)
 
         # star_maps: take only the first sub-exposure per original phase
-        # (averaging 2D maps is expensive and rarely useful)
-        star_maps = star_maps[::oversample]
+        # (averaging 2D maps is expensive and rarely useful). None when
+        # compute_map=False -- nothing to subsample.
+        if star_maps is not None:
+            star_maps = star_maps[::oversample]
 
     # ---- Single-wavelength convenience: drop the now-degenerate nwave
     # axis so single-channel callers get (nphase,) instead of (nphase, 1) ---
@@ -1902,6 +1926,169 @@ def make_lc(
         lc_raw = lc_raw[..., 0]
 
     return lc_raw, star_maps
+
+
+def calibrate_transit_softness(
+    model: dict,
+    wrt: str = "k",
+    *,
+    softness_min: float = 1e-6,
+    softness_max: float = 0.3,
+    max_bias_ppm: float = 1.0,
+    n_bisection_steps: int = 16,
+    verbose: bool = True,
+    **make_lc_kwargs,
+) -> float:
+    """
+    Calibrate ``transit_softness`` once for a given model and parameter regime.
+
+    There is no universal formula for this parameter, the best value varies on a 
+    case by case basis. It is hard to intuitively set this value, as a small value 
+    will inhibit gradient flow, but a large value will bias the transit shape.
+    This function finds the *largest* softness whose bias relative to the
+    exact hard edge (``transit_softness=0.0``) stays within ``max_bias_ppm``.
+
+    Bias grows roughly monotonically with softness, so the boundary is 
+    found by bisection on ``[softness_min, softness_max]`` rather than with 
+    a brute-force sweep. 
+    
+    We recommend users call this function once before a fit with rough estimates 
+    for the system parameters they are considering. We warn against calling it
+    inside a fit's log-likelihood: this costs on the order of ``n_bisection_steps``
+    forward-and-backward passes, the opposite of what ``make_lc``'s 
+    own ``compute_map``/jit-friendly design is for.
+
+    Parameters
+    ----------
+    model : dict
+        As returned by ``build_system``.
+    wrt : str, optional
+        Name of the ``make_lc`` transit keyword to differentiate against
+        and calibrate for (default ``"k"``; also sensible: ``"t0"``,
+        ``"period"``, ``"a_over_rstar"``, ``"inclination"``). Must be
+        passed with a concrete value in ``**make_lc_kwargs`` below.
+    softness_min, softness_max : float, optional
+        Search range, in units of stellar radius (default 1e-6 to 0.3). 
+    max_bias_ppm : float, optional
+        Maximum allowed pointwise flux bias, in parts per million
+        with respect to the hard-edge baseline flux (default 1.0).
+    n_bisection_steps : int, optional
+        Number of bisection iterations (default 16; each halves the
+        remaining search interval, so 16 steps resolve ``softness`` to
+        about ``(softness_max - softness_min) / 2**16``.
+    verbose : bool, optional
+        Print each bisection probe and the final selected value (default True).
+    **make_lc_kwargs
+        Every other keyword ``make_lc`` needs for this call (``flux_active``,
+        ``ar_lat``, ``ar_long``, ``ar_size``, ``ar_smoothness``, ``t0``,
+        ``period``, ``a_over_rstar``, ``inclination``, ``k``, etc. as
+        applicable), including a concrete value for ``wrt`` itself.
+        ``transit_softness`` and ``compute_map`` are set internally and
+        should not be passed here.
+
+    Returns
+    -------
+    float
+        The calibrated ``transit_softness`` value.
+
+    Raises
+    ------
+    RuntimeError
+        If ``softness_min`` itself already exceeds ``max_bias_ppm`` (lower
+        ``softness_min``, or raise ``max_bias_ppm``), or if the gradient is
+        still exactly 0 at the selected softness. If ``softness_max`` itself
+        still satisfies ``max_bias_ppm``, it's returned with a warning printed
+        instead of raising, since that's usually just ``softness_max`` being set
+        over-conservatively.
+    """
+    if wrt not in make_lc_kwargs or make_lc_kwargs[wrt] is None:
+        raise ValueError(
+            f"calibrate_transit_softness: wrt={wrt!r} must be passed with a "
+            f"concrete value in make_lc_kwargs (e.g. k=0.1, wrt='k')."
+        )
+    for bad in ("transit_softness", "compute_map"):
+        if bad in make_lc_kwargs:
+            raise ValueError(
+                f"calibrate_transit_softness: don't pass {bad!r} -- it's set internally."
+            )
+    base_value = make_lc_kwargs[wrt]
+
+    def lc_given(value, softness):
+        kwargs = dict(make_lc_kwargs)
+        kwargs[wrt] = value
+        lc, _ = make_lc(model, transit_softness=softness, compute_map=False, **kwargs)
+        return lc
+
+    lc_hard = lc_given(base_value, 0.0)
+    baseline = float(jnp.median(lc_hard))
+    depth_hard = float(jnp.max(lc_hard) - jnp.min(lc_hard))
+    if depth_hard == 0.0:
+        raise ValueError(
+            "calibrate_transit_softness: the hard-edge light curve is flat "
+            "(no transit at all) -- check t0/period/a_over_rstar/inclination/k "
+            "and that `times` actually covers a transit before calibrating."
+        )
+
+    grad_fn = jax.grad(lambda value, softness: jnp.sum(lc_given(value, softness)))
+
+    def bias_ppm_at(s):
+        lc_s = lc_given(base_value, s)
+        return float(jnp.max(jnp.abs(lc_s - lc_hard))) / baseline * 1e6
+
+    bias_at_min = bias_ppm_at(softness_min)
+    if verbose:
+        print(f"probe softness_min={softness_min:.8f}  bias={bias_at_min:.4f} ppm")
+    if bias_at_min > max_bias_ppm:
+        raise RuntimeError(
+            f"calibrate_transit_softness: even softness_min={softness_min} "
+            f"already gives {bias_at_min:.4f} ppm of bias, over the "
+            f"max_bias_ppm={max_bias_ppm} budget -- lower softness_min, or "
+            f"raise max_bias_ppm."
+        )
+
+    bias_at_max = bias_ppm_at(softness_max)
+    if verbose:
+        print(f"probe softness_max={softness_max:.8f}  bias={bias_at_max:.4f} ppm")
+    if bias_at_max <= max_bias_ppm:
+        softness = softness_max
+        if verbose:
+            print(
+                f"softness_max itself stays within max_bias_ppm -- consider "
+                f"raising softness_max to search for an even stronger gradient. "
+                f"Using softness = {softness:.8f}."
+            )
+    else:
+        lo, hi = softness_min, softness_max  # invariant: bias(lo) <= target < bias(hi)
+        for i in range(n_bisection_steps):
+            mid = float(np.sqrt(lo * hi))  # geometric midpoint -- searching on a log scale
+            bias_mid = bias_ppm_at(mid)
+            if verbose:
+                print(f"  step {i:2d}: softness={mid:.8f}  bias={bias_mid:.4f} ppm")
+            if bias_mid <= max_bias_ppm:
+                lo = mid
+            else:
+                hi = mid
+        softness = lo
+
+    grad = float(grad_fn(base_value, softness))
+    bias_ppm = bias_ppm_at(softness)
+    if grad == 0.0:
+        raise RuntimeError(
+            f"calibrate_transit_softness: selected softness={softness:.8f} "
+            f"(bias={bias_ppm:.4f} ppm, within max_bias_ppm={max_bias_ppm}) "
+            f"still gives an exactly-zero gradient. max_bias_ppm is tighter "
+            f"than this model/sampling can resolve at all -- raise "
+            f"max_bias_ppm, or sample `times` more densely around "
+            f"ingress/egress (a denser, better-resolved ingress/egress "
+            f"widens the usable window)."
+        )
+
+    if verbose:
+        print(
+            f"\nSelected transit_softness = {softness:.8f}  "
+            f"(d(sum lc)/d{wrt} = {grad:.4e}, bias = {bias_ppm:.4f} ppm)"
+        )
+    return softness
 
 
 def quick_lc(
@@ -1935,6 +2122,7 @@ def quick_lc(
     sp_orb: float | np.ndarray = 0.0,
     ar_time_interp: ArTimeInterp = "linear",
     verbose: bool = False,
+    compute_map: bool = True,
 ) -> tuple:
     """
     Convenience wrapper: build model and evaluate in one call.
@@ -2104,6 +2292,11 @@ def quick_lc(
     verbose : bool, optional
         If True, print informational messages (LDC broadcasting, phase
         oversampling) while building the model. Default False.
+    compute_map : bool, optional
+        Default True (unlike ``make_lc``'s own default of False) -- a
+        one-off call like this one is commonly used to plot/inspect the
+        stellar map, so the map is returned by default here. Set False for
+        a light-curve-only call if you don't need it.
 
     Returns
     -------
@@ -2115,7 +2308,8 @@ def quick_lc(
                     quiet-star baseline -- divide by that yourself if you
                     want relative flux). If ``nwave == 1``, the wavelength
                     axis is dropped and this is shape (ntimes,).
-    ``star_maps`` - (ntimes, n, n) stellar flux map per phase
+    ``star_maps`` - (ntimes, n, n) stellar flux map per phase, or None
+                    when compute_map=False
                     (maps are from the *first* sub-exposure of each phase
                     when oversampling is active)
     """
@@ -2142,6 +2336,7 @@ def quick_lc(
         jnp.asarray(np.atleast_1d(np.asarray(ar_smoothness, dtype=np.float32))),
         None if ld_coeffs_active is None else jnp.asarray(np.asarray(ld_coeffs_active, dtype=np.float32)),
         None if I_profile_active  is None else jnp.asarray(np.asarray(I_profile_active,  dtype=np.float32)),
+        compute_map=compute_map,
     )
-    return np.array(lc), np.array(star_maps)
+    return np.array(lc), (None if star_maps is None else np.array(star_maps))
 

@@ -17,6 +17,13 @@ make_lc
     Pure JAX evaluation - accepts JAX tracers, compatible with
     jit, vmap, emcee_jax, and gradient-based samplers.
 
+calibrate_transit_softness
+    Bisection search, once per model/parameter regime, for the largest
+    ``transit_softness`` whose induced flux bias stays under a given ppm
+    tolerance, default 1ppm. Given that there's no universal formula for the
+    optimal value, it must be calibrated. We recommend users call this function
+    before a fit and fix the ``transit_softness`` parameter to the found optimum.
+
 quick_lc
     Convenience wrapper: build_system + make_lc in one call.
     Use for one-off evaluations outside MCMC.
@@ -49,6 +56,7 @@ from .core import (
     quick_lc,
     build_system,
     make_lc,
+    calibrate_transit_softness,
     build_stellar_grid,
     flare_template,
     LdMode,
@@ -63,6 +71,7 @@ __all__ = [
     "build_stellar_grid",
     "build_system",
     "make_lc",
+    "calibrate_transit_softness",
     "quick_lc",
     "flare_template",
     "rotate_active_region",
