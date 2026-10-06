@@ -17,7 +17,7 @@ from sajax import quick_lc, build_stellar_grid
 from sajax.core import (
     build_system,
     make_lc,
-    calibrate_transit_softness,
+    default_transit_softness,
     flare_template,
     _compute_all_planets_mask,
     _compute_ar_shape,
@@ -3431,19 +3431,135 @@ class TestBjdReferenceEpoch:
 
 
 # ========================================================================
-# 11.  calibrate_transit_softness - bisection search for the largest
-# transit_softness whose hard-edge bias stays within a certain ppm budget.
+# 11.  Soft planet mask -- area-matched sigmoid edge
 # ========================================================================
 
-class TestCalibrateTransitSoftness:
+class TestSoftPlanetMask:
+    """
+    The ``softness > 0`` branch of ``_compute_planet_mask`` is judged against
+    the *analytic* disc area ``pi * k**2``, never against the hard mask: on
+    a pixel grid the hard mask is itself a biased estimator (float32 ties at
+    the boundary and pixel quantisation both make it under-count), and the
+    soft mask is the more accurate of the two.  A plain sigmoid centred on
+    ``d = k`` over-covers by ``(pi**2 / 3) * (softness / k)**2`` in relative
+    area; the implementation shrinks the sigmoid midpoint to cancel that.
+    A 100-px grid so that sub-pixel softness values are resolved.
+    """
 
-    _N_STEPS = 12  # fewer than the default 40
-    _MAX_BIAS_PPM = 200.0
+    _GRID = 100
+
+    @pytest.fixture(autouse=True)
+    def _grid(self):
+        g = build_stellar_grid(self._GRID, 0.0)
+        self.x   = jnp.asarray(g["x"])
+        self.y   = jnp.asarray(g["y"])
+        self.spr = g["star_pixel_rad"]
+
+    def _mask(self, k, softness):
+        return _compute_planet_mask(self.x, self.y, self.spr, 0.0, 0.0, 5.0, k, softness)
+
+    def _area(self, mask):
+        """Mask-weighted area in units of R*^2 (each pixel is 1/spr^2)."""
+        return float(jnp.sum(mask)) / self.spr ** 2
+
+    def _uncorrected_sigmoid_area(self, k, softness):
+        """Reference: a sigmoid centred exactly on d = k, i.e. the mask
+        without the k_eff correction, computed inline so the test can't
+        drift with the implementation."""
+        d = jnp.sqrt((self.x / self.spr) ** 2 + (self.y / self.spr) ** 2)
+        return self._area(jax.nn.sigmoid((k - d) / softness))
+
+    @pytest.mark.parametrize("ratio", [0.025, 0.05, 0.1])
+    def test_area_matches_analytic_disc(self, ratio):
+        """softness / k is what governs the area accuracy; up to a tenth of
+        k the soft mask recovers pi k^2 to better than 1 percent."""
+        k = 0.1
+        area = self._area(self._mask(k, ratio * k))
+        assert area == pytest.approx(np.pi * k ** 2, rel=1e-2)
+
+    @pytest.mark.parametrize("k", [0.02, 0.05, 0.1])
+    def test_soft_mask_beats_hard_mask_against_analytic_area(self, k):
+        """Guards against 'fixing' the soft mask back toward the hard one:
+        at a quarter-pixel softness the soft area is strictly closer to the
+        analytic disc than the hard-edge count is."""
+        softness = 0.25 / self.spr
+        analytic = np.pi * k ** 2
+        err_soft = abs(self._area(self._mask(k, softness)) - analytic)
+        err_hard = abs(self._area(self._mask(k, 0.0)) - analytic)
+        assert err_soft < err_hard
+
+    def test_area_matched_midpoint_beats_uncorrected_sigmoid(self):
+        k, softness = 0.1, 0.01   # softness / k = 0.1
+        analytic = np.pi * k ** 2
+        err_corrected   = abs(self._area(self._mask(k, softness)) - analytic)
+        err_uncorrected = abs(self._uncorrected_sigmoid_area(k, softness) - analytic)
+        assert err_corrected < 0.2 * err_uncorrected
+
+    @pytest.mark.parametrize("ratio", [0.05, 0.1])
+    def test_uncorrected_excess_matches_prediction(self, ratio):
+        """The excess area an uncentred sigmoid removes, relative to the
+        analytic disc, is (pi^2 / 3) (softness / k)^2 to leading order.
+        Measured as uncorrected minus corrected so pixelation cancels."""
+        k = 0.1
+        softness = ratio * k
+        excess = (self._uncorrected_sigmoid_area(k, softness)
+                  - self._area(self._mask(k, softness))) / (np.pi * k ** 2)
+        assert excess == pytest.approx((np.pi ** 2 / 3.0) * ratio ** 2, rel=0.15)
+
+    def test_grad_wrt_k_is_finite_and_nonzero(self):
+        g = jax.grad(lambda k: jnp.sum(self._mask(k, 0.25 / self.spr)))(jnp.float32(0.1))
+        assert jnp.isfinite(g)
+        assert float(g) > 0.0
+
+    def test_zero_k_gives_empty_mask_and_finite_grad(self):
+        """k = 0 (a no-planet tracer) must not divide by zero inside the
+        k_eff correction: the mask is all zeros and the gradient is finite."""
+        softness = 0.25 / self.spr
+        mask = self._mask(0.0, softness)
+        assert not jnp.any(mask)
+        g = jax.grad(lambda k: jnp.sum(self._mask(k, softness)))(jnp.float32(0.0))
+        assert jnp.isfinite(g)
+
+    def test_zero_softness_is_exactly_binary(self):
+        mask = np.array(self._mask(0.1, 0.0))
+        assert set(np.unique(mask).tolist()) <= {0.0, 1.0}
+
+
+# ========================================================================
+# 12.  default_transit_softness -- a quarter of a pixel, from the grid alone
+# ========================================================================
+
+def _grid_model(grid):
+    """Single-epoch (mid-transit) combined model on a ``grid``-px star."""
+    return build_system(
+        wavelength=WAVELENGTH, flux_quiet=FLUX_QUIET, **BASE_PARAMS,
+        times=np.array([0.0]), P_rot=P_ROT, **TRANSIT_PARAMS,
+        stellar_grid_size=grid, ve=VE, ld_mode="quadratic", oversample=1,
+    )
+
+
+def _analytic_central_depth(k, u1, u2, n=200_001):
+    """Depth of a planet of radius ``k`` centred on a quadratically
+    limb-darkened disc: integral(I 2 pi r, 0..k) / integral(I 2 pi r, 0..1),
+    I(r) = 1 - u1 (1 - mu) - u2 (1 - mu)^2, mu = sqrt(1 - r^2)."""
+    def integral(upper):
+        r  = np.linspace(0.0, upper, n)
+        mu = np.sqrt(np.clip(1.0 - r ** 2, 0.0, 1.0))
+        I  = 1.0 - u1 * (1.0 - mu) - u2 * (1.0 - mu) ** 2
+        return np.trapezoid(I * 2.0 * np.pi * r, r)
+    return integral(k) / integral(1.0)
+
+
+@pytest.fixture(scope="module")
+def models():
+    return {grid: _grid_model(grid) for grid in (50, 100, 200)}
+
+
+class TestDefaultTransitSoftness:
 
     @staticmethod
     def _kwargs(**overrides):
-        """make_lc_kwargs for an AR that's inert plus a concrete transit
-        """
+        """make_lc kwargs for an inert AR plus the shared transit set."""
         kwargs = dict(
             flux_active=jnp.array(FLUX_QUIET),
             ar_lat=jnp.array([0.0]), ar_long=jnp.array([180.0]),
@@ -3453,99 +3569,57 @@ class TestCalibrateTransitSoftness:
         kwargs.update(overrides)
         return kwargs
 
-    def test_returns_value_within_search_range(self, combined_model):
-        softness = calibrate_transit_softness(
-            combined_model, wrt="k", verbose=False, n_bisection_steps=self._N_STEPS,
-            max_bias_ppm=self._MAX_BIAS_PPM, **self._kwargs(),
-        )
-        assert 1e-6 <= softness <= 0.3
+    def _depth(self, model, k, softness):
+        """Relative depth at mid-transit, with the baseline taken from a
+        k = 0 evaluation of the same model rather than from the light curve."""
+        in_transit = make_lc(model, transit_softness=softness, **self._kwargs(k=k))[0]
+        baseline   = make_lc(model, transit_softness=softness, **self._kwargs(k=0.0))[0]
+        return 1.0 - float(in_transit[0]) / float(baseline[0])
 
-    def test_selected_softness_satisfies_bias_budget(self, combined_model):
-        """The returned softness's own induced bias must satisfy the
-        requested max_bias_ppm budget"""
-        max_bias_ppm = self._MAX_BIAS_PPM
-        softness = calibrate_transit_softness(
-            combined_model, wrt="k", verbose=False, max_bias_ppm=max_bias_ppm,
-            n_bisection_steps=self._N_STEPS, **self._kwargs(),
-        )
-        lc_hard = np.array(make_lc(combined_model, transit_softness=0.0, **self._kwargs())[0])
-        lc_soft = np.array(make_lc(combined_model, transit_softness=softness, **self._kwargs())[0])
-        baseline = float(np.median(lc_hard))
-        bias_ppm = float(np.max(np.abs(lc_soft - lc_hard))) / baseline * 1e6
-        assert bias_ppm <= max_bias_ppm + 1e-6
+    @pytest.mark.parametrize("grid", [50, 100, 200])
+    def test_quarter_pixel_of_the_grid(self, models, grid):
+        assert default_transit_softness(models[grid]) == pytest.approx(0.25 / grid)
 
-    def test_tighter_budget_gives_smaller_or_equal_softness(self, combined_model):
-        """Bias grows roughly monotonically with softness, so a tighter ppm budget
-        must not return a *larger* softness than a looser one."""
-        common = dict(n_bisection_steps=self._N_STEPS, verbose=False, **self._kwargs())
-        loose = calibrate_transit_softness(combined_model, wrt="k", max_bias_ppm=5000.0, **common)
-        tight = calibrate_transit_softness(combined_model, wrt="k", max_bias_ppm=self._MAX_BIAS_PPM, **common)
-        assert tight <= loose + 1e-9
+    def test_scales_inversely_with_grid(self, models):
+        s50, s100, s200 = (default_transit_softness(models[g]) for g in (50, 100, 200))
+        assert s50 == pytest.approx(2.0 * s100)
+        assert s100 == pytest.approx(2.0 * s200)
 
-    def test_softness_max_within_budget_is_returned_as_is(self, combined_model):
-        """When even softness_max satisfies the budget, it's returned
-        directly, with no bisection needed."""
-        softness = calibrate_transit_softness(
-            combined_model, wrt="k", verbose=False, max_bias_ppm=1e9,
-            n_bisection_steps=self._N_STEPS, **self._kwargs(),
-        )
-        assert softness == pytest.approx(0.3)
+    def test_independent_of_k(self, models):
+        model = models[100]
+        assert default_transit_softness(model, k=0.05) == default_transit_softness(model, k=0.2)
+        assert default_transit_softness(model, k=0.1) == default_transit_softness(model)
 
-    def test_softness_min_already_over_budget_raises(self, combined_model):
-        with pytest.raises(RuntimeError, match="softness_min"):
-            calibrate_transit_softness(
-                combined_model, wrt="k", verbose=False, max_bias_ppm=1e-12,
-                softness_min=0.3, softness_max=0.3, n_bisection_steps=self._N_STEPS,
-                **self._kwargs(),
-            )
+    def test_warns_when_planet_spans_too_few_pixels(self, models):
+        with pytest.warns(UserWarning, match="spans only"):
+            default_transit_softness(models[50], k=0.03)
 
-    def test_flat_light_curve_raises_valueerror(self, combined_model):
-        """No transit (k=0) and an inert AR: the hard-edge light curve is
-        exactly flat, so there's no edge to calibrate against."""
-        with pytest.raises(ValueError, match="flat"):
-            calibrate_transit_softness(
-                combined_model, wrt="k", verbose=False, **self._kwargs(k=0.0),
-            )
+    def test_array_k_warns_on_smallest_planet(self, models):
+        """``build_system`` takes ``k`` with a trailing (nplanet,) axis, so the
+        same array must be accepted here; the smallest planet drives the warning."""
+        with pytest.warns(UserWarning, match="spans only"):
+            default_transit_softness(models[100], k=np.array([0.1, 0.03]))
 
-    def test_wrt_missing_from_kwargs_raises(self, combined_model):
-        kwargs = self._kwargs()
-        del kwargs["k"]
-        with pytest.raises(ValueError, match="wrt"):
-            calibrate_transit_softness(combined_model, wrt="k", verbose=False, **kwargs)
+    def test_no_warning_when_planet_is_resolved(self, models):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            default_transit_softness(models[100], k=0.1)
 
-    def test_wrt_value_none_raises(self, combined_model):
-        with pytest.raises(ValueError, match="wrt"):
-            calibrate_transit_softness(
-                combined_model, wrt="k", verbose=False, **self._kwargs(k=None),
-            )
+    def test_depth_at_default_matches_analytic_and_beats_hard_edge(self, models):
+        model = models[100]
+        k = TRANSIT_PARAMS["k"]
+        u1, u2 = BASE_PARAMS["ld_coeffs"]
+        analytic   = _analytic_central_depth(k, u1, u2)
+        depth_soft = self._depth(model, k, default_transit_softness(model, k=k))
+        depth_hard = self._depth(model, k, 0.0)
+        assert depth_soft == pytest.approx(analytic, rel=1e-2)
+        assert abs(depth_soft - analytic) < abs(depth_hard - analytic)
 
-    @pytest.mark.parametrize("bad_kwarg", ["transit_softness", "compute_map"])
-    def test_internal_kwargs_rejected(self, combined_model, bad_kwarg):
-        with pytest.raises(ValueError, match=bad_kwarg):
-            calibrate_transit_softness(
-                combined_model, wrt="k", verbose=False,
-                **self._kwargs(**{bad_kwarg: 0.0}),
-            )
-
-    def test_wrt_t0_also_supported(self, combined_model):
-        """check other wrt parameters work with the make_lc 
-        transit keyword, e.g. differentiating against t0 instead."""
-        softness = calibrate_transit_softness(
-            combined_model, wrt="t0", verbose=False, n_bisection_steps=self._N_STEPS,
-            max_bias_ppm=self._MAX_BIAS_PPM, **self._kwargs(),
-        )
-        assert 1e-6 <= softness <= 0.3
-
-    def test_verbose_false_prints_nothing(self, combined_model, capsys):
-        calibrate_transit_softness(
-            combined_model, wrt="k", verbose=False, n_bisection_steps=self._N_STEPS,
-            max_bias_ppm=self._MAX_BIAS_PPM, **self._kwargs(),
-        )
-        assert capsys.readouterr().out == ""
-
-    def test_verbose_true_prints_selected_softness(self, combined_model, capsys):
-        calibrate_transit_softness(
-            combined_model, wrt="k", verbose=True, n_bisection_steps=self._N_STEPS,
-            max_bias_ppm=self._MAX_BIAS_PPM, **self._kwargs(),
-        )
-        assert "Selected transit_softness" in capsys.readouterr().out
+    def test_gradient_flows_at_default(self, models):
+        model = models[100]
+        softness = default_transit_softness(model)
+        g = jax.grad(
+            lambda k: jnp.sum(make_lc(model, transit_softness=softness, **self._kwargs(k=k))[0])
+        )(jnp.float32(TRANSIT_PARAMS["k"]))
+        assert jnp.isfinite(g)
+        assert float(g) != 0.0
