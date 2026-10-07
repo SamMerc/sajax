@@ -400,14 +400,8 @@ def _compute_planet_mask(
     Passing ``softness > 0`` replaces the hard threshold with a sigmoid of
     that transition width (in stellar radii), giving a smooth, non-zero
     gradient w.r.t. every transit-geometry parameter -- for gradient-based
-    retrieval only. A sigmoid centred on ``d = k`` occults *more* than the
-    hard disc (the annulus it gains outside ``r = k`` outweighs the one it
-    loses inside, by ``(pi**2 / 3) * (softness / k)**2`` in relative area),
-    so the midpoint is shrunk to ``k_eff`` below to cancel that leading
-    bias; the residual is fourth order in ``softness / k``. It is opt-in
-    and defaults off; ``quick_lc`` / physical simulation is unaffected
-    unless requested. ``sajax.default_transit_softness`` gives the
-    recommended width (half a pixel).
+    retrieval only. It is opt-in and defaults off; ``quick_lc`` / physical
+    simulation is unaffected unless requested.
 
     Parameters
     ----------
@@ -432,13 +426,6 @@ def _compute_planet_mask(
 
     if softness > 0.0:
         d = jnp.sqrt(jnp.maximum(d2, _MASK_D_TINY))
-        # Area-matched soft edge.  A sigmoid centred on d = k occults *more*
-        # than the hard disc: the annulus it gains outside r = k is larger
-        # than the one it loses inside.  Integrating the logistic profile, for
-        # k >> softness, A(softness)/(pi k^2) = 1 + (pi^2/3)(softness/k)^2,
-        # so shrinking the sigmoid's midpoint by that factor's square root
-        # cancels the leading depth bias at no cost.  k is floored first so
-        # a k = 0 (no-planet) tracer can't divide by zero.
         k_safe    = jnp.maximum(k, _MASK_K_TINY)
         k_eff     = k_safe * jax.lax.rsqrt(
             1.0 + (jnp.pi ** 2 / 3.0) * (softness / k_safe) ** 2

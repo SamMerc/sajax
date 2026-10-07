@@ -21,9 +21,6 @@ import interpax
 from .geometry import rotate_active_region
 from .planet import _compute_all_planets_mask, compute_multi_planet_sky_positions
 
-# default_transit_softness warns when the planet's radius covers fewer pixels
-# than this: below it the half-pixel soft edge exceeds a tenth of the planet
-# radius (depth bias > 0.1 %) and the pixel grid itself sets the depth error.
 _MIN_RESOLVED_PLANET_PX = 5.0
 
 # Type alias
@@ -1415,12 +1412,7 @@ def make_lc(
         ``period``/``ecc``/``omega_peri`` is exactly 0 almost everywhere
         regardless of the values passed in above. Set this > 0 to get a
         smooth, non-zero gradient for gradient-based retrieval of those
-        parameters. Use ``default_transit_softness(model)`` (half a
-        pixel) for the value; the soft edge is area-matched, so the
-        leading ``(transit_softness / k)**2`` depth bias of a plain sigmoid
-        cancels and the residual is fourth order in that ratio. This
-        selects a Python-level code path, so it must be a concrete float
-        held fixed across a fit -- it cannot be a traced/sampled parameter.
+        parameters. Use ``default_transit_softness`` for the value.
     compute_map : bool, optional
         Default False. The per-phase ``(n, n)`` stellar pixel map
         (``star_maps`` below) is useful for plotting/diagnostics but constructing
@@ -1939,62 +1931,34 @@ def make_lc(
 
 def default_transit_softness(model: dict, k: Optional[float] = None) -> float:
     """
-    Recommended ``transit_softness`` for a model: half a pixel.
-
-    Two analytic bounds bracket the value.  From below: the gradient of a
-    pixel-summed mask is a Riemann sum of the sigmoid's derivative, a bump
-    about 3.5 softness wide, which needs at least roughly one pixel across it
-    to be resolved -- so softness must be at least ~0.3 px, and above that
-    the remaining gradient roughness is the aliasing of the circle on the
-    grid, which softness cannot remove (it scales as ``1 / star_pixel_rad``;
-    raise ``stellar_grid_size`` if a fit needs cleaner gradients).  From
-    above: with the area-matched edge the depth bias is fourth order in
-    ``softness / k`` (about ``11 (softness / k)^4``), i.e. 0.1 % at a tenth
-    of the planet radius.  NUTS acceptance depends on curvature as well as
-    on the first derivative and settles a little later than the gradient
-    does, so half a pixel is the better compromise for sampling: it stays
-    inside the bias bound whenever the planet radius spans at least five
-    pixels.  None of this needs light-curve evaluations.
-
-    ``k`` is optional and only drives a warning when the planet radius spans
-    fewer than five pixels: there the half-pixel edge exceeds a tenth of the
-    planet radius, and the grid itself dominates the depth error.
-
-    Call once before a fit and hold the value fixed (it selects a Python
-    code path inside ``make_lc``, so it cannot be a sampled parameter)::
-
-        softness = default_transit_softness(model, k=0.1)  # 100-px grid -> 0.005
-        lc, _    = make_lc(model, transit_softness=softness, ...)
+    Recommended ``transit_softness`` for a model: half a pixel,
+    ``0.5 / model["star_pixel_rad"]``.
 
     Parameters
     ----------
     model : dict
         As returned by ``build_system``.
     k : float or array_like, optional
-        Approximate planet-to-star radius ratio, scalar or with the same
-        trailing ``(nplanet,)`` / ``(nplanet, nwave)`` axes ``build_system``
-        accepts. Only used for the under-resolution warning, which the
-        smallest planet drives.
+        Approximate planet-to-star radius ratio. Only used to warn when the
+        smallest planet spans too few pixels for the grid to resolve.
 
     Returns
     -------
     float
-        ``0.5 / model["star_pixel_rad"]`` in units of R*.
+        ``transit_softness`` in units of R*.
     """
     star_pixel_rad = float(model["star_pixel_rad"])
     if k is not None:
-        # k may carry the same (nplanet,) / (nplanet, nwave) axes build_system
-        # accepts; the smallest planet is the one the grid resolves worst.
         k_min = float(np.min(np.asarray(k, dtype=float)))
-    if k is not None and k_min * star_pixel_rad < _MIN_RESOLVED_PLANET_PX:
-        warnings.warn(
-            f"default_transit_softness: the planet spans only "
-            f"{2.0 * k_min * star_pixel_rad:.1f} pixels (k={k_min:g}, "
-            f"stellar_grid_size={star_pixel_rad:g}), so the pixel grid itself "
-            f"-- not transit_softness -- dominates the transit depth error. "
-            f"Raise stellar_grid_size for an accurate depth.",
-            UserWarning, stacklevel=2,
-        )
+        if k_min * star_pixel_rad < _MIN_RESOLVED_PLANET_PX:
+            warnings.warn(
+                f"default_transit_softness: the planet spans only "
+                f"{2.0 * k_min * star_pixel_rad:.1f} pixels (k={k_min:g}, "
+                f"stellar_grid_size={star_pixel_rad:g}), so the pixel grid itself "
+                f"-- not transit_softness -- dominates the transit depth error. "
+                f"Raise stellar_grid_size for an accurate depth.",
+                UserWarning, stacklevel=2,
+            )
     return 0.5 / star_pixel_rad
 
 

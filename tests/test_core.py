@@ -3507,14 +3507,14 @@ class TestSoftPlanetMask:
         assert excess == pytest.approx((np.pi ** 2 / 3.0) * ratio ** 2, rel=0.15)
 
     def test_grad_wrt_k_is_finite_and_nonzero(self):
-        g = jax.grad(lambda k: jnp.sum(self._mask(k, 0.25 / self.spr)))(jnp.float32(0.1))
+        g = jax.grad(lambda k: jnp.sum(self._mask(k, 0.5 / self.spr)))(jnp.float32(0.1))
         assert jnp.isfinite(g)
         assert float(g) > 0.0
 
     def test_zero_k_gives_empty_mask_and_finite_grad(self):
         """k = 0 (a no-planet tracer) must not divide by zero inside the
         k_eff correction: the mask is all zeros and the gradient is finite."""
-        softness = 0.25 / self.spr
+        softness = 0.5 / self.spr
         mask = self._mask(0.0, softness)
         assert not jnp.any(mask)
         g = jax.grad(lambda k: jnp.sum(self._mask(k, softness)))(jnp.float32(0.0))
