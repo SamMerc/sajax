@@ -3480,9 +3480,9 @@ class TestSoftPlanetMask:
     @pytest.mark.parametrize("k", [0.02, 0.05, 0.1])
     def test_soft_mask_beats_hard_mask_against_analytic_area(self, k):
         """Guards against 'fixing' the soft mask back toward the hard one:
-        at a quarter-pixel softness the soft area is strictly closer to the
+        at the default half-pixel softness the soft area is strictly closer to the
         analytic disc than the hard-edge count is."""
-        softness = 0.25 / self.spr
+        softness = 0.5 / self.spr
         analytic = np.pi * k ** 2
         err_soft = abs(self._area(self._mask(k, softness)) - analytic)
         err_hard = abs(self._area(self._mask(k, 0.0)) - analytic)
@@ -3526,7 +3526,7 @@ class TestSoftPlanetMask:
 
 
 # ========================================================================
-# 12.  default_transit_softness -- a quarter of a pixel, from the grid alone
+# 12.  default_transit_softness -- half a pixel, from the grid alone
 # ========================================================================
 
 def _grid_model(grid):
@@ -3577,8 +3577,8 @@ class TestDefaultTransitSoftness:
         return 1.0 - float(in_transit[0]) / float(baseline[0])
 
     @pytest.mark.parametrize("grid", [50, 100, 200])
-    def test_quarter_pixel_of_the_grid(self, models, grid):
-        assert default_transit_softness(models[grid]) == pytest.approx(0.25 / grid)
+    def test_half_pixel_of_the_grid(self, models, grid):
+        assert default_transit_softness(models[grid]) == pytest.approx(0.5 / grid)
 
     def test_scales_inversely_with_grid(self, models):
         s50, s100, s200 = (default_transit_softness(models[g]) for g in (50, 100, 200))

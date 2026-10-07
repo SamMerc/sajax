@@ -22,7 +22,8 @@ from .geometry import rotate_active_region
 from .planet import _compute_all_planets_mask, compute_multi_planet_sky_positions
 
 # default_transit_softness warns when the planet's radius covers fewer pixels
-# than this: below it the pixel grid, not the mask edge, sets the depth error.
+# than this: below it the half-pixel soft edge exceeds a tenth of the planet
+# radius (depth bias > 0.1 %) and the pixel grid itself sets the depth error.
 _MIN_RESOLVED_PLANET_PX = 5.0
 
 # Type alias
@@ -1414,8 +1415,8 @@ def make_lc(
         ``period``/``ecc``/``omega_peri`` is exactly 0 almost everywhere
         regardless of the values passed in above. Set this > 0 to get a
         smooth, non-zero gradient for gradient-based retrieval of those
-        parameters. Use ``default_transit_softness(model)`` (a quarter
-        of a pixel) for the value; the soft edge is area-matched, so the
+        parameters. Use ``default_transit_softness(model)`` (half a
+        pixel) for the value; the soft edge is area-matched, so the
         leading ``(transit_softness / k)**2`` depth bias of a plain sigmoid
         cancels and the residual is fourth order in that ratio. This
         selects a Python-level code path, so it must be a concrete float
@@ -1938,28 +1939,31 @@ def make_lc(
 
 def default_transit_softness(model: dict, k: Optional[float] = None) -> float:
     """
-    Recommended ``transit_softness`` for a model: a quarter of a pixel.
+    Recommended ``transit_softness`` for a model: half a pixel.
 
-    The mask steps one pixel at a time, so the smallest transition that
-    gives it a usable derivative is set by the grid, and the only length
-    scale available is the pixel size ``1 / star_pixel_rad`` [R*]. The
-    scatter of ``jax.grad`` across neighbouring parameter values shows
-    gradient quality improving up to about a quarter pixel and flat above
-    it, while the depth bias of the soft edge keeps growing as
-    ``(softness / k)^2``; that knee sits at the same fraction of a pixel for
-    ``k`` from 0.03 to 0.2 and impact parameters out to ~0.7, so this needs no
-    light-curve evaluations.  Residual gradient roughness scales as
-    ``1 / star_pixel_rad`` and cannot be smoothed away -- raise
-    ``stellar_grid_size`` if a fit needs cleaner gradients.
+    Two analytic bounds bracket the value.  From below: the gradient of a
+    pixel-summed mask is a Riemann sum of the sigmoid's derivative, a bump
+    about 3.5 softness wide, which needs at least roughly one pixel across it
+    to be resolved -- so softness must be at least ~0.3 px, and above that
+    the remaining gradient roughness is the aliasing of the circle on the
+    grid, which softness cannot remove (it scales as ``1 / star_pixel_rad``;
+    raise ``stellar_grid_size`` if a fit needs cleaner gradients).  From
+    above: with the area-matched edge the depth bias is fourth order in
+    ``softness / k`` (about ``11 (softness / k)^4``), i.e. 0.1 % at a tenth
+    of the planet radius.  NUTS acceptance depends on curvature as well as
+    on the first derivative and settles a little later than the gradient
+    does, so half a pixel is the better compromise for sampling: it stays
+    inside the bias bound whenever the planet radius spans at least five
+    pixels.  None of this needs light-curve evaluations.
 
-    ``k`` is optional and only drives a warning when the planet spans too few
-    pixels for the grid to resolve, where the grid itself dominates the
-    depth error.
+    ``k`` is optional and only drives a warning when the planet radius spans
+    fewer than five pixels: there the half-pixel edge exceeds a tenth of the
+    planet radius, and the grid itself dominates the depth error.
 
     Call once before a fit and hold the value fixed (it selects a Python
     code path inside ``make_lc``, so it cannot be a sampled parameter)::
 
-        softness = default_transit_softness(model, k=0.1)  # 100-px grid -> 0.0025
+        softness = default_transit_softness(model, k=0.1)  # 100-px grid -> 0.005
         lc, _    = make_lc(model, transit_softness=softness, ...)
 
     Parameters
@@ -1975,7 +1979,7 @@ def default_transit_softness(model: dict, k: Optional[float] = None) -> float:
     Returns
     -------
     float
-        ``0.25 / model["star_pixel_rad"]`` in units of R*.
+        ``0.5 / model["star_pixel_rad"]`` in units of R*.
     """
     star_pixel_rad = float(model["star_pixel_rad"])
     if k is not None:
@@ -1991,7 +1995,7 @@ def default_transit_softness(model: dict, k: Optional[float] = None) -> float:
             f"Raise stellar_grid_size for an accurate depth.",
             UserWarning, stacklevel=2,
         )
-    return 0.25 / star_pixel_rad
+    return 0.5 / star_pixel_rad
 
 
 def quick_lc(

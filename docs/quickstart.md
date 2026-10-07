@@ -151,7 +151,7 @@ lc, star_maps = quick_lc(
 )
 ```
 
-By default the occultation mask has a hard edge, which gives `jax.grad` (almost) zero gradient with respect to the transit-geometry parameters. For gradient-based retrieval of `t0`/`period`/`a_over_rstar`/`inclination`/`k`/`ecc`/`omega_peri`/`sp_orb` (_e.g._, a gradient-descent MAP approach), pass `transit_softness > 0` to `make_lc` (not exposed on `quick_lc`). Use `default_transit_softness(model)` for the value - a quarter of a pixel, set by the grid rather than the orbit - and hold it fixed across the fit; see the `inference.ipynb` example notebook for a full walkthrough.
+By default the occultation mask has a hard edge, which gives `jax.grad` (almost) zero gradient with respect to the transit-geometry parameters. For gradient-based retrieval of `t0`/`period`/`a_over_rstar`/`inclination`/`k`/`ecc`/`omega_peri`/`sp_orb` (_e.g._, a gradient-descent MAP approach), pass `transit_softness > 0` to `make_lc` (not exposed on `quick_lc`). Use `default_transit_softness(model)` for the value - half a pixel, set by the grid rather than the orbit - and hold it fixed across the fit; see the `inference.ipynb` example notebook for a full walkthrough.
 
 #### b) Misaligned transit (spin-orbit angle)
 

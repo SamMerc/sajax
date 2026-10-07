@@ -407,7 +407,7 @@ def _compute_planet_mask(
     bias; the residual is fourth order in ``softness / k``. It is opt-in
     and defaults off; ``quick_lc`` / physical simulation is unaffected
     unless requested. ``sajax.default_transit_softness`` gives the
-    recommended width (a quarter of a pixel).
+    recommended width (half a pixel).
 
     Parameters
     ----------

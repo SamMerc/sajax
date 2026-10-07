@@ -18,8 +18,8 @@ make_lc
     jit, vmap, emcee_jax, and gradient-based samplers.
 
 default_transit_softness
-    Recommended ``transit_softness`` for a model: a quarter of a pixel,
-    ``0.25 / star_pixel_rad``. The usable transition width is set by the
+    Recommended ``transit_softness`` for a model: half a pixel,
+    ``0.5 / star_pixel_rad``. The usable transition width is set by the
     pixel grid, not the orbit, so this is a formula rather than a search.
     Call it once before a fit and hold the value fixed.
 
