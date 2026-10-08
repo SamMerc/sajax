@@ -21,6 +21,8 @@ import interpax
 from .geometry import rotate_active_region
 from .planet import _compute_all_planets_mask, compute_multi_planet_sky_positions
 
+_MIN_RESOLVED_PLANET_PX = 5.0
+
 # Type alias
 LdMode = Literal[
     "linear",          # 1 coeff  : u
@@ -1410,8 +1412,7 @@ def make_lc(
         ``period``/``ecc``/``omega_peri`` is exactly 0 almost everywhere
         regardless of the values passed in above. Set this > 0 to get a
         smooth, non-zero gradient for gradient-based retrieval of those
-        parameters. To find the optimal value of this parameter for your
-        model/parameter regime, use ``calibrate_transit_softness``.
+        parameters. Use ``default_transit_softness`` for the value.
     compute_map : bool, optional
         Default False. The per-phase ``(n, n)`` stellar pixel map
         (``star_maps`` below) is useful for plotting/diagnostics but constructing
@@ -1928,167 +1929,37 @@ def make_lc(
     return lc_raw, star_maps
 
 
-def calibrate_transit_softness(
-    model: dict,
-    wrt: str = "k",
-    *,
-    softness_min: float = 1e-6,
-    softness_max: float = 0.3,
-    max_bias_ppm: float = 1.0,
-    n_bisection_steps: int = 16,
-    verbose: bool = True,
-    **make_lc_kwargs,
-) -> float:
+def default_transit_softness(model: dict, k: Optional[float] = None) -> float:
     """
-    Calibrate ``transit_softness`` once for a given model and parameter regime.
-
-    There is no universal formula for this parameter, the best value varies on a 
-    case by case basis. It is hard to intuitively set this value, as a small value 
-    will inhibit gradient flow, but a large value will bias the transit shape.
-    This function finds the *largest* softness whose bias relative to the
-    exact hard edge (``transit_softness=0.0``) stays within ``max_bias_ppm``.
-
-    Bias grows roughly monotonically with softness, so the boundary is 
-    found by bisection on ``[softness_min, softness_max]`` rather than with 
-    a brute-force sweep. 
-    
-    We recommend users call this function once before a fit with rough estimates 
-    for the system parameters they are considering. We warn against calling it
-    inside a fit's log-likelihood: this costs on the order of ``n_bisection_steps``
-    forward-and-backward passes, the opposite of what ``make_lc``'s 
-    own ``compute_map``/jit-friendly design is for.
+    Recommended ``transit_softness`` for a model: half a pixel,
+    ``0.5 / model["star_pixel_rad"]``.
 
     Parameters
     ----------
     model : dict
         As returned by ``build_system``.
-    wrt : str, optional
-        Name of the ``make_lc`` transit keyword to differentiate against
-        and calibrate for (default ``"k"``; also sensible: ``"t0"``,
-        ``"period"``, ``"a_over_rstar"``, ``"inclination"``). Must be
-        passed with a concrete value in ``**make_lc_kwargs`` below.
-    softness_min, softness_max : float, optional
-        Search range, in units of stellar radius (default 1e-6 to 0.3). 
-    max_bias_ppm : float, optional
-        Maximum allowed pointwise flux bias, in parts per million
-        with respect to the hard-edge baseline flux (default 1.0).
-    n_bisection_steps : int, optional
-        Number of bisection iterations (default 16; each halves the
-        remaining search interval, so 16 steps resolve ``softness`` to
-        about ``(softness_max - softness_min) / 2**16``.
-    verbose : bool, optional
-        Print each bisection probe and the final selected value (default True).
-    **make_lc_kwargs
-        Every other keyword ``make_lc`` needs for this call (``flux_active``,
-        ``ar_lat``, ``ar_long``, ``ar_size``, ``ar_smoothness``, ``t0``,
-        ``period``, ``a_over_rstar``, ``inclination``, ``k``, etc. as
-        applicable), including a concrete value for ``wrt`` itself.
-        ``transit_softness`` and ``compute_map`` are set internally and
-        should not be passed here.
+    k : float or array_like, optional
+        Approximate planet-to-star radius ratio. Only used to warn when the
+        smallest planet spans too few pixels for the grid to resolve.
 
     Returns
     -------
     float
-        The calibrated ``transit_softness`` value.
-
-    Raises
-    ------
-    RuntimeError
-        If ``softness_min`` itself already exceeds ``max_bias_ppm`` (lower
-        ``softness_min``, or raise ``max_bias_ppm``), or if the gradient is
-        still exactly 0 at the selected softness. If ``softness_max`` itself
-        still satisfies ``max_bias_ppm``, it's returned with a warning printed
-        instead of raising, since that's usually just ``softness_max`` being set
-        over-conservatively.
+        ``transit_softness`` in units of R*.
     """
-    if wrt not in make_lc_kwargs or make_lc_kwargs[wrt] is None:
-        raise ValueError(
-            f"calibrate_transit_softness: wrt={wrt!r} must be passed with a "
-            f"concrete value in make_lc_kwargs (e.g. k=0.1, wrt='k')."
-        )
-    for bad in ("transit_softness", "compute_map"):
-        if bad in make_lc_kwargs:
-            raise ValueError(
-                f"calibrate_transit_softness: don't pass {bad!r} -- it's set internally."
+    star_pixel_rad = float(model["star_pixel_rad"])
+    if k is not None:
+        k_min = float(np.min(np.asarray(k, dtype=float)))
+        if k_min * star_pixel_rad < _MIN_RESOLVED_PLANET_PX:
+            warnings.warn(
+                f"default_transit_softness: the planet spans only "
+                f"{2.0 * k_min * star_pixel_rad:.1f} pixels (k={k_min:g}, "
+                f"stellar_grid_size={star_pixel_rad:g}), so the pixel grid itself "
+                f"-- not transit_softness -- dominates the transit depth error. "
+                f"Raise stellar_grid_size for an accurate depth.",
+                UserWarning, stacklevel=2,
             )
-    base_value = make_lc_kwargs[wrt]
-
-    def lc_given(value, softness):
-        kwargs = dict(make_lc_kwargs)
-        kwargs[wrt] = value
-        lc, _ = make_lc(model, transit_softness=softness, compute_map=False, **kwargs)
-        return lc
-
-    lc_hard = lc_given(base_value, 0.0)
-    baseline = float(jnp.median(lc_hard))
-    depth_hard = float(jnp.max(lc_hard) - jnp.min(lc_hard))
-    if depth_hard == 0.0:
-        raise ValueError(
-            "calibrate_transit_softness: the hard-edge light curve is flat "
-            "(no transit at all) -- check t0/period/a_over_rstar/inclination/k "
-            "and that `times` actually covers a transit before calibrating."
-        )
-
-    grad_fn = jax.grad(lambda value, softness: jnp.sum(lc_given(value, softness)))
-
-    def bias_ppm_at(s):
-        lc_s = lc_given(base_value, s)
-        return float(jnp.max(jnp.abs(lc_s - lc_hard))) / baseline * 1e6
-
-    bias_at_min = bias_ppm_at(softness_min)
-    if verbose:
-        print(f"probe softness_min={softness_min:.8f}  bias={bias_at_min:.4f} ppm")
-    if bias_at_min > max_bias_ppm:
-        raise RuntimeError(
-            f"calibrate_transit_softness: even softness_min={softness_min} "
-            f"already gives {bias_at_min:.4f} ppm of bias, over the "
-            f"max_bias_ppm={max_bias_ppm} budget -- lower softness_min, or "
-            f"raise max_bias_ppm."
-        )
-
-    bias_at_max = bias_ppm_at(softness_max)
-    if verbose:
-        print(f"probe softness_max={softness_max:.8f}  bias={bias_at_max:.4f} ppm")
-    if bias_at_max <= max_bias_ppm:
-        softness = softness_max
-        if verbose:
-            print(
-                f"softness_max itself stays within max_bias_ppm -- consider "
-                f"raising softness_max to search for an even stronger gradient. "
-                f"Using softness = {softness:.8f}."
-            )
-    else:
-        lo, hi = softness_min, softness_max  # invariant: bias(lo) <= target < bias(hi)
-        for i in range(n_bisection_steps):
-            mid = float(np.sqrt(lo * hi))  # geometric midpoint -- searching on a log scale
-            bias_mid = bias_ppm_at(mid)
-            if verbose:
-                print(f"  step {i:2d}: softness={mid:.8f}  bias={bias_mid:.4f} ppm")
-            if bias_mid <= max_bias_ppm:
-                lo = mid
-            else:
-                hi = mid
-        softness = lo
-
-    grad = float(grad_fn(base_value, softness))
-    bias_ppm = bias_ppm_at(softness)
-    if grad == 0.0:
-        raise RuntimeError(
-            f"calibrate_transit_softness: selected softness={softness:.8f} "
-            f"(bias={bias_ppm:.4f} ppm, within max_bias_ppm={max_bias_ppm}) "
-            f"still gives an exactly-zero gradient. max_bias_ppm is tighter "
-            f"than this model/sampling can resolve at all -- raise "
-            f"max_bias_ppm, or sample `times` more densely around "
-            f"ingress/egress (a denser, better-resolved ingress/egress "
-            f"widens the usable window)."
-        )
-
-    if verbose:
-        print(
-            f"\nSelected transit_softness = {softness:.8f}  "
-            f"(d(sum lc)/d{wrt} = {grad:.4e}, bias = {bias_ppm:.4f} ppm)"
-        )
-    return softness
+    return 0.5 / star_pixel_rad
 
 
 def quick_lc(
