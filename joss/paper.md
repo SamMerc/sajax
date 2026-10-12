@@ -41,7 +41,7 @@ It provides a fast and flexible tool for exoplanet and stellar astronomers who n
 These fall into three broad families, distinguished by how they represent active regions. 
 *Analytic and semi-analytic* tools, such as `macula` [@Kipping2012], `spotrod` [@Beky2014], `STSP` [@Morris2017] and `fleck` [@Morris2020], describe circular active regions in closed or nearly closed form. 
 *Spherical-harmonic* codes such as `starry` [@Luger2019], `starry_process` [@Luger2021], and `StarryStarryProcess` [@Sagynbayeva2025] expand the stellar surface map into spherical harmonics, reducing inference to fitting the expansion coefficients. 
-This allows active regions of arbitrary shape, but it has some drawbacks: small regions require computationally demanding, high-degree terms, a truncated expansion can produce ringing effects, and certain combinations can produce negative intensities. 
+This allows active regions of arbitrary shape, but it has some drawbacks: small regions require computationally demanding, high-degree terms; a truncated expansion can produce ringing effects; and certain combinations can produce negative intensities. 
 Finally, *grid-based* codes tessellate the surface and assign properties to each cell; examples include `PyTranSpot` [@Juvan2018], `SAGE` [@Chakraborty2024], `spot-model` [@Cracchiolo2021a; @Cracchiolo2021b], and `spotter` [@Garcia2025]. 
 The `SOAP` family [@Boisse2012; @Oshagh2013; @Dumusque2014; @Akinsanmi2018; @Serrano2020; @Cristo2025] and `ANTARESS` [@Bourrier2024] also model heterogeneous stellar surfaces, but with a primary focus on spectroscopic and radial-velocity observations.
 
@@ -50,7 +50,7 @@ The two codes closest to `SAJAX` are `fleck` and `spotter`, both of which offer 
 This is efficient and accurate for small active regions, but breaks down for large ones, such as those found on active M dwarfs. 
 `spotter` is built on a HEALPix map of the whole sphere [@Gorski2005]. It supports arbitrarily shaped active regions and Gaussian-process surface models. 
 
-`SAJAX` extends `SAGE`, a grid-based `NumPy` code that assigns separate spectra to the quiet photosphere and spots but runs as Python loops and does not model planetary occultations. 
+`SAJAX` extends `SAGE`, a grid-based `NumPy` code that assigns separate spectra to the quiet photosphere and spots but relies on Python loops and does not model planetary occultations. 
 Its guiding philosophy is to be a lightweight, inference-focused model: each active region is described by a small set of physically interpretable parameters (position, size, edge smoothness, spectrum and limb-darkening) rather than a free-form surface map, and the model is differentiable and cheap.
 
 
@@ -87,7 +87,7 @@ Spectra are sampled at each pixel's rotationally Doppler-shifted wavelength.
 
 **Planets** - Planets on Keplerian orbits occult pixels directly, so active region crossings follow naturally from the geometry. 
 By default, each planet is a hard pixel mask, which blocks gradient flow for the orbital parameters. 
-`SAJAX` offers an optional sigmoid edge that restores it, and which recovers the transit depth of the hard-edged mask to fourth-order.
+`SAJAX` offers an optional sigmoid edge that restores it, and recovers the transit depth of the hard-edged mask to fourth order.
 Each planet also has a sky-projected spin–orbit angle, since repeated crossings of the same active region can constrain orbital geometry [@SanchisOjeda2011].
 
 **Optional features at no cost** - Any active region property can carry a time axis, describing regions that grow, drift, brighten or dim. 
@@ -98,10 +98,10 @@ In keeping with `SAJAX`'s focus on inference, these features use separate code p
 # Research impact statement 
 `SAJAX` has not yet been used in a published study. 
 Its expected significance rests on three points. 
-First, it re-implements the pixel model of `SAGE`, which was developed to quantify stellar contamination of transmission spectra [@Chakraborty2024] and has been used to predict photometric variability of TOI-3884 [@Chakraborty2025]. `SAJAX` adds to it planet–spot crossings, gradients and the potential for GPU execution, thus broadening its applicability.
+First, it re-implements the pixel model of `SAGE`, which was developed to quantify stellar contamination of transmission spectra [@Chakraborty2024] and has been used to predict photometric variability of TOI-3884 [@Chakraborty2025]. `SAJAX` adds planet–spot crossings, gradients, and the potential for GPU execution, broadening its applicability.
 Second, `SAJAX` is released via the Python Package Index (PyPI) under an MIT license, with versioned releases, automated CI and test infrastructure, documentation and tutorials on Read the Docs, and a public issue tracker, allowing for easy adoption by the community.
 Finally, we provide examples of both forward modeling and inference. 
-The inference example follows a well-established approach, fitting the white light curve for the orbit and spot geometry and then each wavelength channel of a chromatic transit with a spot crossing, with both a *maximum a posteriori* fit and a Markov chain Monte Carlo, and compares the retrieved spot, orbit and transmission spectrum with the injected values.
+The inference example follows a well-established approach, fitting the white light curve for the orbit and spot geometry and then each wavelength channel of a chromatic transit with a spot crossing, with both a *maximum a posteriori* fit and Markov chain Monte Carlo, and compares the retrieved spot, orbit and transmission spectrum with the injected values.
 
 We see `SAJAX` as complementary to widely used tools such as `fleck` and `spotter`, designed for light curves of planets around particularly active stars, where per-region spectra and limb darkening, large or overlapping regions, and time-varying activity are most likely to be constrained.
 
