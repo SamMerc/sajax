@@ -3822,3 +3822,83 @@ class TestQuietStarPath:
     def test_quiet_ldc_override(self, model):
         u = jnp.asarray(np.asarray(model["ld_coeffs"])) * 0.9
         self._close(make_lc(model, ld_coeffs_quiet=u)[0], self._inert(model, ld_coeffs_quiet=u)[0])
+
+
+# ===================================================================
+# 11. Column x LD-basis sums in precompute_geometry
+# ===================================================================
+
+class TestColumnSums:
+    """With ``columns`` (the default) ``precompute_geometry`` stores column sums
+    and ``make_lc`` contracts them instead of the pixel grid; the result must
+    equal the pixel path (``columns=False``) for every supported law."""
+
+    _SOFT = 1.0 / (10.0 * STELLAR_GRID)
+    _WL = np.linspace(500.0, 600.0, 3)
+    AR = dict(ar_lat=jnp.array([5.0]), ar_long=jnp.array([0.0]),
+              ar_size=jnp.array([8.0]), ar_smoothness=jnp.array([_SM]))
+    ORBIT = {name: v for name, v in TRANSIT_PARAMS.items() if name != "k"}
+    C = jnp.full(3, 0.7)
+    LAWS = {"linear": [0.4], "quadratic": [0.4, 0.2], "kipping3": [0.3, 0.2, 0.1],
+            "nonlinear4": [0.5, -0.1, 0.6, -0.25], "power2": [0.5, 0.6]}
+
+    def _model(self, law):
+        return build_system(
+            wavelength=self._WL, flux_quiet=np.ones(3), ld_coeffs=self.LAWS[law], inc_star=90.0,
+            ld_mode=law, times=TIMES, P_rot=P_ROT, **TRANSIT_PARAMS,
+            stellar_grid_size=STELLAR_GRID, ve=2.0, oversample=2,
+        )
+
+    @staticmethod
+    def _close(a, b):
+        np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=2e-5, atol=1e-6)
+
+    def _both(self, model, k_fixed, **kw):
+        k_pre = dict(k=0.1) if k_fixed else {}
+        geo = precompute_geometry(model, **self.AR, **self.ORBIT, transit_softness=self._SOFT, **k_pre)
+        ref = precompute_geometry(model, **self.AR, **self.ORBIT, transit_softness=self._SOFT, **k_pre, columns=False)
+        return geo, ref
+
+    @pytest.mark.parametrize("law", ["linear", "quadratic", "kipping3", "nonlinear4"])
+    @pytest.mark.parametrize("k_fixed", [True, False], ids=["fixed k", "free k"])
+    def test_matches_pixel_path(self, law, k_fixed):
+        model = self._model(law)
+        geo, ref = self._both(model, k_fixed)
+        assert "H_S" in geo and ("H_M" in geo) == k_fixed and "H_M" not in ref
+        u = jnp.asarray(np.asarray(model["ld_coeffs"])) * 0.9
+        kw = {} if k_fixed else dict(k=jnp.array([0.09, 0.1, 0.11]))
+        f = lambda c, u, g: jnp.sum(make_lc(model, flux_active=c, ld_coeffs_quiet=u, geometry=g, **kw)[0])
+        (v, g), (v_ref, g_ref) = (jax.value_and_grad(f, argnums=(0, 1))(self.C, u, geom) for geom in (geo, ref))
+        self._close(v, v_ref)
+        for a, b in zip(g, g_ref):
+            self._close(a, b)
+
+    def test_chromatic_fixed_k_and_jit(self):
+        model = self._model("quadratic")
+        k = jnp.array([0.09, 0.1, 0.11])
+        geo = precompute_geometry(model, **self.AR, **self.ORBIT, k=k)
+        ref = precompute_geometry(model, **self.AR, **self.ORBIT, k=k, columns=False)
+        assert geo["H_M"].ndim == 3 and geo["H_SM"].ndim == 4
+        f = jax.jit(lambda c, g: make_lc(model, flux_active=c, geometry=g)[0])
+        self._close(f(self.C, geo), make_lc(model, flux_active=self.C, geometry=ref)[0])
+
+    def test_quiet_star_with_fixed_transit(self):
+        model = self._model("quadratic")
+        geo = precompute_geometry(model, **self.ORBIT, k=0.1)
+        assert "H_M" in geo and "H_S" not in geo and "H_SM" not in geo
+        self._close(make_lc(model, geometry=geo)[0], make_lc(model, **self.ORBIT, k=0.1)[0])
+
+    def test_map_uses_pixel_path(self):
+        model = self._model("quadratic")
+        geo = precompute_geometry(model, **self.AR, **self.ORBIT, k=0.1)
+        lc, maps = make_lc(model, flux_active=self.C, geometry=geo, compute_map=True)
+        lc_ref, maps_ref = make_lc(model, flux_active=self.C, **self.AR, **self.ORBIT, k=0.1, compute_map=True)
+        self._close(lc, lc_ref)
+        self._close(maps, maps_ref)
+
+    def test_unsupported_law_has_no_sums(self):
+        model = self._model("power2")
+        geo = precompute_geometry(model, **self.AR, **self.ORBIT, k=0.1)
+        assert not any(key in geo for key in ("basis_sum", "H_S", "H_M", "H_SM"))
+        self._close(make_lc(model, flux_active=self.C, geometry=geo)[0],
+                    make_lc(model, flux_active=self.C, **self.AR, **self.ORBIT, k=0.1)[0])

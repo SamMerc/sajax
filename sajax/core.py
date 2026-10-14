@@ -480,6 +480,50 @@ def _pixel_flux_at_wavelength(
     return F_quiet_px, D
 
 
+_LD_BASIS_LAWS = ("linear", "quadratic", "kipping3", "nonlinear4")   # laws linear in their coefficients
+
+
+def _ld_basis(mu: np.ndarray, ld_mode: LdMode) -> np.ndarray:
+    """B_j(mu), (n_coeffs + 1, total_pixels), with I(mu) = B_0 + sum_j u_j B_j for the laws in _LD_BASIS_LAWS."""
+    om = 1.0 - mu
+    if ld_mode == "linear":
+        B = [np.ones_like(mu), -om]
+    elif ld_mode == "quadratic":
+        B = [np.ones_like(mu), -om, -om ** 2]
+    elif ld_mode == "kipping3":
+        B = [np.ones_like(mu), -(1.0 - mu ** 0.5), -om, -(1.0 - mu ** 1.5)]
+    else:
+        B = [np.ones_like(mu), -(1.0 - mu ** 0.5), -om, -(1.0 - mu ** 1.5), -(1.0 - mu ** 2.0)]
+    return np.stack(B).astype(np.float32)
+
+
+def _column_sums(A, B, col_idx, n):
+    """sum_{p in column c} A[..., p] B_j(mu_p) for every (j, c), flattened: (..., P) -> (..., (n_coeffs + 1) * n)."""
+    H = jnp.stack([jnp.zeros(A.shape[:-1] + (n,), A.dtype).at[..., col_idx].add(A * Bj) for Bj in B], axis=-2)
+    return H.reshape(A.shape[:-1] + (-1,))
+
+
+def _column_terms_at_wavelength(
+    wavelength_target:    float,
+    ld_coeffs_quiet_wl:  jnp.ndarray, # (n_coeffs,)
+    ld_coeffs_active_wl: jnp.ndarray, # (nar, n_coeffs)
+    wavelength_grid: jnp.ndarray,
+    flux_quiet:      jnp.ndarray,
+    flux_active:     jnp.ndarray, # (nar, nwave)
+    vel_col:         jnp.ndarray, # (n,)
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Column factors of the pixel terms: F_quiet(p) = sum_j Gq[(j, c_p)] B_j(mu_p) and D_a likewise with GD[a];
+    Gq is ((n_coeffs + 1) * n,), GD is (nar, (n_coeffs + 1) * n)."""
+    query_wavelength_col = wavelength_target * (1.0 - vel_col)
+    F_quiet_col  = jnp.interp(query_wavelength_col, wavelength_grid, flux_quiet)                         # (n,)
+    F_active_col = vmap(lambda spec: jnp.interp(query_wavelength_col, wavelength_grid, spec))(flux_active)  # (nar, n)
+    c_quiet  = jnp.concatenate([jnp.ones(1, ld_coeffs_quiet_wl.dtype), ld_coeffs_quiet_wl])             # (nb,)
+    c_active = jnp.concatenate([jnp.ones((ld_coeffs_active_wl.shape[0], 1), ld_coeffs_active_wl.dtype), ld_coeffs_active_wl], axis=-1)
+    Gq = c_quiet[:, None] * F_quiet_col[None, :]                                                         # (nb, n)
+    GD = Gq[None] - c_active[:, :, None] * F_active_col[:, None, :]                                     # (nar, nb, n)
+    return Gq.reshape(-1), GD.reshape(GD.shape[0], -1)
+
+
 def _integrate_flux(
     ar_shapes:    Optional[jnp.ndarray], # (nphase, nar, total_pixels); None for a quiet star
     planet_mask:  Optional[jnp.ndarray], # None | (nphase, total_pixels) | (nphase, nwave, total_pixels)
@@ -491,13 +535,19 @@ def _integrate_flux(
     map_idx:      Optional[jnp.ndarray] = None,  # wavelength index of the map (compute_map only)
     transit_idx:  Optional[np.ndarray] = None,   # phases the planet_mask covers (None: all)
     ar_shapes_in: Optional[jnp.ndarray] = None,  # ar_shapes[transit_idx], if already sliced
+    columns:      Optional[dict] = None,         # precomputed column sums (basis_sum, H_S, H_M, H_SM)
+    Gq:           Optional[jnp.ndarray] = None,  # (nwave, K) column terms, with columns
+    GD:           Optional[jnp.ndarray] = None,  # (nwave, nar, K)
 ) -> tuple[jnp.ndarray, Optional[jnp.ndarray]]:
     """
     Disc-integrate ``[F_quiet - sum_a D_a S_a] * [1 - M]`` over pixels for
     every (phase, wavelength), term by term, so the AR term is one GEMM and
     no (nphase, nwave, total_pixels) surface is built unless ``M`` is chromatic.
     ``planet_mask`` may cover only the phases ``transit_idx`` (in-transit slice).
-    ``ar_shapes=None`` (quiet star) drops the AR terms altogether.
+    ``ar_shapes=None`` (quiet star) drops the AR terms altogether. With
+    ``columns`` the quiet and spot terms (and the planet terms when ``H_M`` is
+    present) contract precomputed column sums against ``Gq``/``GD`` instead of
+    pixel arrays, so ``F_quiet_px``/``D`` may be None.
 
     Returns
     -------
@@ -506,13 +556,20 @@ def _integrate_flux(
     """
     einsum = functools.partial(jnp.einsum, precision=_DOT_PRECISION)
 
-    has_ar = ar_shapes is not None
-    quiet = jnp.sum(F_quiet_px, axis=-1)                       # (nwave,)
+    use_cols = columns is not None
+    has_ar = ar_shapes is not None or (use_cols and "H_S" in columns)
+    quiet = einsum("wk,k->w", Gq, columns["basis_sum"]) if use_cols else jnp.sum(F_quiet_px, axis=-1)  # (nwave,)
     lc    = jnp.broadcast_to(quiet[None, :], (nphase, quiet.shape[0]))
-    if has_ar:
-        lc = lc - einsum("nap,wap->nw", ar_shapes, D)          # spot term, (nphase, nwave)
+    if has_ar:  # spot term, (nphase, nwave)
+        lc = lc - (einsum("nak,wak->nw", columns["H_S"], GD) if use_cols else einsum("nap,wap->nw", ar_shapes, D))
 
-    if planet_mask is not None:
+    if use_cols and "H_M" in columns:  # fixed k: planet terms from column sums too
+        H_M, H_SM = columns["H_M"], columns.get("H_SM")
+        occ = einsum("nk,wk->nw" if H_M.ndim == 2 else "nwk,wk->nw", H_M, Gq)
+        if has_ar:
+            occ = occ - einsum("nak,wak->nw" if H_SM.ndim == 3 else "nwak,wak->nw", H_SM, GD)
+        lc = lc.at[transit_idx].add(-occ)
+    elif planet_mask is not None:
         if not has_ar or transit_idx is None:
             S_in = ar_shapes
         else:
@@ -625,6 +682,7 @@ def _compute_all_phases(
     ar_shapes_in:        Optional[jnp.ndarray] = None,  # precomputed ar_shapes[transit_idx]
     planet_mask:         Optional[jnp.ndarray] = None,  # precomputed, over transit_idx phases
     transit_idx:         Optional[np.ndarray] = None,   # phases planet_mask covers (None: all)
+    columns:             Optional[dict] = None,         # precomputed column sums (see precompute_geometry)
 ) -> tuple[jnp.ndarray, Optional[jnp.ndarray]]:
     """
     Light curve at every phase and wavelength via ``_integrate_flux``.
@@ -633,7 +691,9 @@ def _compute_all_phases(
     builds it once per phase from ``k[:, 0]`` instead of once per (phase,
     wavelength). Both are static, shape-derived choices. ``ar_shapes`` /
     ``planet_mask`` from ``precompute_geometry`` replace the per-call builds;
-    ``has_ar=False`` skips the AR shapes and spot terms (quiet star).
+    ``has_ar=False`` skips the AR shapes and spot terms (quiet star). With
+    ``columns`` the per-pixel spectral terms are built only if a per-call
+    planet mask still needs them.
 
     Returns
     -------
@@ -642,7 +702,16 @@ def _compute_all_phases(
     """
     if nphase is None:
         nphase = next(a.shape[0] for a in (ar_shapes, all_ar_carts, planet_xyz_all) if a is not None)
-    if not has_ar:
+    Gq = GD = None
+    if columns is not None:
+        Gq, GD = vmap(
+            functools.partial(_column_terms_at_wavelength, wavelength_grid=wavelength,
+                              flux_quiet=flux_quiet, flux_active=flux_active, vel_col=vel_col),
+            in_axes=(0, 0, 1),
+        )(wavelength, ld_coeffs_quiet, ld_coeffs_active)                 # (nwave, K), (nwave, nar, K)
+    if columns is not None and not (has_planet and "H_M" not in columns):
+        F_quiet_px = D = None                                           # nothing left to do per pixel
+    elif not has_ar:
         ar_shapes = D = None
         _, F_quiet_px = vmap(
             functools.partial(
@@ -677,6 +746,7 @@ def _compute_all_phases(
     lc_raw, arted = _integrate_flux(
         ar_shapes, planet_mask, F_quiet_px, D, total_pixels, nphase,
         compute_map=compute_map, map_idx=map_idx, transit_idx=transit_idx, ar_shapes_in=ar_shapes_in,
+        columns=columns, Gq=Gq, GD=GD,
     )
 
     if not compute_map:
@@ -1369,6 +1439,7 @@ def precompute_geometry(
     k: Optional[float | np.ndarray] = None,
     transit_softness: float = 0.0,
     k_max: float = 0.5,
+    columns: bool = True,
 ) -> dict:
     """
     Precompute the geometry that stays fixed across ``make_lc`` calls, for the
@@ -1396,11 +1467,21 @@ def precompute_geometry(
     ``nphase_in * nplanet * total_pixels`` (times ``nwave`` for a chromatic
     ``k``) for the planet terms.
 
+    ``columns`` (default True) additionally stores, for the limb-darkening laws
+    that are linear in their coefficients (not ``power2``/``intensity_profile``),
+    the sums of the precomputed shapes and mask over the pixels of each velocity
+    column weighted by each basis function of mu. ``make_lc`` then contracts
+    those small arrays instead of the pixel grid, exactly, as long as the
+    limb-darkening coefficients keep the intensity non-negative everywhere
+    (``make_lc`` clamps negative intensities on the pixel path only). With a
+    fixed ``k`` the whole call is then independent of the grid size.
+
     Returns
     -------
     ``Geometry`` (a dict pytree) with ``ar_shapes``/``ar_shapes_in``/``nar`` and/or ``transit_idx``/
     ``nplanet``/``transit_softness`` plus ``planet_mask_in``/``k``/
-    ``k_achromatic`` (fixed ``k``) or ``d2_in``/``z_in`` (free ``k``).
+    ``k_achromatic`` (fixed ``k``) or ``d2_in``/``z_in`` (free ``k``), and with
+    ``columns`` the column sums ``basis_sum``/``H_S``/``H_M``/``H_SM``.
     """
     _args = dict(ar_lat=ar_lat, ar_long=ar_long, ar_size=ar_size, ar_smoothness=ar_smoothness,
                  t0=t0, period=period, a_over_rstar=a_over_rstar, inclination=inclination,
@@ -1442,7 +1523,7 @@ def precompute_geometry(
     if (_orbit_given or k is not None) and not model.get("has_transit", False):
         raise ValueError("precompute_geometry: transit parameters were given, but this model has no transit attached.")
     if not model.get("has_transit", False):
-        return geometry
+        return _add_column_sums(model, geometry) if columns else geometry
     if _orbit_given:
         planet_xyz_all, nplanet = _planet_orbit(model, t0, period, a_over_rstar, inclination, ecc, omega_peri, sp_orb)
     else:
@@ -1468,6 +1549,24 @@ def precompute_geometry(
         xn, yn = x_disc / spr, y_disc / spr
         geometry["d2_in"] = (xn - xyz_in[:, :, 0, None]) ** 2 + (yn - xyz_in[:, :, 1, None]) ** 2  # (nphase_in, nplanet, P)
         geometry["z_in"] = xyz_in[:, :, 2]
+    return _add_column_sums(model, geometry) if columns else geometry
+
+
+def _add_column_sums(model, geometry):
+    """Column x LD-basis sums of the precomputed shapes / mask (see precompute_geometry); no-op for other laws."""
+    if model["ld_mode"] not in _LD_BASIS_LAWS:
+        return geometry
+    B, col, n = _ld_basis(np.asarray(model["mu_disc"], np.float32), model["ld_mode"]), model["col_idx"], model["n"]
+    sums = lambda A: _column_sums(A, B, col, n)
+    geometry["basis_sum"] = sums(jnp.ones(model["total_pixels"], jnp.float32))
+    if "ar_shapes" in geometry:
+        geometry["H_S"] = sums(geometry["ar_shapes"])
+    if "planet_mask_in" in geometry:
+        M = geometry["planet_mask_in"]
+        geometry["H_M"] = sums(M)
+        if "ar_shapes_in" in geometry:
+            S_in = geometry["ar_shapes_in"]
+            geometry["H_SM"] = sums(S_in * M[:, None, :] if M.ndim == 2 else S_in[:, None, :, :] * M[:, :, None, :])
     return geometry
 
 
@@ -1634,6 +1733,8 @@ def make_lc(
         parameters, and ``k`` only if it was left free there.
         ``transit_softness`` then comes from ``precompute_geometry``.
         Time-varying active regions are not supported with ``geometry``.
+        Column sums in the geometry (see ``precompute_geometry``) are used
+        unless ``compute_map`` is set.
 
     Returns
     -------
@@ -2054,6 +2155,9 @@ def make_lc(
     k_val = _prepare_transit_k(k_val, nplanet, nwave)
 
     # ---- All-phases computation ------------------------------------------
+    columns = {key: geometry[key] for key in ("basis_sum", "H_S", "H_M", "H_SM") if key in geometry}
+    if not columns or compute_map or (has_ar and "H_S" not in columns):   # the map needs pixels; per-call AR shapes have no sums
+        columns = None
     if not ar_time_varying:
         lc_raw, star_maps = _compute_all_phases(
             all_ar_carts,
@@ -2090,6 +2194,7 @@ def make_lc(
             ar_shapes_in        = geometry.get("ar_shapes_in"),
             planet_mask         = planet_mask,
             transit_idx         = geometry.get("transit_idx"),
+            columns             = columns,
         )
     else:
         lc_raw, star_maps = _compute_all_phases_evolving(
