@@ -3766,3 +3766,59 @@ class TestPrecomputeGeometry:
         with pytest.raises(ValueError, match="time-varying active regions"):
             make_lc(model, flux_active=self.C, geometry=geo,
                     **{**self.AR, "ar_size": jnp.full((len(TIMES), 1), 8.0)})
+
+
+# ===================================================================
+# 10. Quiet-star path -- no AR terms are evaluated, result unchanged
+# ===================================================================
+
+class TestQuietStarPath:
+    """A call without active regions must equal one with an AR of contrast
+    exactly 1 (the former dummy-AR implementation), for every planet variant."""
+
+    _SOFT = 1.0 / (10.0 * STELLAR_GRID)
+    _WL = np.linspace(500.0, 600.0, 3)
+    ORBIT = {name: v for name, v in TRANSIT_PARAMS.items() if name != "k"}
+    INERT_AR = dict(ar_lat=jnp.array([0.0]), ar_long=jnp.array([0.0]),
+                    ar_size=jnp.array([10.0]), ar_smoothness=jnp.array([_SM]))
+
+    @pytest.fixture(scope="class")
+    def model(self):
+        return build_system(
+            wavelength=self._WL, flux_quiet=np.ones(3), **BASE_PARAMS,
+            times=TIMES, P_rot=P_ROT, **TRANSIT_PARAMS,
+            stellar_grid_size=STELLAR_GRID, ve=2.0, oversample=2,
+        )
+
+    def _inert(self, model, **kw):
+        return make_lc(model, flux_active=jnp.ones(3), **self.INERT_AR, **kw)
+
+    @staticmethod
+    def _close(a, b):
+        np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-5, atol=1e-6)
+
+    def test_no_transit(self, small_model):
+        c = jnp.ones(small_model["nwave"])
+        self._close(make_lc(small_model)[0], make_lc(small_model, flux_active=c, **self.INERT_AR)[0])
+
+    def test_static_transit_and_map(self, model):
+        lc, maps = make_lc(model, compute_map=True)
+        lc_ref, maps_ref = self._inert(model, compute_map=True)
+        self._close(lc, lc_ref)
+        self._close(maps, maps_ref)
+
+    @pytest.mark.parametrize("k", [0.1, jnp.array([0.09, 0.1, 0.11])], ids=["scalar", "chromatic"])
+    def test_traced_orbit_value_and_gradient(self, model, k):
+        f = lambda k: jnp.sum(make_lc(model, **self.ORBIT, k=k, transit_softness=self._SOFT)[0])
+        f_ref = lambda k: jnp.sum(self._inert(model, **self.ORBIT, k=k, transit_softness=self._SOFT)[0])
+        self._close(f(k), f_ref(k))
+        self._close(jax.grad(f)(k), jax.grad(f_ref)(k))
+
+    def test_with_planet_geometry(self, model):
+        geo = precompute_geometry(model, **self.ORBIT, transit_softness=self._SOFT)
+        self._close(make_lc(model, geometry=geo, k=0.1)[0],
+                    self._inert(model, **self.ORBIT, k=0.1, transit_softness=self._SOFT)[0])
+
+    def test_quiet_ldc_override(self, model):
+        u = jnp.asarray(np.asarray(model["ld_coeffs"])) * 0.9
+        self._close(make_lc(model, ld_coeffs_quiet=u)[0], self._inert(model, ld_coeffs_quiet=u)[0])
