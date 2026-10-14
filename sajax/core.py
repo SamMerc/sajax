@@ -60,10 +60,10 @@ _AR_SHAPE_TINY = 1e-30
 _LOG_ARG_MAX   = 50.0
 
 # _FLUX_RATIO_EPS : Floor for the C_a = F_active/F_quiet contrast ratio's denominator
-#  (see _flux_at_wavelength). Some limb-darkening laws (e.g. a user-supplied
+#  (see _pixel_flux_at_wavelength). Some limb-darkening laws (e.g. a user-supplied
 # intensity_profile with I(mu=0)=0) can vanish at the limb, making the local
-# F_quiet exactly 0 there; without a floor this causes NaN which corrupt arted_flux
-# even though that pixel's contribution is supposed to be 0.
+# F_quiet exactly 0 there; without a floor this causes NaN which corrupt the
+# dimming surface D even though that pixel's contribution is supposed to be 0.
 _FLUX_RATIO_EPS = 1e-12
 
 
@@ -280,7 +280,7 @@ def _compute_ar_shape(
 
     This shape peaks at exactly 1 at the AR's centre and its amplitude within
     the light-curve formula is set separately by the AR's spectral contrast (see
-    ``_flux_at_wavelength``). Thus, this function is purely geometric and
+    ``_pixel_flux_at_wavelength``). Thus, this function is purely geometric and
     carries no wavelength dependence.
 
     Uses the exact spherical "distance" variable ``x = 1 - cos(theta) = 2 sin^2(theta/2)``,
@@ -388,89 +388,45 @@ def _evaluate_ldc(
 
     # Intensity can't be negative. Unphysical LDCs (e.g. u1+u2 > 1 for the
     # quadratic law) otherwise dip slightly negative near the limb, which
-    # the _FLUX_RATIO_EPS floor in _flux_at_wavelength turns into a division
+    # the _FLUX_RATIO_EPS floor in _pixel_flux_at_wavelength turns into a division
     # by (almost) zero -- a spurious contrast blowup rather than a graceful
     # degradation to zero flux.
     return jnp.maximum(result, 0.0)
 
 
 # ---------------------------------------------------------------------------
-# 4. Single-wavelength flux  (vmapped over the spectral axis)
+# 4. Per-wavelength pixel flux (vmapped over the spectral axis, phase-free)
 # ---------------------------------------------------------------------------
 
-def _flux_at_wavelength(
+_DOT_PRECISION = jax.lax.Precision.HIGHEST  # true float32 GEMMs (GPU default is TF32)
+
+
+def _pixel_flux_at_wavelength(
     # --- vmapped: one scalar/slice per wavelength ---
     wavelength_target:    float,
     ld_coeffs_quiet_wl:  jnp.ndarray, # (n_coeffs,)
     ld_coeffs_active_wl: jnp.ndarray, # (nar, n_coeffs)
     I_prof_quiet_wl:      jnp.ndarray, # (n_mu_pts,)
     I_prof_active_wl:     jnp.ndarray, # (nar, n_mu_pts)
-    k_wl:                 jnp.ndarray, # (nplanet,) Rp / R* of every planet at this wavelength
     # --- broadcast: shared across wavelengths ---
     wavelength_grid: jnp.ndarray, # (nwave,) full spectral axis
     flux_quiet:      jnp.ndarray, # (nwave,) full quiet-photosphere spectrum
     flux_active:     jnp.ndarray, # (nar, nwave) full per-AR spectra
     mu_disc:         jnp.ndarray, # (total_pixels,) grid of in-disc mu values
-    total_pixels:    int,
-    ar_shapes:       jnp.ndarray, # (nar, total_pixels)
-    x_disc:          jnp.ndarray, # (total_pixels,) -- for the per-wavelength planet mask
-    y_disc:          jnp.ndarray, # (total_pixels,)
-    star_pixel_rad:  float,
-    planet_xyz:      jnp.ndarray, # (nplanet, 3) planet sky positions, shared across wavelengths
-    transit_softness: float,
     mu_profile_pts:  jnp.ndarray, # (n_mu_pts,)
     col_idx:         jnp.ndarray, # (total_pixels,) int
     vel_col:         jnp.ndarray, # (n,)
     ld_mode:        LdMode,
-    compute_map:     bool = False,
-) -> tuple[float, Optional[jnp.ndarray]]:
+) -> tuple[jnp.ndarray, jnp.ndarray]:
     """
-    Compute disc-integrated flux for a single wavelength channel.
-
-    Builds the dimensionless "contrast surface"::
-
-        F_p/F_quiet = 1 - sum_a (1 - C_a) * ar_shapes[a]
-
-    where ``C_a = F_a / F_quiet`` is active region ``a``'s spectral
-    contrast, evaluated at each pixel's own Doppler-shifted wavelength and
-    with its own limb-darkening law. Overlapping active regions sum, so
-    e.g. an umbra sitting inside a penumbra contributes simultaneously (the
-    combined dip exceeds either component's own contrast).
-
-    The planet mask is computed here, per wavelength, from ``k_wl`` -- not
-    precomputed once per phase like ``ar_shapes`` -- because ``k`` (unlike
-    everything else that's shared across wavelengths) may itself vary by
-    wavelength for a chromatic transit depth. Recomputing the mask once per
-    (phase, wavelength) instead of once per phase is the price of that
-    generality; the mask itself is a cheap elementwise op over the pixel
-    grid relative to the rest of this function.
-
-    Every planet's mask is combined multiplicatively via
-    ``_compute_all_planets_mask`` -- planets are opaque occulters, so
-    overlapping planets' "surviving flux" fractions multiply rather than
-    sum. The exception is when ``nplanets=1``: in that case the code 
-    defaults back to using ``_compute_planet_mask``. This ensures there is
-    no loss in computational cost in the ``nplanets=1`` case.
-
-    All arrays are 1D (in-disc pixels only) - no starmask needed.
-    The combined planet mask is 1 for pixels occulted by any planet; those
-    pixels contribute zero flux regardless of active-region status.
-
-    ``compute_map`` (default False): ``arted_flux`` is only needed to
-    visually plot the 2D stellar map -- the light curve itself only needs
-    the scalar ``total_flux``. Thus, ``compute_map`` is default False to skip
-    the creation of ``arted_flux`` and avoid un-necessary computation.
+    Phase-independent per-pixel flux terms at one wavelength (Doppler x LD).
 
     Returns
     -------
-    total_flux : float            - active-region'ed integrated flux
-    arted_flux : (total_pixels,) or None    - per-pixel flux (for map output),
-                                               None when compute_map=False
+    F_quiet_px : (total_pixels,)      quiet flux per pixel
+    D          : (nar, total_pixels)  F_quiet_px * (1 - C_a), flux removed per
+                                      pixel by AR ``a`` at full coverage
     """
-    planet_mask = _compute_all_planets_mask(
-        x_disc, y_disc, star_pixel_rad, planet_xyz, k_wl, transit_softness,
-    )
-
     # ---- Per-column Doppler-shifted spectral lookup ----------------------
     # Velocity depends on x alone (see build_stellar_grid), so resample once per column, not per pixel.
     query_wavelength_col = wavelength_target * (1.0 - vel_col)  # (n,)
@@ -498,140 +454,64 @@ def _flux_at_wavelength(
     F_quiet_px  = F_quiet_local * ldc_quiet    # (total_pixels,)
     F_active_px = F_active_local * ldc_active  # (nar, total_pixels)
 
-    # ---- Contrast surface: overlapping ARs sum -----
-    # Floored denominator: see _FLUX_RATIO_EPS -- pixels where F_quiet_px
-    # is exactly 0 (e.g. an intensity_profile with I(mu=0)=0) still
-    # contribute exactly 0 to arted_flux below, but without the floor the
-    # 0/0 here would inject a NaN that corrupts the whole light curve.
-    C_a = F_active_px / jnp.maximum(F_quiet_px[None, :], _FLUX_RATIO_EPS)  # (nar, total_pixels)
-    contrast_surface = 1.0 - jnp.sum((1.0 - C_a) * ar_shapes, axis=0)      # (total_pixels,)
-
-    arted_flux = F_quiet_px * contrast_surface
-
-    # ---- Planet occultation ---------------------------------------
-    # Multiplication (not jnp.where) so gradients flow through the planet mask.
-    arted_flux = arted_flux * (1.0 - planet_mask)
-
-    # Experimentation revealed that the following dot product
-    # is measurably faster than jnp.sum.
-    total_flux = jnp.dot(arted_flux, jnp.ones_like(arted_flux)) / jnp.float32(total_pixels)
-    return total_flux, (arted_flux if compute_map else None)
+    C_a = F_active_px / jnp.maximum(F_quiet_px[None, :], _FLUX_RATIO_EPS)  # (nar, total_pixels); floor avoids 0/0 NaN
+    D   = F_quiet_px[None, :] * (1.0 - C_a)                                 # (nar, total_pixels)
+    return F_quiet_px, D
 
 
-# ---------------------------------------------------------------------------
-# 5. Single-phase computation
-# ---------------------------------------------------------------------------
-
-def _compute_single_phase(
-    ar_cart_all:         jnp.ndarray,  # (nar, 3)
-    planet_xyz:          jnp.ndarray,  # (nplanet, 3)
-    *,
-    wavelength:          jnp.ndarray,  # (nwave,)
-    flux_quiet:          jnp.ndarray,  # (nwave,)
-    flux_active:         jnp.ndarray,  # (nar, nwave)
-    ld_coeffs_quiet:    jnp.ndarray,  # (nwave, n_coeffs)
-    ld_coeffs_active:   jnp.ndarray,  # (nar, nwave, n_coeffs)
-    I_profile_quiet:     jnp.ndarray,  # (nwave, n_mu_pts)
-    I_profile_active:    jnp.ndarray,  # (nar, nwave, n_mu_pts)
-    mu_profile_pts:      jnp.ndarray,  # (n_mu_pts,)
-    x_disc:              jnp.ndarray,  # (total_pixels,)
-    y_disc:              jnp.ndarray,  # (total_pixels,)
-    mu_disc:             jnp.ndarray,  # (total_pixels,)
-    col_idx:             jnp.ndarray,  # (total_pixels,)
-    vel_col:             jnp.ndarray,  # (n_grid,)
-    star_pixel_rad:      float,
-    total_pixels:        int,
-    arsize_rads:         jnp.ndarray,  # (nar,)
-    ar_smoothness:       jnp.ndarray,  # (nar,)
-    k:                   jnp.ndarray,  # (nplanet, nwave) Rp / R*, one value per planet per wavelength
-    ld_mode:            LdMode,
-    plot_map_wavelength: float,
-    n:                   int,         # full grid side (for map scatter)
-    flat_indices:        jnp.ndarray, # (total_pixels,) scatter indices
-    transit_softness:    float = 0.0, # see _compute_planet_mask
-    compute_map:         bool = False,
+def _integrate_flux(
+    ar_shapes:    jnp.ndarray,           # (nphase, nar, total_pixels)
+    planet_mask:  Optional[jnp.ndarray], # None | (nphase, total_pixels) | (nphase, nwave, total_pixels)
+    F_quiet_px:   jnp.ndarray,           # (nwave, total_pixels)
+    D:            jnp.ndarray,           # (nwave, nar, total_pixels)
+    total_pixels: int,
+    compute_map:  bool = False,
+    map_idx:      Optional[jnp.ndarray] = None,  # wavelength index of the map (compute_map only)
 ) -> tuple[jnp.ndarray, Optional[jnp.ndarray]]:
     """
-    Full spectral computation for one rotational phase, including optional
-    pixel-level planet occultation.
-    ``planet_xyz`` holds every planet's sky-plane position (X, Y, Z) in
-    stellar radii. ``k`` differs per planet and per wavelength (to allow for 
-    chromatic transit depths), so the occultation mask itself is computed per
-    wavelength inside ``_flux_at_wavelength`` (combining all planets
-    multiplicatively via ``_compute_all_planets_mask``), not once here. Pass
-    ``jnp.array([[0., 0., -1e10]])`` and an all-zero ``k`` to disable the
-    transit mask (no performance cost -- the mask is all-False).
+    Disc-integrate ``[F_quiet - sum_a D_a S_a] * [1 - M]`` over pixels for
+    every (phase, wavelength), term by term, so the AR term is one GEMM and
+    no (nphase, nwave, total_pixels) surface is built unless ``M`` is chromatic.
 
     Returns
     -------
-    flux_per_wavelength   : (nwave,)  disc-integrated flux at each
-                             wavelength bin, in the same units as
-                             ``flux_quiet``/``flux_active`` (not normalised
-                             to the quiet-star baseline -- divide by that
-                             yourself, e.g. via a quiet-star-only call to
-                             ``make_lc``, if you want relative flux)
-    star_map              : (n, n) or None  flux map at plot_map_wavelength,
-                             None when compute_map=False
+    lc        : (nphase, nwave)         flux normalised by total_pixels
+    arted_map : (nphase, total_pixels)  per-pixel flux at ``map_idx``, or None
     """
-    # ---- active region shapes: (nar, total_pixels) -----------------------
-    ar_shapes = vmap(
-        lambda cart, sr, sm: _compute_ar_shape(
-            x_disc, y_disc, star_pixel_rad,
-            cart[0], cart[1], cart[2], sr, sm,
-        )
-    )(ar_cart_all, arsize_rads, ar_smoothness)
+    einsum = functools.partial(jnp.einsum, precision=_DOT_PRECISION)
 
-    # ---- vmap over wavelengths ----
-    # ld_coeffs_active/I_profile_active have the wavelength axis second
-    # (nar, nwave, ...), so they vmap on axis=1; k now has the same layout
-    # (nplanet, nwave), so it also vmaps on axis=1 -- everything else vmaps
-    # on its leading (wavelength) axis, so the planet mask (computed inside
-    # _flux_at_wavelength) can differ per wavelength too.
-    _flux_vmap = vmap(
-        functools.partial(
-            _flux_at_wavelength,
-            wavelength_grid  = wavelength,
-            flux_quiet       = flux_quiet,
-            flux_active      = flux_active,
-            mu_disc          = mu_disc,
-            total_pixels     = total_pixels,
-            ar_shapes        = ar_shapes,
-            x_disc           = x_disc,
-            y_disc           = y_disc,
-            star_pixel_rad   = star_pixel_rad,
-            planet_xyz       = planet_xyz,
-            transit_softness = transit_softness,
-            mu_profile_pts   = mu_profile_pts,
-            col_idx          = col_idx,
-            vel_col          = vel_col,
-            ld_mode         = ld_mode,
-            compute_map      = compute_map,
-        ),
-        in_axes=(0, 0, 1, 0, 1, 1),
-    )
+    quiet = jnp.sum(F_quiet_px, axis=-1)                       # (nwave,)
+    spot  = einsum("nap,wap->nw", ar_shapes, D)                # (nphase, nwave)
+    lc    = quiet[None, :] - spot
 
-    flux_per_wavelength, flux_discs = _flux_vmap(
-        wavelength,
-        ld_coeffs_quiet,
-        ld_coeffs_active,
-        I_profile_quiet,
-        I_profile_active,
-        k,
-    )
+    if planet_mask is not None:
+        if planet_mask.ndim == 2:  # achromatic mask (nphase, P): two more GEMMs
+            lc = (lc
+                  - einsum("np,wp->nw", planet_mask, F_quiet_px)
+                  + einsum("nap,wap->nw", ar_shapes * planet_mask[:, None, :], D))
+        else:  # chromatic mask (nphase, nwave, P): one fused pass over that surface
+            nar = ar_shapes.shape[1]
+            unocculted = F_quiet_px[None, :, :]                           # (1, nwave, P)
+            for a in range(nar):  # static loop keeps this a single fused expression
+                unocculted = unocculted - ar_shapes[:, a, None, :] * D[None, :, a, :]
+            occulted = planet_mask * unocculted                           # (nphase, nwave, P)
+            lc = lc - einsum("nwp,p->nw", occulted, jnp.ones(occulted.shape[-1], occulted.dtype))  # dot beats reduce on XLA:CPU
+
+    lc = lc / jnp.float32(total_pixels)
 
     if not compute_map:
-        return flux_per_wavelength, None
+        return lc, None
 
-    # ---- Reconstruct 2D map at plot_map_wavelength ----------------------
-    map_idx   = jnp.argmin(jnp.abs(wavelength - plot_map_wavelength))
-    flux_1d   = flux_discs[map_idx]   # (total_pixels,)
-    star_map  = jnp.zeros(n * n).at[flat_indices].set(flux_1d).reshape(n, n)
-
-    return flux_per_wavelength, star_map
+    D_map   = D[map_idx]                                        # (nar, P)
+    arted   = F_quiet_px[map_idx][None, :] - einsum("nap,ap->np", ar_shapes, D_map)  # (nphase, P)
+    if planet_mask is not None:
+        M_map = planet_mask if planet_mask.ndim == 2 else planet_mask[:, map_idx]
+        arted = arted * (1.0 - M_map)
+    return lc, arted
 
 
 # ---------------------------------------------------------------------------
-# 6. All-phases computation -- vmapped over the phase axis
+# 5. All-phases computation -- the factored pixel integral
 # ---------------------------------------------------------------------------
 
 def _compute_all_phases(
@@ -662,54 +542,112 @@ def _compute_all_phases(
     flat_indices:        jnp.ndarray,
     transit_softness:    float = 0.0,
     compute_map:         bool = False,
+    has_planet:          bool = True,
+    k_achromatic:        bool = False,
 ) -> tuple[jnp.ndarray, Optional[jnp.ndarray]]:
     """
-    vmap ``_compute_single_phase`` over the phase axis.
+    Light curve at every phase and wavelength via ``_integrate_flux``.
 
-    ``planet_xyz_all`` contains every planet's (X, Y, Z) position at each
-    (oversampled) phase, shared across every wavelength. Pass
-    ``jnp.full((nphase, 1, 3), [0, 0, -1e10])`` and an all-zero ``k`` to
-    disable transit (no performance overhead).
-
-    ``compute_map=False`` skips the per-phase 2D map reconstruction inside
-    ``_compute_single_phase`` to save on computation.
+    ``has_planet=False`` skips the occultation mask; ``k_achromatic=True``
+    builds it once per phase from ``k[:, 0]`` instead of once per (phase,
+    wavelength). Both are static, shape-derived choices.
 
     Returns
     -------
     lc_raw    : (nphase, nwave)
     star_maps : (nphase, n, n), or None when compute_map=False
     """
-    _phase_vmap = vmap(
-        functools.partial(
-            _compute_single_phase,
-            wavelength          = wavelength,
-            flux_quiet          = flux_quiet,
-            flux_active         = flux_active,
-            ld_coeffs_quiet    = ld_coeffs_quiet,
-            ld_coeffs_active   = ld_coeffs_active,
-            I_profile_quiet     = I_profile_quiet,
-            I_profile_active    = I_profile_active,
-            mu_profile_pts      = mu_profile_pts,
-            x_disc              = x_disc,
-            y_disc              = y_disc,
-            mu_disc             = mu_disc,
-            col_idx             = col_idx,
-            vel_col             = vel_col,
-            star_pixel_rad      = star_pixel_rad,
-            total_pixels        = total_pixels,
-            arsize_rads         = arsize_rads,
-            ar_smoothness       = ar_smoothness,
-            k                   = k,
-            ld_mode            = ld_mode,
-            plot_map_wavelength = plot_map_wavelength,
-            n                   = n,
-            flat_indices        = flat_indices,
-            transit_softness    = transit_softness,
-            compute_map         = compute_map,
+    ar_shapes = vmap(  # (nphase, nar, total_pixels)
+        vmap(
+            lambda cart, sr, sm: _compute_ar_shape(
+                x_disc, y_disc, star_pixel_rad,
+                cart[0], cart[1], cart[2], sr, sm,
+            ),
+            in_axes=(0, 0, 0),
         ),
-        in_axes=(0,0), # vmap over both ar_carts and planet_xyz
+        in_axes=(0, None, None),
+    )(all_ar_carts, arsize_rads, ar_smoothness)
+
+    F_quiet_px, D = vmap(  # once per wavelength; (nar, nwave, ...) inputs vmap on axis=1
+        functools.partial(
+            _pixel_flux_at_wavelength,
+            wavelength_grid = wavelength,
+            flux_quiet      = flux_quiet,
+            flux_active     = flux_active,
+            mu_disc         = mu_disc,
+            mu_profile_pts  = mu_profile_pts,
+            col_idx         = col_idx,
+            vel_col         = vel_col,
+            ld_mode         = ld_mode,
+        ),
+        in_axes=(0, 0, 1, 0, 1),
+    )(wavelength, ld_coeffs_quiet, ld_coeffs_active, I_profile_quiet, I_profile_active)
+    # F_quiet_px: (nwave, P);  D: (nwave, nar, P)
+
+    if not has_planet:
+        planet_mask = None
+    elif k_achromatic:
+        k_planet = k[:, 0]                                            # (nplanet,)
+        planet_mask = vmap(
+            lambda xyz: _compute_all_planets_mask(
+                x_disc, y_disc, star_pixel_rad, xyz, k_planet, transit_softness,
+            )
+        )(planet_xyz_all)                                             # (nphase, P)
+    else:
+        planet_mask = vmap(
+            lambda xyz: vmap(
+                lambda k_wl: _compute_all_planets_mask(
+                    x_disc, y_disc, star_pixel_rad, xyz, k_wl, transit_softness,
+                ),
+                in_axes=1,
+            )(k)
+        )(planet_xyz_all)                                             # (nphase, nwave, P)
+
+    map_idx = jnp.argmin(jnp.abs(wavelength - plot_map_wavelength)) if compute_map else None
+    lc_raw, arted = _integrate_flux(
+        ar_shapes, planet_mask, F_quiet_px, D, total_pixels,
+        compute_map=compute_map, map_idx=map_idx,
     )
-    return _phase_vmap(all_ar_carts, planet_xyz_all)
+
+    if not compute_map:
+        return lc_raw, None
+
+    nphase    = arted.shape[0]
+    star_maps = (jnp.zeros((nphase, n * n), dtype=arted.dtype)
+                 .at[:, flat_indices].set(arted)
+                 .reshape(nphase, n, n))
+    return lc_raw, star_maps
+
+
+# ---------------------------------------------------------------------------
+# 6. Single-phase computation -- thin wrapper (one phase of the above)
+# ---------------------------------------------------------------------------
+
+def _compute_single_phase(
+    ar_cart_all:         jnp.ndarray,  # (nar, 3)
+    planet_xyz:          jnp.ndarray,  # (nplanet, 3)
+    *,
+    k:                   jnp.ndarray,  # (nplanet, nwave) Rp / R*, one value per planet per wavelength
+    compute_map:         bool = False,
+    **kwargs,
+) -> tuple[jnp.ndarray, Optional[jnp.ndarray]]:
+    """
+    One phase of ``_compute_all_phases`` (same keywords, no phase axis).
+    ``k`` is achromatic iff its wavelength axis has size 1. Pass
+    ``jnp.array([[0., 0., -1e10]])`` and ``k = 0`` to disable the transit.
+
+    Returns
+    -------
+    flux_per_wavelength : (nwave,)
+    star_map            : (n, n) or None
+    """
+    lc, maps = _compute_all_phases(
+        ar_cart_all[None], planet_xyz[None],
+        k=k, compute_map=compute_map,
+        has_planet=True, k_achromatic=(k.shape[1] == 1),
+        **kwargs,
+    )
+    return lc[0], (None if maps is None else maps[0])
 
 
 # ---------------------------------------------------------------------------
@@ -941,6 +879,20 @@ def _prepare_transit_k(
         f"scalar, ({nplanet},) [per-planet, achromatic], or ({nplanet}, {nwave}) "
         "[per-planet, per-wavelength]."
     )
+
+
+def _k_is_achromatic(k, nplanet: int, nwave: int) -> bool:
+    """True if ``k`` has no wavelength axis under ``_prepare_transit_k``'s shape rules (shape only; traced-safe)."""
+    shape = jnp.shape(k)
+    if len(shape) == 0 or nwave == 1:
+        return True
+    if len(shape) == 1:
+        if shape[0] == 1:
+            return True
+        if nplanet == 1 and shape[0] == nwave:
+            return False               # legacy single-planet chromatic depth
+        return shape[0] == nplanet
+    return False                       # explicit (nplanet, nwave)
 
 
 def build_system(
@@ -1248,6 +1200,7 @@ def build_system(
         model["planet_xyz"]  = transit["planet_xyz"]   # (nphase_compute, nplanet, 3) -- static, from the
                                                         #   concrete parameters given here
         model["k"]           = transit["k"]            # (nplanet, nwave)
+        model["k_achromatic"] = _k_is_achromatic(k, nplanet, nwave)
         model["nplanet"]     = transit["nplanet"]
         model["has_transit"] = True
         model["P_rot"]       = P_rot
@@ -1827,24 +1780,30 @@ def make_lc(
         )   # (nphase_compute, nplanet, 3)
         nplanet = jnp.atleast_1d(jnp.asarray(t0)).shape[-1]
         k_val = k
+        has_planet   = True
+        k_achromatic = _k_is_achromatic(k, nplanet, nwave)
     elif model.get("has_transit", False):
         # Static, backwards-compatible path: positions baked at build time.
         planet_xyz_all = model["planet_xyz"]    # (nphase_compute, nplanet, 3)
         k_val          = model["k"]             # (nplanet, nwave), already dense
         nplanet        = model["nplanet"]
+        has_planet     = True
+        k_achromatic   = model.get("k_achromatic", False)
     else:
-        # Dummy: planet permanently behind the star, zero-radius disc.
+        # Dummy: planet permanently behind the star, zero-radius disc (time-varying path only).
         nphase_compute = model["phases_rot"].shape[0]
         nplanet        = 1
         planet_xyz_all = jnp.zeros((nphase_compute, 1, 3)).at[:, :, 2].set(-1e10)
         k_val          = 0.0
         transit_softness = 0.0
+        has_planet     = False
+        k_achromatic   = True
 
     # ---- Broadcast k to (nplanet, nwave): see _prepare_transit_k for the
     # full shape convention. A scalar means the same (achromatic) radius
     # ratio at every planet/wavelength; a genuinely chromatic and/or
     # per-planet depth is supported (the occultation mask is computed per
-    # wavelength -- see _flux_at_wavelength -- specifically to support this).
+    # wavelength in _compute_all_phases unless _k_is_achromatic).
     # Idempotent (a no-op) on the already-dense static-path value above.
     k_val = _prepare_transit_k(k_val, nplanet, nwave)
 
@@ -1877,6 +1836,8 @@ def make_lc(
             flat_indices        = model["flat_indices"],
             transit_softness    = transit_softness,
             compute_map         = compute_map,
+            has_planet          = has_planet,
+            k_achromatic        = k_achromatic,
         )
     else:
         lc_raw, star_maps = _compute_all_phases_evolving(
