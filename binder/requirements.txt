@@ -154,7 +154,7 @@ idna==3.19
     # via requests
 imagesize==2.0.1
     # via sphinx
-importlib-metadata==9.0.0
+importlib-metadata==9.0.1
     # via
     #   asdf
     #   jupyter-cache
