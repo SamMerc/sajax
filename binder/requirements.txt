@@ -134,7 +134,7 @@ exotic-ld==3.2.0
 fastjsonschema==2.22.2
     # via nbformat
 fleck==1.1.3
-fonttools==4.63.0
+fonttools==4.65.0
     # via matplotlib
 greenlet==3.5.6 ; platform_machine == 'AMD64' or platform_machine == 'WIN32' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'ppc64le' or platform_machine == 'win32' or platform_machine == 'x86_64'
     # via sqlalchemy
