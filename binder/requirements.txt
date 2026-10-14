@@ -152,7 +152,7 @@ healpy==1.20.0
     # via spotter
 idna==3.19
     # via requests
-imagesize==2.0.0
+imagesize==2.0.1
     # via sphinx
 importlib-metadata==9.0.0
     # via
