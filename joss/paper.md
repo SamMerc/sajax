@@ -7,10 +7,15 @@ authors:
   - name: Lucas M. Arthur
     orcid: 0009-0002-9317-1169
     affiliation: 1
+  - name: Hritam Chakraborty
+    orcid: 0000-0002-5177-1898
+    affiliation: 2
 affiliations:
   - name: Department of Earth, Atmospheric and Planetary Sciences, Massachusetts Institute of Technology, 77 Massachusetts Avenue, Cambridge, MA 02139, USA
     index: 1
-date: 26 September 2026
+  - name: University of Warwick
+    index: 2
+date: 12 October 2026
 bibliography: paper.bib
 
 ---
