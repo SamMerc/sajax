@@ -37,7 +37,7 @@ Unocculted regions produce wavelength-dependent biases in the transit depth thro
 The planet signal and stellar surface are degenerate and must therefore be modeled together to constrain the planet properties.
 Conversely, because the transit chord scans the stellar disk, this joint modeling also turns each transit into a direct probe of the stellar surface.
 
-`SAJAX` is designed for this joint problem. 
+`SAJAX` is designed for this joint problem: rather than treating stellar contamination as a correction applied after the fact, it fits the chromatic spot-crossing signature and planetary transmission spectrum simultaneously, so that each transit constrains both the planet and the active region(s) it crosses.
 It provides a fast and flexible tool for exoplanet and stellar astronomers who need to (i) forward-model spectrophotometric time series of active stars, with or without transiting planets, and (ii) fit such models to data.
 
 
@@ -57,6 +57,8 @@ This is efficient and accurate for small active regions, but breaks down for lar
 
 `SAJAX` extends `SAGE`, a grid-based `NumPy` code that assigns separate spectra to the quiet photosphere and spots but relies on Python loops and does not model planetary occultations. 
 Its guiding philosophy is to be a lightweight, inference-focused model: each active region is described by a small set of physically interpretable parameters (position, size, edge smoothness, spectrum and limb-darkening) rather than a free-form surface map, and the model is differentiable and cheap.
+
+In practice, `SAJAX` is the more natural choice when active regions are large or overlapping, where `fleck`'s point-source treatment breaks down. As a grid-based code `SAJAX` trades some of `fleck`'s analytical speed for flexibility, but remains fast enough for the thousands of evaluations inference requires. It shines when inferring a planet's transmission spectrum jointly with active regions, particularly when the latter require distinct treatment: e.g. their own limb-darkening law, an umbra nested in a penumbra, or successive crossings of regions at different temperatures.
 
 
 # Software design
@@ -101,14 +103,12 @@ Multiple transiting planets are also supported.
 In keeping with `SAJAX`'s focus on inference, these features use separate code paths, so models that do not use them run no slower.
 
 # Research impact statement 
-`SAJAX` has not yet been used in a published study. 
-Its expected significance rests on three points. 
+`SAJAX` has not yet been used in a published study, but it is already being applied by the authors to model chromatic spot-crossing signatures in transit spectra of active stars and to study how the choice of Bayesian inference method affects the resulting parameters' constraints.
+Beyond these ongoing applications, its expected significance rests on three points. 
 First, it re-implements the pixel model of `SAGE`, which was developed to quantify stellar contamination of transmission spectra [@Chakraborty2024] and has been used to predict photometric variability of TOI-3884 [@Chakraborty2025]. `SAJAX` adds planet–spot crossings, gradients, and the potential for GPU execution, broadening its applicability.
 Second, `SAJAX` is released via the Python Package Index (PyPI) under an MIT license, with versioned releases, automated CI and test infrastructure, documentation and tutorials on Read the Docs, and a public issue tracker, allowing for easy adoption by the community.
 Finally, we provide examples of both forward modeling and inference. 
 The inference example follows a well-established approach, fitting the white light curve for the orbit and spot geometry and then each wavelength channel of a chromatic transit with a spot crossing, with both a *maximum a posteriori* fit and Markov chain Monte Carlo, and compares the retrieved spot, orbit and transmission spectrum with the injected values.
-
-We see `SAJAX` as complementary to widely used tools such as `fleck` and `spotter`, designed for light curves of planets around particularly active stars, where per-region spectra and limb darkening, large or overlapping regions, and time-varying activity are most likely to be constrained.
 
 # Future directions
 `SAJAX` will be maintained as a lightweight, fast tool compatible with evolving inference software, and we are considering three potential extensions. 
@@ -129,7 +129,7 @@ The authors take full responsibility for the software and the content of this ma
 Its core depends on `JAX` [@jax2018github], `NumPy` [@Harris2020], `SciPy` [@Virtanen2020], `Matplotlib` [@Hunter2007] and `interpax`. 
 The example notebooks additionally use `NumPyro` [@Phan2019], `ArviZ` [@Kumar2019], `corner` [@ForemanMackey2016], `ExoTiC-LD` [@Grant2024], and `speclib` [@Rackham2024].
 
-We thank Julien de Wit, Benjamin V. Rackham, Catriona Murray, Zoe de Beurs, Prajwal Niraula and all other members of the Disruptive Planets team for fruitful discussions during the development of `SAJAX`. 
+We thank Julien de Wit, Benjamin V. Rackham, Catriona Murray, Zoe de Beurs, Prajwal Niraula and all other members of the Disruptive Planets team for fruitful discussions during the development of `SAJAX`. We additionally thank Benjamin V. Rackham for constructive feedback that strengthened this manuscript.
 S.J.M. acknowledges support from the Massachusetts Institute of Technology through the Hurley Fellowship. 
 L.M.A. acknowledges support from the Massachusetts Institute of Technology through the Lester Wolfe Fellowship and the MIT Presidential Fellowship.
 The authors acknowledge the MIT Office of Research Computing and Data for providing high performance computing resources that have contributed to the research results reported within this paper.
