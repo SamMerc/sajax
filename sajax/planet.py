@@ -423,7 +423,16 @@ def _compute_planet_mask(
 
     # Squared sky-plane distance from planet centre to each pixel
     d2 = (xn - X) ** 2 + (yn - Y) ** 2
+    return _planet_mask_from_d2(d2, Z, k, softness)
 
+
+def _planet_mask_from_d2(
+    d2: jnp.ndarray,       # (total_pixels,) squared pixel-to-planet-centre distance [R*^2]
+    Z: jnp.ndarray,        # planet line-of-sight  [R*]
+    k: float,              # Rp / R*
+    softness: float = 0.0,
+) -> jnp.ndarray:
+    """``_compute_planet_mask`` from precomputed squared distances (see there)."""
     if softness > 0.0:
         d = jnp.sqrt(jnp.maximum(d2, _MASK_D_TINY))
         k_safe    = jnp.maximum(k, _MASK_K_TINY)
@@ -440,6 +449,19 @@ def _compute_planet_mask(
     # Use jnp.where instead of `if k == 0.0` so this stays JAX-traceable when k
     # is a sampled parameter (tracer) inside a numpyro / JAX-jit context.
     return jnp.where(k > 0.0, disc_mask * z_gate, jnp.zeros_like(disc_mask))
+
+
+def _all_planets_mask_from_d2(
+    d2: jnp.ndarray,        # (nplanet, total_pixels)
+    Z: jnp.ndarray,         # (nplanet,)
+    k: jnp.ndarray,         # (nplanet,)
+    softness: float = 0.0,
+) -> jnp.ndarray:
+    """``_compute_all_planets_mask`` from precomputed squared distances (see there)."""
+    if d2.shape[0] == 1:
+        return _planet_mask_from_d2(d2[0], Z[0], k[0], softness)
+    masks = vmap(lambda d, z, kk: _planet_mask_from_d2(d, z, kk, softness))(d2, Z, k)
+    return 1.0 - jnp.prod(1.0 - masks, axis=0)
 
 
 def _compute_all_planets_mask(

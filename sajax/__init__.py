@@ -17,6 +17,10 @@ make_lc
     Pure JAX evaluation - accepts JAX tracers, compatible with
     jit, vmap, emcee_jax, and gradient-based samplers.
 
+precompute_geometry
+    Build the fixed parts of the geometry (AR shapes, in-transit planet
+    terms) once, outside jit, for ``make_lc(model, geometry=...)``.
+
 default_transit_softness
     Recommended ``transit_softness`` for a model: half a pixel,
     ``0.5 / star_pixel_rad``. The usable transition width is set by the
@@ -55,6 +59,7 @@ from .core import (
     quick_lc,
     build_system,
     make_lc,
+    precompute_geometry,
     default_transit_softness,
     build_stellar_grid,
     flare_template,
@@ -70,6 +75,7 @@ __all__ = [
     "build_stellar_grid",
     "build_system",
     "make_lc",
+    "precompute_geometry",
     "default_transit_softness",
     "quick_lc",
     "flare_template",

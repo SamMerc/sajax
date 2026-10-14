@@ -20,6 +20,19 @@ It takes stellar, active region, and orbital parameters, as well as timing infor
 
 `quick_lc(...)` wraps both stages in a single call - convenient for quick, one-off evaluations.
 
+When part of the geometry is held fixed across a fit (e.g. the active-region position and the orbit while only the contrasts and `k` are sampled), build it once with `precompute_geometry(model, ...)` and pass the result to `make_lc(model, geometry=...)`: the AR shapes and the in-transit planet terms are then reused instead of being rebuilt every call. Pass the geometry to your jitted function as an argument rather than closing over it.
+
+```python
+geo = precompute_geometry(model, ar_lat=[5.0], ar_long=[0.0], ar_size=[8.0], ar_smoothness=[20.0],
+                          t0=t0, period=period, a_over_rstar=a_rs, inclination=inc,   # k left free
+                          transit_softness=default_transit_softness(model))
+
+@jax.jit
+def loss(contrast, k, geo):
+    lc, _ = make_lc(model, flux_active=contrast, k=k, geometry=geo)
+    ...
+```
+
 ## Key Inputs
 
 | Parameter | Description | Example |

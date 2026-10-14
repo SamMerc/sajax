@@ -17,6 +17,7 @@ from sajax import quick_lc, build_stellar_grid
 from sajax.core import (
     build_system,
     make_lc,
+    precompute_geometry,
     default_transit_softness,
     flare_template,
     _compute_all_planets_mask,
@@ -3623,3 +3624,145 @@ class TestDefaultTransitSoftness:
         )(jnp.float32(TRANSIT_PARAMS["k"]))
         assert jnp.isfinite(g)
         assert float(g) != 0.0
+
+
+# ===================================================================
+# 9.  precompute_geometry -- fixed geometry built once, reused per call
+# ===================================================================
+
+class TestPrecomputeGeometry:
+    """``make_lc(geometry=precompute_geometry(...))`` must reproduce the
+    per-call path for every combination of fixed / free parameters."""
+
+    _SOFT = 1.0 / (10.0 * STELLAR_GRID)
+    _WL = np.linspace(500.0, 600.0, 3)
+    AR = dict(ar_lat=jnp.array([5.0]), ar_long=jnp.array([0.0]),
+              ar_size=jnp.array([8.0]), ar_smoothness=jnp.array([_SM]))
+    ORBIT = {name: v for name, v in TRANSIT_PARAMS.items() if name != "k"}
+    C = jnp.full(3, 0.7)
+
+    @pytest.fixture(scope="class")
+    def model(self):
+        return build_system(
+            wavelength=self._WL, flux_quiet=np.ones(3), **BASE_PARAMS,
+            times=TIMES, P_rot=P_ROT, **TRANSIT_PARAMS,
+            stellar_grid_size=STELLAR_GRID, ve=VE, oversample=2,
+        )
+
+    @pytest.fixture(scope="class")
+    def two_planet_model(self):
+        return build_system(
+            wavelength=self._WL, flux_quiet=np.ones(3), **BASE_PARAMS,
+            times=TIMES, P_rot=P_ROT,
+            t0=np.array([0.0, 0.04]), period=np.array([5.0, 7.0]),
+            a_over_rstar=np.array([10.0, 12.0]), inclination=np.array([np.pi / 2, np.pi / 2]),
+            k=np.array([0.1, 0.05]), stellar_grid_size=STELLAR_GRID, ve=VE,
+        )
+
+    def _direct(self, model, **kw):
+        return make_lc(model, flux_active=self.C, **self.AR, **kw)
+
+    @staticmethod
+    def _close(a, b):
+        np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-5, atol=1e-6)
+
+    def test_ar_shapes_only(self, model):
+        geo = precompute_geometry(model, **self.AR)
+        assert geo["ar_shapes"].shape == (model["phases_rot"].shape[0], 1, model["total_pixels"])
+        self._close(make_lc(model, flux_active=self.C, geometry=geo)[0], self._direct(model)[0])
+
+    @pytest.mark.parametrize("softness", [0.0, _SOFT])
+    def test_fixed_orbit_and_k(self, model, softness):
+        geo = precompute_geometry(model, **self.AR, **self.ORBIT, k=0.1, transit_softness=softness)
+        assert 0 < len(geo["transit_idx"]) < model["phases_rot"].shape[0]
+        assert "planet_mask_in" in geo and "d2_in" not in geo
+        self._close(make_lc(model, flux_active=self.C, geometry=geo)[0],
+                    self._direct(model, **self.ORBIT, k=0.1, transit_softness=softness)[0])
+
+    @pytest.mark.parametrize("k", [0.1, jnp.array([0.09, 0.1, 0.11])], ids=["scalar", "chromatic"])
+    def test_free_k_value_and_gradient(self, model, k):
+        geo = precompute_geometry(model, **self.AR, **self.ORBIT, transit_softness=self._SOFT)
+        assert "d2_in" in geo and "planet_mask_in" not in geo
+        f_ref = lambda k: jnp.sum(self._direct(model, **self.ORBIT, k=k, transit_softness=self._SOFT)[0])
+        f_geo = lambda k: jnp.sum(make_lc(model, flux_active=self.C, geometry=geo, k=k)[0])
+        self._close(f_geo(k), f_ref(k))
+        g_geo, g_ref = jax.grad(f_geo)(k), jax.grad(f_ref)(k)
+        assert np.all(np.abs(np.asarray(g_ref)) > 0)
+        self._close(g_geo, g_ref)
+
+    def test_models_static_transit_is_default(self, model):
+        geo = precompute_geometry(model, **self.AR)
+        assert "planet_mask_in" in geo
+        self._close(make_lc(model, flux_active=self.C, geometry=geo)[0], self._direct(model)[0])
+
+    def test_quiet_star_with_planet_geometry(self, model):
+        geo = precompute_geometry(model, **self.ORBIT, k=0.1)
+        assert "ar_shapes" not in geo
+        self._close(make_lc(model, geometry=geo)[0], make_lc(model, **self.ORBIT, k=0.1)[0])
+
+    def test_compute_map(self, model):
+        geo = precompute_geometry(model, **self.AR, **self.ORBIT, k=0.1)
+        maps = make_lc(model, flux_active=self.C, geometry=geo, compute_map=True)[1]
+        self._close(maps, self._direct(model, **self.ORBIT, k=0.1, compute_map=True)[1])
+
+    def test_two_planets(self, two_planet_model):
+        m = two_planet_model
+        orbit = dict(t0=m["transit_params"]["t0"], period=m["transit_params"]["period"],
+                     a_over_rstar=m["transit_params"]["a_over_rstar"], inclination=m["transit_params"]["inclination"])
+        k = np.array([0.1, 0.05])
+        geo = precompute_geometry(m, **self.AR, **orbit, transit_softness=self._SOFT)
+        assert geo["d2_in"].shape[1] == 2
+        self._close(make_lc(m, flux_active=self.C, geometry=geo, k=k)[0],
+                    self._direct(m, **orbit, k=k, transit_softness=self._SOFT)[0])
+        geo = precompute_geometry(m, **self.AR)
+        self._close(make_lc(m, flux_active=self.C, geometry=geo)[0], self._direct(m)[0])
+
+    def test_jit_with_geometry_as_argument(self, model):
+        geo = precompute_geometry(model, **self.AR, **self.ORBIT, transit_softness=self._SOFT)
+        f = jax.jit(lambda c, k, g: make_lc(model, flux_active=c, geometry=g, k=k)[0])
+        self._close(f(self.C, 0.1, geo), self._direct(model, **self.ORBIT, k=0.1, transit_softness=self._SOFT)[0])
+        g = jax.jit(jax.grad(lambda c, g: jnp.sum(make_lc(model, flux_active=c, geometry=g)[0])))
+        geo = precompute_geometry(model, **self.AR, **self.ORBIT, k=0.1, transit_softness=self._SOFT)
+        g_ref = jax.grad(lambda c: jnp.sum(make_lc(model, flux_active=c, **self.AR, **self.ORBIT, k=0.1, transit_softness=self._SOFT)[0]))
+        self._close(g(self.C, geo), g_ref(self.C))
+
+    def test_no_transit_model(self, small_model):
+        geo = precompute_geometry(small_model, **self.AR)
+        assert "transit_idx" not in geo
+        c = jnp.full(small_model["nwave"], 0.7)
+        self._close(make_lc(small_model, flux_active=c, geometry=geo)[0],
+                    make_lc(small_model, flux_active=c, **self.AR)[0])
+        with pytest.raises(ValueError, match="no transit"):
+            precompute_geometry(small_model, **self.ORBIT, k=0.1)
+
+    def test_errors(self, model):
+        with pytest.raises(ValueError, match="partial active-region"):
+            precompute_geometry(model, ar_lat=jnp.array([5.0]))
+        with pytest.raises(ValueError, match="partial orbit"):
+            precompute_geometry(model, t0=0.0)
+        with pytest.raises(ValueError, match="time-varying"):
+            precompute_geometry(model, **{**self.AR, "ar_size": jnp.ones((len(TIMES), 1))})
+        with pytest.raises(ValueError, match="traced"):
+            jax.jit(lambda s: precompute_geometry(model, **{**self.AR, "ar_size": s}))(jnp.array([8.0]))
+        geo = precompute_geometry(model, **self.AR, **self.ORBIT, k=0.1)
+        with pytest.raises(ValueError, match="precomputed AR shapes"):
+            make_lc(model, flux_active=self.C, **self.AR, geometry=geo)
+        with pytest.raises(ValueError, match="precomputed AR shapes"):
+            make_lc(model, geometry=geo)
+        with pytest.raises(ValueError, match="orbit is fixed"):
+            make_lc(model, flux_active=self.C, geometry=geo, **self.ORBIT, k=0.1)
+        with pytest.raises(ValueError, match="give k exactly"):
+            make_lc(model, flux_active=self.C, geometry=geo, k=0.1)
+        with pytest.raises(ValueError, match="transit_softness is fixed"):
+            make_lc(model, flux_active=self.C, geometry=geo, transit_softness=self._SOFT)
+        with pytest.raises(ValueError, match="time-varying flux_active"):
+            make_lc(model, flux_active=jnp.full((len(TIMES), 1, 3), 0.7), geometry=geo)
+        geo = precompute_geometry(model, **self.AR, **self.ORBIT)
+        with pytest.raises(ValueError, match="give k exactly"):
+            make_lc(model, flux_active=self.C, geometry=geo)
+        with pytest.raises(ValueError, match="ecc/omega_peri/sp_orb need"):
+            precompute_geometry(model, ecc=0.1)
+        geo = precompute_geometry(model, **self.ORBIT, k=0.1)
+        with pytest.raises(ValueError, match="time-varying active regions"):
+            make_lc(model, flux_active=self.C, geometry=geo,
+                    **{**self.AR, "ar_size": jnp.full((len(TIMES), 1), 8.0)})

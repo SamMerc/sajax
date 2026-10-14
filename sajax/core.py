@@ -19,7 +19,7 @@ from jax.scipy.special import erfc
 import interpax
 
 from .geometry import rotate_active_region
-from .planet import _compute_all_planets_mask, compute_multi_planet_sky_positions
+from .planet import _compute_all_planets_mask, _all_planets_mask_from_d2, compute_multi_planet_sky_positions
 
 _MIN_RESOLVED_PLANET_PX = 5.0
 
@@ -467,11 +467,14 @@ def _integrate_flux(
     total_pixels: int,
     compute_map:  bool = False,
     map_idx:      Optional[jnp.ndarray] = None,  # wavelength index of the map (compute_map only)
+    transit_idx:  Optional[np.ndarray] = None,   # phases the planet_mask covers (None: all)
+    ar_shapes_in: Optional[jnp.ndarray] = None,  # ar_shapes[transit_idx], if already sliced
 ) -> tuple[jnp.ndarray, Optional[jnp.ndarray]]:
     """
     Disc-integrate ``[F_quiet - sum_a D_a S_a] * [1 - M]`` over pixels for
     every (phase, wavelength), term by term, so the AR term is one GEMM and
     no (nphase, nwave, total_pixels) surface is built unless ``M`` is chromatic.
+    ``planet_mask`` may cover only the phases ``transit_idx`` (in-transit slice).
 
     Returns
     -------
@@ -485,17 +488,21 @@ def _integrate_flux(
     lc    = quiet[None, :] - spot
 
     if planet_mask is not None:
-        if planet_mask.ndim == 2:  # achromatic mask (nphase, P): two more GEMMs
-            lc = (lc
-                  - einsum("np,wp->nw", planet_mask, F_quiet_px)
-                  + einsum("nap,wap->nw", ar_shapes * planet_mask[:, None, :], D))
-        else:  # chromatic mask (nphase, nwave, P): one fused pass over that surface
+        if transit_idx is None:
+            S_in = ar_shapes
+        else:
+            S_in = ar_shapes_in if ar_shapes_in is not None else ar_shapes[transit_idx]
+        if planet_mask.ndim == 2:  # achromatic mask (nphase_in, P): two more GEMMs
+            occ = (einsum("np,wp->nw", planet_mask, F_quiet_px)
+                   - einsum("nap,wap->nw", S_in * planet_mask[:, None, :], D))
+        else:  # chromatic mask (nphase_in, nwave, P): one fused pass over that surface
             nar = ar_shapes.shape[1]
             unocculted = F_quiet_px[None, :, :]                           # (1, nwave, P)
             for a in range(nar):  # static loop keeps this a single fused expression
-                unocculted = unocculted - ar_shapes[:, a, None, :] * D[None, :, a, :]
-            occulted = planet_mask * unocculted                           # (nphase, nwave, P)
-            lc = lc - einsum("nwp,p->nw", occulted, jnp.ones(occulted.shape[-1], occulted.dtype))  # dot beats reduce on XLA:CPU
+                unocculted = unocculted - S_in[:, a, None, :] * D[None, :, a, :]
+            occulted = planet_mask * unocculted                           # (nphase_in, nwave, P)
+            occ = einsum("nwp,p->nw", occulted, jnp.ones(occulted.shape[-1], occulted.dtype))  # dot beats reduce on XLA:CPU
+        lc = lc - occ if transit_idx is None else lc.at[transit_idx].add(-occ)
 
     lc = lc / jnp.float32(total_pixels)
 
@@ -506,7 +513,7 @@ def _integrate_flux(
     arted   = F_quiet_px[map_idx][None, :] - einsum("nap,ap->np", ar_shapes, D_map)  # (nphase, P)
     if planet_mask is not None:
         M_map = planet_mask if planet_mask.ndim == 2 else planet_mask[:, map_idx]
-        arted = arted * (1.0 - M_map)
+        arted = arted * (1.0 - M_map) if transit_idx is None else arted.at[transit_idx].multiply(1.0 - M_map)
     return lc, arted
 
 
@@ -514,9 +521,51 @@ def _integrate_flux(
 # 5. All-phases computation -- the factored pixel integral
 # ---------------------------------------------------------------------------
 
+def _ar_shapes_all(all_ar_carts, arsize_rads, ar_smoothness, x_disc, y_disc, star_pixel_rad):
+    """AR shapes at every phase, (nphase, nar, total_pixels)."""
+    return vmap(
+        vmap(
+            lambda cart, sr, sm: _compute_ar_shape(
+                x_disc, y_disc, star_pixel_rad,
+                cart[0], cart[1], cart[2], sr, sm,
+            ),
+            in_axes=(0, 0, 0),
+        ),
+        in_axes=(0, None, None),
+    )(all_ar_carts, arsize_rads, ar_smoothness)
+
+
+def _planet_mask_all(planet_xyz_all, k, k_achromatic, x_disc, y_disc, star_pixel_rad, transit_softness):
+    """Planet mask at every phase: (nphase, P) for an achromatic k, else (nphase, nwave, P)."""
+    if k_achromatic:
+        k_planet = k[:, 0]                                            # (nplanet,)
+        return vmap(
+            lambda xyz: _compute_all_planets_mask(
+                x_disc, y_disc, star_pixel_rad, xyz, k_planet, transit_softness,
+            )
+        )(planet_xyz_all)
+    return vmap(
+        lambda xyz: vmap(
+            lambda k_wl: _compute_all_planets_mask(
+                x_disc, y_disc, star_pixel_rad, xyz, k_wl, transit_softness,
+            ),
+            in_axes=1,
+        )(k)
+    )(planet_xyz_all)
+
+
+def _planet_mask_from_geometry(geometry, k, k_achromatic, transit_softness):
+    """In-transit planet mask from precomputed squared distances for a per-call (possibly traced) k."""
+    d2, Z = geometry["d2_in"], geometry["z_in"]                       # (nphase_in, nplanet, P), (nphase_in, nplanet)
+    one = lambda d2_t, z_t, k_t: _all_planets_mask_from_d2(d2_t, z_t, k_t, transit_softness)
+    if k_achromatic:
+        return vmap(one, in_axes=(0, 0, None))(d2, Z, k[:, 0])        # (nphase_in, P)
+    return vmap(lambda d2_t, z_t: vmap(one, in_axes=(None, None, 1))(d2_t, z_t, k))(d2, Z)  # (nphase_in, nwave, P)
+
+
 def _compute_all_phases(
-    all_ar_carts:    jnp.ndarray,   # (nphase, nar, 3)
-    planet_xyz_all:  jnp.ndarray,   # (nphase, nplanet, 3)
+    all_ar_carts:    Optional[jnp.ndarray],   # (nphase, nar, 3); None when ar_shapes is given
+    planet_xyz_all:  Optional[jnp.ndarray],   # (nphase, nplanet, 3); None when planet_mask is given
     *,
     wavelength:          jnp.ndarray,
     flux_quiet:          jnp.ndarray,
@@ -544,29 +593,26 @@ def _compute_all_phases(
     compute_map:         bool = False,
     has_planet:          bool = True,
     k_achromatic:        bool = False,
+    ar_shapes:           Optional[jnp.ndarray] = None,  # precomputed (nphase, nar, P)
+    ar_shapes_in:        Optional[jnp.ndarray] = None,  # precomputed ar_shapes[transit_idx]
+    planet_mask:         Optional[jnp.ndarray] = None,  # precomputed, over transit_idx phases
+    transit_idx:         Optional[np.ndarray] = None,   # phases planet_mask covers (None: all)
 ) -> tuple[jnp.ndarray, Optional[jnp.ndarray]]:
     """
     Light curve at every phase and wavelength via ``_integrate_flux``.
 
     ``has_planet=False`` skips the occultation mask; ``k_achromatic=True``
     builds it once per phase from ``k[:, 0]`` instead of once per (phase,
-    wavelength). Both are static, shape-derived choices.
+    wavelength). Both are static, shape-derived choices. ``ar_shapes`` /
+    ``planet_mask`` from ``precompute_geometry`` replace the per-call builds.
 
     Returns
     -------
     lc_raw    : (nphase, nwave)
     star_maps : (nphase, n, n), or None when compute_map=False
     """
-    ar_shapes = vmap(  # (nphase, nar, total_pixels)
-        vmap(
-            lambda cart, sr, sm: _compute_ar_shape(
-                x_disc, y_disc, star_pixel_rad,
-                cart[0], cart[1], cart[2], sr, sm,
-            ),
-            in_axes=(0, 0, 0),
-        ),
-        in_axes=(0, None, None),
-    )(all_ar_carts, arsize_rads, ar_smoothness)
+    if ar_shapes is None:
+        ar_shapes = _ar_shapes_all(all_ar_carts, arsize_rads, ar_smoothness, x_disc, y_disc, star_pixel_rad)
 
     F_quiet_px, D = vmap(  # once per wavelength; (nar, nwave, ...) inputs vmap on axis=1
         functools.partial(
@@ -584,29 +630,13 @@ def _compute_all_phases(
     )(wavelength, ld_coeffs_quiet, ld_coeffs_active, I_profile_quiet, I_profile_active)
     # F_quiet_px: (nwave, P);  D: (nwave, nar, P)
 
-    if not has_planet:
-        planet_mask = None
-    elif k_achromatic:
-        k_planet = k[:, 0]                                            # (nplanet,)
-        planet_mask = vmap(
-            lambda xyz: _compute_all_planets_mask(
-                x_disc, y_disc, star_pixel_rad, xyz, k_planet, transit_softness,
-            )
-        )(planet_xyz_all)                                             # (nphase, P)
-    else:
-        planet_mask = vmap(
-            lambda xyz: vmap(
-                lambda k_wl: _compute_all_planets_mask(
-                    x_disc, y_disc, star_pixel_rad, xyz, k_wl, transit_softness,
-                ),
-                in_axes=1,
-            )(k)
-        )(planet_xyz_all)                                             # (nphase, nwave, P)
+    if has_planet and planet_mask is None:
+        planet_mask = _planet_mask_all(planet_xyz_all, k, k_achromatic, x_disc, y_disc, star_pixel_rad, transit_softness)
 
     map_idx = jnp.argmin(jnp.abs(wavelength - plot_map_wavelength)) if compute_map else None
     lc_raw, arted = _integrate_flux(
         ar_shapes, planet_mask, F_quiet_px, D, total_pixels,
-        compute_map=compute_map, map_idx=map_idx,
+        compute_map=compute_map, map_idx=map_idx, transit_idx=transit_idx, ar_shapes_in=ar_shapes_in,
     )
 
     if not compute_map:
@@ -893,6 +923,56 @@ def _k_is_achromatic(k, nplanet: int, nwave: int) -> bool:
             return False               # legacy single-planet chromatic depth
         return shape[0] == nplanet
     return False                       # explicit (nplanet, nwave)
+
+
+def _check_ar_shape_params(ar_size, ar_smoothness, nar):
+    """Broadcast a shared ``ar_smoothness`` to ``(nar,)``; validate concrete ``ar_size``/``ar_smoothness``."""
+    if ar_smoothness.size == 1:
+        ar_smoothness = jnp.broadcast_to(ar_smoothness, (nar,))
+    elif ar_smoothness.shape != (nar,):
+        raise ValueError(
+            f"ar_smoothness shape mismatch: got shape {ar_smoothness.shape} "
+            f"but expected a scalar or shape ({nar},)."
+        )
+    if not isinstance(ar_smoothness, jax.core.Tracer) and bool(jnp.any(ar_smoothness < 1)):
+        raise ValueError(
+            f"ar_smoothness must be >= 1 (got {ar_smoothness}); 1 is a "
+            "Gaussian AR boundary and larger values sharpen it towards a "
+            "top-hat, but values below 1 do not correspond to a physically "
+            "meaningful AR shape."
+        )
+    if not isinstance(ar_size, jax.core.Tracer) and bool(jnp.any(ar_size < 0)):
+        raise ValueError(
+            f"ar_size must be >= 0 (got {ar_size}); ar_size is an "
+            "angular radius in degrees and cannot be negative."
+        )
+    return ar_smoothness
+
+
+def _ar_carts_all_phases(model, ar_lat, ar_long):
+    """Rotated Cartesian AR positions at every (oversampled) phase, (nphase, nar, 3)."""
+    spr, inc_star = model["star_pixel_rad"], model["inc_star"]
+    ar_lat_rad, ar_long_rad = jnp.deg2rad(ar_lat), jnp.deg2rad(ar_long)
+    ar_cart = jnp.stack([
+        spr * jnp.sin(ar_long_rad) * jnp.cos(ar_lat_rad),
+        spr * jnp.sin(ar_lat_rad),
+        spr * jnp.cos(ar_long_rad) * jnp.cos(ar_lat_rad),
+    ], axis=-1)   # (nar, 3)
+    return vmap(lambda phase_deg: vmap(lambda cart: rotate_active_region(cart, phase_deg, inc_star))(ar_cart))(model["phases_rot"])
+
+
+def _planet_orbit(model, t0, period, a_over_rstar, inclination, ecc, omega_peri, sp_orb):
+    """Planet sky positions (nphase, nplanet, 3) and nplanet from per-call orbital parameters."""
+    _defaults  = model["transit_params"]
+    ecc_val        = ecc        if ecc        is not None else _defaults.get("ecc", 0.0)
+    omega_peri_val = omega_peri if omega_peri is not None else _defaults.get("omega_peri", 0.0)
+    sp_orb_deg     = sp_orb     if sp_orb     is not None else _defaults.get("sp_orb", 0.0)
+    sp_orb_val     = jnp.deg2rad(sp_orb_deg)   # sp_orb is given in degrees; planet.py takes radians
+    planet_xyz_all = compute_multi_planet_sky_positions(
+        model["times_oversampled"], t0 - model["t_ref"], period, a_over_rstar, inclination,
+        ecc_val, omega_peri_val, sp_orb_val,
+    )   # t0 shifted by t_ref like times_oversampled was in build_system
+    return planet_xyz_all, jnp.atleast_1d(jnp.asarray(t0)).shape[-1]
 
 
 def build_system(
@@ -1217,6 +1297,140 @@ def build_system(
     return model
 
 
+@jax.tree_util.register_pytree_node_class
+class Geometry(dict):
+    """``precompute_geometry`` output: a dict pytree whose Python scalars stay static under ``jit``."""
+
+    def tree_flatten(self):
+        keys = tuple(sorted(k for k, v in self.items() if isinstance(v, (jnp.ndarray, np.ndarray))))
+        static = tuple(sorted((k, v) for k, v in self.items() if k not in keys))
+        return tuple(self[k] for k in keys), (keys, static)
+
+    @classmethod
+    def tree_unflatten(cls, aux, children):
+        keys, static = aux
+        return cls({**dict(zip(keys, children)), **dict(static)})
+
+
+def precompute_geometry(
+    model: dict,
+    *,
+    ar_lat: Optional[np.ndarray] = None,
+    ar_long: Optional[np.ndarray] = None,
+    ar_size: Optional[np.ndarray] = None,
+    ar_smoothness: Optional[np.ndarray] = None,
+    t0: Optional[float | np.ndarray] = None,
+    period: Optional[float | np.ndarray] = None,
+    a_over_rstar: Optional[float | np.ndarray] = None,
+    inclination: Optional[float | np.ndarray] = None,
+    ecc: Optional[float | np.ndarray] = None,
+    omega_peri: Optional[float | np.ndarray] = None,
+    sp_orb: Optional[float | np.ndarray] = None,
+    k: Optional[float | np.ndarray] = None,
+    transit_softness: float = 0.0,
+    k_max: float = 0.5,
+) -> dict:
+    """
+    Precompute the geometry that stays fixed across ``make_lc`` calls, for the
+    ``geometry=`` argument of ``make_lc``.
+
+    Call it once, outside ``jit``, with *concrete* values; then pass the
+    returned dict to ``make_lc(model, geometry=...)`` as an argument of the
+    jitted function (not by closure). Everything it holds is built on the
+    (oversampled) phase grid of ``model``:
+
+    - ``ar_lat``/``ar_long``/``ar_size``/``ar_smoothness`` (all or none, static
+      shapes only): the AR shapes, so ``make_lc`` then takes only
+      ``flux_active`` for the active regions.
+    - If ``model`` has a transit: the in-transit phase indices and the planet
+      mask over those phases. With no orbital arguments this is the model's
+      build-time transit (its ``k`` unless ``k`` is given here). With
+      ``t0``/``period``/``a_over_rstar``/``inclination`` (all or none;
+      ``ecc``/``omega_peri``/``sp_orb`` optional) and ``k``, that orbit; with
+      ``k=None``, only the squared pixel-to-planet distances are stored so
+      ``k`` is still passed (and may be traced) per call, with ``k_max``
+      bounding it to size the in-transit window. ``transit_softness`` is
+      fixed here.
+
+    Memory: ``nphase * nar * total_pixels`` floats for the AR shapes and
+    ``nphase_in * nplanet * total_pixels`` (times ``nwave`` for a chromatic
+    ``k``) for the planet terms.
+
+    Returns
+    -------
+    ``Geometry`` (a dict pytree) with ``ar_shapes``/``ar_shapes_in``/``nar`` and/or ``transit_idx``/
+    ``nplanet``/``transit_softness`` plus ``planet_mask_in``/``k``/
+    ``k_achromatic`` (fixed ``k``) or ``d2_in``/``z_in`` (free ``k``).
+    """
+    _args = dict(ar_lat=ar_lat, ar_long=ar_long, ar_size=ar_size, ar_smoothness=ar_smoothness,
+                 t0=t0, period=period, a_over_rstar=a_over_rstar, inclination=inclination,
+                 ecc=ecc, omega_peri=omega_peri, sp_orb=sp_orb, k=k)
+    _traced = [n for n, v in _args.items() if isinstance(v, jax.core.Tracer)]
+    if _traced:
+        raise ValueError(
+            f"precompute_geometry: {_traced} are traced; it takes concrete values only "
+            "(call it once outside jit and pass the result to make_lc(geometry=...))."
+        )
+    x_disc, y_disc, spr = model["x_disc"], model["y_disc"], model["star_pixel_rad"]
+    nwave = model["nwave"]
+    geometry = Geometry()
+
+    _ar_args = dict(ar_lat=ar_lat, ar_long=ar_long, ar_size=ar_size, ar_smoothness=ar_smoothness)
+    _ar_given = [n for n, v in _ar_args.items() if v is not None]
+    if _ar_given and len(_ar_given) != len(_ar_args):
+        raise ValueError(
+            f"precompute_geometry: partial active-region geometry given ({sorted(_ar_given)}); "
+            f"provide all of {list(_ar_args)} or none."
+        )
+    if _ar_given:
+        ar_lat, ar_long, ar_size, ar_smoothness = (jnp.atleast_1d(jnp.asarray(v)) for v in (ar_lat, ar_long, ar_size, ar_smoothness))
+        if any(v.ndim != 1 for v in (ar_lat, ar_long, ar_size, ar_smoothness)):
+            raise ValueError("precompute_geometry: time-varying active-region parameters cannot be precomputed.")
+        nar = ar_lat.shape[0]
+        ar_smoothness = _check_ar_shape_params(ar_size, ar_smoothness, nar)
+        geometry["ar_shapes"] = _ar_shapes_all(_ar_carts_all_phases(model, ar_lat, ar_long), jnp.deg2rad(ar_size),
+                                               ar_smoothness, x_disc, y_disc, spr)
+        geometry["nar"] = nar
+
+    _orbit_args = dict(t0=t0, period=period, a_over_rstar=a_over_rstar, inclination=inclination)
+    _orbit_given = [n for n, v in _orbit_args.items() if v is not None]
+    if _orbit_given and len(_orbit_given) != len(_orbit_args):
+        raise ValueError(
+            f"precompute_geometry: partial orbit given ({sorted(_orbit_given)}); "
+            f"provide all of {list(_orbit_args)} or none (the model's build-time orbit)."
+        )
+    if (_orbit_given or k is not None) and not model.get("has_transit", False):
+        raise ValueError("precompute_geometry: transit parameters were given, but this model has no transit attached.")
+    if not model.get("has_transit", False):
+        return geometry
+    if _orbit_given:
+        planet_xyz_all, nplanet = _planet_orbit(model, t0, period, a_over_rstar, inclination, ecc, omega_peri, sp_orb)
+    else:
+        if any(v is not None for v in (ecc, omega_peri, sp_orb)):
+            raise ValueError("precompute_geometry: ecc/omega_peri/sp_orb need t0/period/a_over_rstar/inclination too.")
+        planet_xyz_all, nplanet = model["planet_xyz"], model["nplanet"]
+        k = model["k"] if k is None else k   # the model's static transit as-is, like make_lc without orbit arguments
+    xyz = np.asarray(planet_xyz_all)                                  # (nphase, nplanet, 3)
+    k_bound = float(np.max(np.asarray(k))) if k is not None else float(k_max)
+    window = 1.0 + k_bound + 8.0 * float(transit_softness)             # sigmoid tail < 3e-4 beyond it
+    in_transit = (xyz[..., 2] > 0.0) & (np.hypot(xyz[..., 0], xyz[..., 1]) < window)
+    idx = np.flatnonzero(np.any(in_transit, axis=1)).astype(np.int32)
+    geometry.update(transit_idx=idx, nplanet=nplanet, transit_softness=float(transit_softness))
+    if "ar_shapes" in geometry:
+        geometry["ar_shapes_in"] = geometry["ar_shapes"][idx]
+    xyz_in = planet_xyz_all[idx]                                       # (nphase_in, nplanet, 3)
+    if k is not None:
+        k_achromatic = _k_is_achromatic(k, nplanet, nwave)
+        k_dense = _prepare_transit_k(k, nplanet, nwave)
+        geometry["planet_mask_in"] = _planet_mask_all(xyz_in, k_dense, k_achromatic, x_disc, y_disc, spr, float(transit_softness))
+        geometry.update(k=k_dense, k_achromatic=k_achromatic)
+    else:
+        xn, yn = x_disc / spr, y_disc / spr
+        geometry["d2_in"] = (xn - xyz_in[:, :, 0, None]) ** 2 + (yn - xyz_in[:, :, 1, None]) ** 2  # (nphase_in, nplanet, P)
+        geometry["z_in"] = xyz_in[:, :, 2]
+    return geometry
+
+
 def make_lc(
     model: dict,
     flux_active: Optional[jnp.ndarray] = None,
@@ -1237,6 +1451,7 @@ def make_lc(
     k: Optional[float | jnp.ndarray] = None,
     transit_softness: float = 0.0,
     compute_map: bool = False,
+    geometry: Optional[Geometry] = None,
 ) -> tuple:
     """
     Evaluate the light curve for a given set of active region and planetary parameters.
@@ -1371,6 +1586,14 @@ def make_lc(
         (``star_maps`` below) is useful for plotting/diagnostics but constructing
         it roughly doubles this function's wall-clock cost. Thus, it is set to False
         by default. Users can set it to True when they want the map.
+    geometry : dict, optional
+        Output of ``precompute_geometry`` for the parts of the geometry that
+        stay fixed across calls. With precomputed AR shapes, give
+        ``flux_active`` only (no ``ar_lat``/``ar_long``/``ar_size``/
+        ``ar_smoothness``); with a precomputed transit, give no orbital
+        parameters, and ``k`` only if it was left free there.
+        ``transit_softness`` then comes from ``precompute_geometry``.
+        Time-varying active regions are not supported with ``geometry``.
 
     Returns
     -------
@@ -1386,11 +1609,19 @@ def make_lc(
                     (maps are from the *first* sub-exposure of each phase
                     when oversampling is active)
     """
+    geometry = geometry or {}
+    geo_ar, geo_planet = "ar_shapes" in geometry, "transit_idx" in geometry
+
     # ---- AR parameters: all-or-nothing ------------------------------------
     _ar_args = dict(flux_active=flux_active, ar_lat=ar_lat, ar_long=ar_long,
                      ar_size=ar_size, ar_smoothness=ar_smoothness)
     _ar_given = {name: v for name, v in _ar_args.items() if v is not None}
-    if _ar_given and len(_ar_given) != len(_ar_args):
+    if geo_ar and set(_ar_given) != {"flux_active"}:
+        raise ValueError(
+            "make_lc: with precomputed AR shapes in `geometry`, give flux_active and "
+            f"none of ar_lat/ar_long/ar_size/ar_smoothness (got {sorted(_ar_given)})."
+        )
+    if not geo_ar and _ar_given and len(_ar_given) != len(_ar_args):
         _missing = [name for name in _ar_args if name not in _ar_given]
         raise ValueError(
             "make_lc: partial active-region parameters given "
@@ -1409,14 +1640,16 @@ def make_lc(
         ar_smoothness = jnp.array([1.0])
 
     flux_active   = jnp.atleast_1d(jnp.asarray(flux_active))
-    ar_lat        = jnp.atleast_1d(jnp.asarray(ar_lat))
-    ar_long       = jnp.atleast_1d(jnp.asarray(ar_long))
-    ar_size       = jnp.atleast_1d(jnp.asarray(ar_size))
-    ar_smoothness = jnp.atleast_1d(jnp.asarray(ar_smoothness))
-
-    # Determine number of active regions from the trailing axis, so this
-    # works whether or not a parameter carries an extra leading time axis
-    nar   = ar_lat.shape[-1]
+    if geo_ar:
+        nar = geometry["nar"]
+        if flux_active.ndim == 3:
+            raise ValueError("make_lc: time-varying flux_active cannot be combined with `geometry`.")
+    else:
+        ar_lat        = jnp.atleast_1d(jnp.asarray(ar_lat))
+        ar_long       = jnp.atleast_1d(jnp.asarray(ar_long))
+        ar_size       = jnp.atleast_1d(jnp.asarray(ar_size))
+        ar_smoothness = jnp.atleast_1d(jnp.asarray(ar_smoothness))
+        nar = ar_lat.shape[-1]   # trailing axis, whether or not a leading time axis is present
     nwave = model["nwave"]
 
     spr             = model["star_pixel_rad"]
@@ -1432,7 +1665,7 @@ def make_lc(
     # No extra axis on any of them (today's usage) takes the usual code path 
     # so it costs nothing extra. ld_coeffs_active/ I_profile_active do not support
     # time evolution and stay fixed.
-    ar_time_varying = (
+    ar_time_varying = not geo_ar and (
         ar_lat.ndim == 2 or ar_long.ndim == 2 or ar_size.ndim == 2
         or ar_smoothness.ndim == 2 or flux_active.ndim == 3
     )
@@ -1486,26 +1719,8 @@ def make_lc(
                 f"flux_active must be 1D or 2D, got shape {flux_active.shape}."
             )
 
-        # Broadcast a shared ar_smoothness (scalar or size-1) to all ARs if only one smoothness value is provided
-        if ar_smoothness.size == 1:
-            ar_smoothness = jnp.broadcast_to(ar_smoothness, (nar,))
-        elif ar_smoothness.shape != (nar,):
-            raise ValueError(
-                f"ar_smoothness shape mismatch: got shape {ar_smoothness.shape} "
-                f"but expected a scalar or shape ({nar},)."
-            )
-        if not isinstance(ar_smoothness, jax.core.Tracer) and bool(jnp.any(ar_smoothness < 1)):
-            raise ValueError(
-                f"ar_smoothness must be >= 1 (got {ar_smoothness}); 1 is a "
-                "Gaussian AR boundary and larger values sharpen it towards a "
-                "top-hat, but values below 1 do not correspond to a physically "
-                "meaningful AR shape."
-            )
-        if not isinstance(ar_size, jax.core.Tracer) and bool(jnp.any(ar_size < 0)):
-            raise ValueError(
-                f"ar_size must be >= 0 (got {ar_size}); ar_size is an "
-                "angular radius in degrees and cannot be negative."
-            )
+        if not geo_ar:
+            ar_smoothness = _check_ar_shape_params(ar_size, ar_smoothness, nar)
         if not isinstance(flux_active, jax.core.Tracer) and bool(jnp.any(flux_active < 0)):
             raise ValueError(
                 f"flux_active must be >= 0 (got min {float(jnp.min(flux_active))}); "
@@ -1710,26 +1925,7 @@ def make_lc(
                 f"but expected ({nar}, {nwave}, {n_mu_pts})."
             )
 
-    if not ar_time_varying:
-        # ---- Static path: build the AR's Cartesian position once --
-        ar_lat_rad  = jnp.deg2rad(ar_lat)
-        ar_long_rad = jnp.deg2rad(ar_long)
-
-        ar_cart = jnp.stack([
-            spr * jnp.sin(ar_long_rad) * jnp.cos(ar_lat_rad),
-            spr * jnp.sin(ar_lat_rad),
-            spr * jnp.cos(ar_long_rad) * jnp.cos(ar_lat_rad),
-        ], axis=-1)   # (nar, 3)
-
-        # phases_rot in the model is already oversampled if oversample > 1
-        def _rotate_ars_at_phase(phase_deg):
-            return vmap(
-                lambda cart: rotate_active_region(cart, phase_deg, inc_star)
-            )(ar_cart)
-
-        all_ar_carts = vmap(_rotate_ars_at_phase)(
-            model["phases_rot"]
-        )   # (nphase_compute, nar, 3)
+    all_ar_carts = None if (geo_ar or ar_time_varying) else _ar_carts_all_phases(model, ar_lat, ar_long)
 
     # ---- Transit parameters: all-or-nothing (required 5), ecc/omega_peri
     # only meaningful alongside them -------------------------------------
@@ -1738,7 +1934,20 @@ def make_lc(
     _transit_optional  = dict(ecc=ecc, omega_peri=omega_peri, sp_orb=sp_orb)
     _transit_given = {name: v for name, v in {**_transit_required, **_transit_optional}.items()
                        if v is not None}
-    if _transit_given:
+    if geo_planet:
+        if ar_time_varying:
+            raise ValueError("make_lc: time-varying active regions cannot be combined with `geometry`.")
+        if set(_transit_given) - {"k"}:
+            raise ValueError(
+                "make_lc: the orbit is fixed by `geometry`; give no "
+                f"t0/period/a_over_rstar/inclination/ecc/omega_peri/sp_orb (got {sorted(_transit_given)})."
+            )
+        if ("planet_mask_in" in geometry) == (k is not None):
+            raise ValueError("make_lc: give k exactly when precompute_geometry was called without it.")
+        if transit_softness not in (0.0, geometry["transit_softness"]):
+            raise ValueError("make_lc: transit_softness is fixed by `geometry`; pass the same value or omit it.")
+        _transit_given = {}
+    elif _transit_given:
         _missing_required = [name for name, v in _transit_required.items() if v is None]
         if _missing_required:
             raise ValueError(
@@ -1755,7 +1964,19 @@ def make_lc(
             )
 
     # ---- Planet positions (if a transit model is present) ---------------
-    if _transit_given:
+    planet_mask = None
+    if geo_planet:
+        planet_xyz_all   = None
+        nplanet          = geometry["nplanet"]
+        transit_softness = geometry["transit_softness"]
+        has_planet       = True
+        if k is None:
+            k_val, k_achromatic, planet_mask = geometry["k"], geometry["k_achromatic"], geometry["planet_mask_in"]
+        else:
+            k_val        = _prepare_transit_k(k, nplanet, nwave)
+            k_achromatic = _k_is_achromatic(k, nplanet, nwave)
+            planet_mask  = _planet_mask_from_geometry(geometry, k_val, k_achromatic, transit_softness)
+    elif _transit_given:
         # Dynamic path: recompute positions from (possibly traced) orbital
         # parameters every call, exactly like ar_cart is recomputed from
         # ar_lat/ar_long every call. k_val is deliberately left as-is here
@@ -1766,19 +1987,7 @@ def make_lc(
         # changed nplanet via t0, the stale-length fallback array below will
         # make compute_multi_planet_sky_positions raise a clear shape error;
         # override ecc/omega_peri/sp_orb too when changing nplanet dynamically.
-        _defaults  = model["transit_params"]
-        ecc_val        = ecc        if ecc        is not None else _defaults.get("ecc", 0.0)
-        omega_peri_val = omega_peri if omega_peri is not None else _defaults.get("omega_peri", 0.0)
-        sp_orb_deg     = sp_orb     if sp_orb     is not None else _defaults.get("sp_orb", 0.0)
-        sp_orb_val     = jnp.deg2rad(sp_orb_deg)   # sp_orb is given in degrees; planet.py takes radians
-        # model["times_oversampled"] was already shifted by model["t_ref"] in
-        # build_system; t0 (possibly traced/sampled here) must be shifted by
-        # the same constant so time - t_peri still cancels correctly.
-        planet_xyz_all = compute_multi_planet_sky_positions(
-            model["times_oversampled"], t0 - model["t_ref"], period, a_over_rstar, inclination,
-            ecc_val, omega_peri_val, sp_orb_val,
-        )   # (nphase_compute, nplanet, 3)
-        nplanet = jnp.atleast_1d(jnp.asarray(t0)).shape[-1]
+        planet_xyz_all, nplanet = _planet_orbit(model, t0, period, a_over_rstar, inclination, ecc, omega_peri, sp_orb)
         k_val = k
         has_planet   = True
         k_achromatic = _k_is_achromatic(k, nplanet, nwave)
@@ -1827,7 +2036,7 @@ def make_lc(
             vel_col             = model["vel_col"],
             star_pixel_rad      = spr,
             total_pixels        = model["total_pixels"],
-            arsize_rads         = jnp.deg2rad(ar_size),
+            arsize_rads         = None if geo_ar else jnp.deg2rad(ar_size),
             ar_smoothness       = ar_smoothness,
             k                   = k_val,
             ld_mode             = model["ld_mode"],
@@ -1838,6 +2047,10 @@ def make_lc(
             compute_map         = compute_map,
             has_planet          = has_planet,
             k_achromatic        = k_achromatic,
+            ar_shapes           = geometry.get("ar_shapes"),
+            ar_shapes_in        = geometry.get("ar_shapes_in"),
+            planet_mask         = planet_mask,
+            transit_idx         = geometry.get("transit_idx"),
         )
     else:
         lc_raw, star_maps = _compute_all_phases_evolving(
