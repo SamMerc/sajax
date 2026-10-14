@@ -401,6 +401,15 @@ def _evaluate_ldc(
 _DOT_PRECISION = jax.lax.Precision.HIGHEST  # true float32 GEMMs (GPU default is TF32)
 
 
+def _doppler_shifted(wavelength_target, vel_col, wavelength_grid, spectra):
+    """``spectra`` (nwave,) or (nar, nwave) resampled at every column's Doppler-shifted wavelength: (n,) or (nar, n).
+    Velocity depends on x alone (see build_stellar_grid), so resample once per column, not per pixel."""
+    query_wavelength_col = wavelength_target * (1.0 - vel_col)  # (n,)
+    if spectra.ndim == 1:
+        return jnp.interp(query_wavelength_col, wavelength_grid, spectra)
+    return vmap(lambda spec: jnp.interp(query_wavelength_col, wavelength_grid, spec))(spectra)
+
+
 def _quiet_pixel_flux_at_wavelength(
     # --- vmapped: one scalar/slice per wavelength ---
     wavelength_target:    float,
@@ -414,18 +423,11 @@ def _quiet_pixel_flux_at_wavelength(
     col_idx:         jnp.ndarray, # (total_pixels,) int
     vel_col:         jnp.ndarray, # (n,)
     ld_mode:        LdMode,
-) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Quiet-photosphere flux per pixel at one wavelength (Doppler x LD); also returns the per-column query wavelengths."""
-    # ---- Per-column Doppler-shifted spectral lookup ----------------------
-    # Velocity depends on x alone (see build_stellar_grid), so resample once per column, not per pixel.
-    query_wavelength_col = wavelength_target * (1.0 - vel_col)  # (n,)
-
-    F_quiet_col   = jnp.interp(query_wavelength_col, wavelength_grid, flux_quiet)  # (n,)
-    F_quiet_local = F_quiet_col[col_idx]                                          # (total_pixels,)
-    ldc_quiet = _evaluate_ldc(
-        mu_disc, ld_coeffs_quiet_wl, I_prof_quiet_wl, mu_profile_pts, ld_mode,
-    )  # (total_pixels,)
-    return query_wavelength_col, F_quiet_local * ldc_quiet
+) -> jnp.ndarray:
+    """Quiet-photosphere flux per pixel at one wavelength (Doppler x LD), (total_pixels,)."""
+    F_quiet_local = _doppler_shifted(wavelength_target, vel_col, wavelength_grid, flux_quiet)[col_idx]
+    ldc_quiet = _evaluate_ldc(mu_disc, ld_coeffs_quiet_wl, I_prof_quiet_wl, mu_profile_pts, ld_mode)
+    return F_quiet_local * ldc_quiet
 
 
 def _pixel_flux_at_wavelength(
@@ -454,16 +456,12 @@ def _pixel_flux_at_wavelength(
     D          : (nar, total_pixels)  F_quiet_px * (1 - C_a), flux removed per
                                       pixel by AR ``a`` at full coverage
     """
-    query_wavelength_col, F_quiet_px = _quiet_pixel_flux_at_wavelength(
+    F_quiet_px = _quiet_pixel_flux_at_wavelength(
         wavelength_target, ld_coeffs_quiet_wl, I_prof_quiet_wl,
         wavelength_grid=wavelength_grid, flux_quiet=flux_quiet, mu_disc=mu_disc,
         mu_profile_pts=mu_profile_pts, col_idx=col_idx, vel_col=vel_col, ld_mode=ld_mode,
     )
-
-    F_active_col = vmap(
-        lambda spec: jnp.interp(query_wavelength_col, wavelength_grid, spec)
-    )(flux_active)                                   # (nar, n)
-    F_active_local = F_active_col[:, col_idx]        # (nar, total_pixels)
+    F_active_local = _doppler_shifted(wavelength_target, vel_col, wavelength_grid, flux_active)[:, col_idx]  # (nar, total_pixels)
 
     # ---- Limb darkening (own law coefficients per AR) --------------------
     ldc_active = vmap(
@@ -514,9 +512,8 @@ def _column_terms_at_wavelength(
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Column factors of the pixel terms: F_quiet(p) = sum_j Gq[(j, c_p)] B_j(mu_p) and D_a likewise with GD[a];
     Gq is ((n_coeffs + 1) * n,), GD is (nar, (n_coeffs + 1) * n)."""
-    query_wavelength_col = wavelength_target * (1.0 - vel_col)
-    F_quiet_col  = jnp.interp(query_wavelength_col, wavelength_grid, flux_quiet)                         # (n,)
-    F_active_col = vmap(lambda spec: jnp.interp(query_wavelength_col, wavelength_grid, spec))(flux_active)  # (nar, n)
+    F_quiet_col  = _doppler_shifted(wavelength_target, vel_col, wavelength_grid, flux_quiet)             # (n,)
+    F_active_col = _doppler_shifted(wavelength_target, vel_col, wavelength_grid, flux_active)            # (nar, n)
     c_quiet  = jnp.concatenate([jnp.ones(1, ld_coeffs_quiet_wl.dtype), ld_coeffs_quiet_wl])             # (nb,)
     c_active = jnp.concatenate([jnp.ones((ld_coeffs_active_wl.shape[0], 1), ld_coeffs_active_wl.dtype), ld_coeffs_active_wl], axis=-1)
     Gq = c_quiet[:, None] * F_quiet_col[None, :]                                                         # (nb, n)
@@ -531,23 +528,22 @@ def _integrate_flux(
     D:            Optional[jnp.ndarray], # (nwave, nar, total_pixels); None for a quiet star
     total_pixels: int,
     nphase:       int,
+    geometry:     dict,                          # precompute_geometry output (may be empty), see there for keys
     compute_map:  bool = False,
     map_idx:      Optional[jnp.ndarray] = None,  # wavelength index of the map (compute_map only)
-    transit_idx:  Optional[np.ndarray] = None,   # phases the planet_mask covers (None: all)
-    ar_shapes_in: Optional[jnp.ndarray] = None,  # ar_shapes[transit_idx], if already sliced
-    columns:      Optional[dict] = None,         # precomputed column sums (basis_sum, H_S, H_M, H_SM)
-    Gq:           Optional[jnp.ndarray] = None,  # (nwave, K) column terms, with columns
+    use_columns:  bool = False,                  # contract the geometry's column sums against Gq / GD
+    Gq:           Optional[jnp.ndarray] = None,  # (nwave, K) column terms
     GD:           Optional[jnp.ndarray] = None,  # (nwave, nar, K)
 ) -> tuple[jnp.ndarray, Optional[jnp.ndarray]]:
     """
     Disc-integrate ``[F_quiet - sum_a D_a S_a] * [1 - M]`` over pixels for
     every (phase, wavelength), term by term, so the AR term is one GEMM and
     no (nphase, nwave, total_pixels) surface is built unless ``M`` is chromatic.
-    ``planet_mask`` may cover only the phases ``transit_idx`` (in-transit slice).
+    ``planet_mask`` may cover only the phases ``geometry["transit_idx"]``.
     ``ar_shapes=None`` (quiet star) drops the AR terms altogether. With
-    ``columns`` the quiet and spot terms (and the planet terms when ``H_M`` is
-    present) contract precomputed column sums against ``Gq``/``GD`` instead of
-    pixel arrays, so ``F_quiet_px``/``D`` may be None.
+    ``use_columns`` the quiet and spot terms (and the planet terms when the
+    geometry holds ``H_M``) contract its column sums against ``Gq``/``GD``
+    instead of pixel arrays, so ``F_quiet_px``/``D`` may be None.
 
     Returns
     -------
@@ -556,15 +552,15 @@ def _integrate_flux(
     """
     einsum = functools.partial(jnp.einsum, precision=_DOT_PRECISION)
 
-    use_cols = columns is not None
-    has_ar = ar_shapes is not None or (use_cols and "H_S" in columns)
-    quiet = einsum("wk,k->w", Gq, columns["basis_sum"]) if use_cols else jnp.sum(F_quiet_px, axis=-1)  # (nwave,)
+    transit_idx = geometry.get("transit_idx")
+    has_ar = ar_shapes is not None or (use_columns and "H_S" in geometry)
+    quiet = einsum("wk,k->w", Gq, geometry["basis_sum"]) if use_columns else jnp.sum(F_quiet_px, axis=-1)  # (nwave,)
     lc    = jnp.broadcast_to(quiet[None, :], (nphase, quiet.shape[0]))
     if has_ar:  # spot term, (nphase, nwave)
-        lc = lc - (einsum("nak,wak->nw", columns["H_S"], GD) if use_cols else einsum("nap,wap->nw", ar_shapes, D))
+        lc = lc - (einsum("nak,wak->nw", geometry["H_S"], GD) if use_columns else einsum("nap,wap->nw", ar_shapes, D))
 
-    if use_cols and "H_M" in columns:  # fixed k: planet terms from column sums too
-        H_M, H_SM = columns["H_M"], columns.get("H_SM")
+    if use_columns and "H_M" in geometry:  # fixed k: planet terms from column sums too
+        H_M, H_SM = geometry["H_M"], geometry.get("H_SM")
         occ = einsum("nk,wk->nw" if H_M.ndim == 2 else "nwk,wk->nw", H_M, Gq)
         if has_ar:
             occ = occ - einsum("nak,wak->nw" if H_SM.ndim == 3 else "nwak,wak->nw", H_SM, GD)
@@ -573,7 +569,7 @@ def _integrate_flux(
         if not has_ar or transit_idx is None:
             S_in = ar_shapes
         else:
-            S_in = ar_shapes_in if ar_shapes_in is not None else ar_shapes[transit_idx]
+            S_in = geometry.get("ar_shapes_in", ar_shapes[transit_idx])
         if planet_mask.ndim == 2:  # achromatic mask (nphase_in, P): GEMMs
             occ = einsum("np,wp->nw", planet_mask, F_quiet_px)
             if has_ar:
@@ -677,43 +673,40 @@ def _compute_all_phases(
     has_planet:          bool = True,
     k_achromatic:        bool = False,
     has_ar:              bool = True,                   # False: quiet star, no AR terms at all
-    nphase:              Optional[int] = None,          # taken from the arrays if None
-    ar_shapes:           Optional[jnp.ndarray] = None,  # precomputed (nphase, nar, P)
-    ar_shapes_in:        Optional[jnp.ndarray] = None,  # precomputed ar_shapes[transit_idx]
-    planet_mask:         Optional[jnp.ndarray] = None,  # precomputed, over transit_idx phases
-    transit_idx:         Optional[np.ndarray] = None,   # phases planet_mask covers (None: all)
-    columns:             Optional[dict] = None,         # precomputed column sums (see precompute_geometry)
+    nphase:              int,
+    geometry:            dict = {},                     # precompute_geometry output (precomputed shapes, mask, column sums)
+    planet_mask:         Optional[jnp.ndarray] = None,  # precomputed or per-call from the geometry, over transit_idx phases
 ) -> tuple[jnp.ndarray, Optional[jnp.ndarray]]:
     """
     Light curve at every phase and wavelength via ``_integrate_flux``.
 
     ``has_planet=False`` skips the occultation mask; ``k_achromatic=True``
     builds it once per phase from ``k[:, 0]`` instead of once per (phase,
-    wavelength). Both are static, shape-derived choices. ``ar_shapes`` /
-    ``planet_mask`` from ``precompute_geometry`` replace the per-call builds;
-    ``has_ar=False`` skips the AR shapes and spot terms (quiet star). With
-    ``columns`` the per-pixel spectral terms are built only if a per-call
-    planet mask still needs them.
+    wavelength). Both are static, shape-derived choices. ``has_ar=False``
+    skips the AR shapes and spot terms (quiet star). Precomputed arrays in
+    ``geometry`` replace the per-call builds; its column sums are used unless
+    the map is requested or the AR shapes are per-call, and then the per-pixel
+    spectral terms are built only if a per-call planet mask still needs them.
 
     Returns
     -------
     lc_raw    : (nphase, nwave)
     star_maps : (nphase, n, n), or None when compute_map=False
     """
-    if nphase is None:
-        nphase = next(a.shape[0] for a in (ar_shapes, all_ar_carts, planet_xyz_all) if a is not None)
+    ar_shapes = geometry.get("ar_shapes")
+    use_columns = "basis_sum" in geometry and not compute_map and (ar_shapes is not None or not has_ar)
     Gq = GD = None
-    if columns is not None:
+    if use_columns:
         Gq, GD = vmap(
             functools.partial(_column_terms_at_wavelength, wavelength_grid=wavelength,
                               flux_quiet=flux_quiet, flux_active=flux_active, vel_col=vel_col),
             in_axes=(0, 0, 1),
         )(wavelength, ld_coeffs_quiet, ld_coeffs_active)                 # (nwave, K), (nwave, nar, K)
-    if columns is not None and not (has_planet and "H_M" not in columns):
+    if use_columns and not (has_planet and "H_M" not in geometry):
         F_quiet_px = D = None                                           # nothing left to do per pixel
     elif not has_ar:
         ar_shapes = D = None
-        _, F_quiet_px = vmap(
+        F_quiet_px = vmap(
             functools.partial(
                 _quiet_pixel_flux_at_wavelength,
                 wavelength_grid=wavelength, flux_quiet=flux_quiet, mu_disc=mu_disc,
@@ -744,15 +737,13 @@ def _compute_all_phases(
 
     map_idx = jnp.argmin(jnp.abs(wavelength - plot_map_wavelength)) if compute_map else None
     lc_raw, arted = _integrate_flux(
-        ar_shapes, planet_mask, F_quiet_px, D, total_pixels, nphase,
-        compute_map=compute_map, map_idx=map_idx, transit_idx=transit_idx, ar_shapes_in=ar_shapes_in,
-        columns=columns, Gq=Gq, GD=GD,
+        ar_shapes, planet_mask, F_quiet_px, D, total_pixels, nphase, geometry,
+        compute_map=compute_map, map_idx=map_idx, use_columns=use_columns, Gq=Gq, GD=GD,
     )
 
     if not compute_map:
         return lc_raw, None
 
-    nphase    = arted.shape[0]
     star_maps = (jnp.zeros((nphase, n * n), dtype=arted.dtype)
                  .at[:, flat_indices].set(arted)
                  .reshape(nphase, n, n))
@@ -783,7 +774,7 @@ def _compute_single_phase(
     """
     lc, maps = _compute_all_phases(
         ar_cart_all[None], planet_xyz[None],
-        k=k, compute_map=compute_map,
+        k=k, compute_map=compute_map, nphase=1,
         has_planet=True, k_achromatic=(k.shape[1] == 1),
         **kwargs,
     )
@@ -2155,9 +2146,6 @@ def make_lc(
     k_val = _prepare_transit_k(k_val, nplanet, nwave)
 
     # ---- All-phases computation ------------------------------------------
-    columns = {key: geometry[key] for key in ("basis_sum", "H_S", "H_M", "H_SM") if key in geometry}
-    if not columns or compute_map or (has_ar and "H_S" not in columns):   # the map needs pixels; per-call AR shapes have no sums
-        columns = None
     if not ar_time_varying:
         lc_raw, star_maps = _compute_all_phases(
             all_ar_carts,
@@ -2190,11 +2178,8 @@ def make_lc(
             k_achromatic        = k_achromatic,
             has_ar              = has_ar,
             nphase              = model["phases_rot"].shape[0],
-            ar_shapes           = geometry.get("ar_shapes"),
-            ar_shapes_in        = geometry.get("ar_shapes_in"),
+            geometry            = geometry,
             planet_mask         = planet_mask,
-            transit_idx         = geometry.get("transit_idx"),
-            columns             = columns,
         )
     else:
         lc_raw, star_maps = _compute_all_phases_evolving(

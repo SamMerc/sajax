@@ -3628,43 +3628,57 @@ class TestDefaultTransitSoftness:
 
 # ===================================================================
 # 9.  precompute_geometry -- fixed geometry built once, reused per call
+#
+# Shared by sections 9-11: a three-wavelength, oversampled, transiting
+# model and the AR / orbit argument groups used with it.
 # ===================================================================
+
+_GEO_SOFT = 1.0 / (10.0 * STELLAR_GRID)
+_GEO_WL = np.linspace(500.0, 600.0, 3)
+_GEO_AR = dict(ar_lat=jnp.array([5.0]), ar_long=jnp.array([0.0]),
+               ar_size=jnp.array([8.0]), ar_smoothness=jnp.array([_SM]))
+_GEO_ORBIT = {name: v for name, v in TRANSIT_PARAMS.items() if name != "k"}
+_GEO_C = jnp.full(3, 0.7)
+_GEO_LAWS = {"linear": [0.4], "quadratic": [0.4, 0.2], "kipping3": [0.3, 0.2, 0.1],
+             "nonlinear4": [0.5, -0.1, 0.6, -0.25], "power2": [0.5, 0.6]}
+
+
+def _geo_model(law="quadratic", **transit):
+    return build_system(
+        wavelength=_GEO_WL, flux_quiet=np.ones(3), ld_coeffs=_GEO_LAWS[law], inc_star=90.0, ld_mode=law,
+        times=TIMES, P_rot=P_ROT, **(transit or TRANSIT_PARAMS),
+        stellar_grid_size=STELLAR_GRID, ve=2.0, oversample=2,
+    )
+
+
+def _geo_close(a, b):
+    np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=2e-5, atol=1e-6)
+
+
+@pytest.fixture(scope="module")
+def geo_model():
+    return _geo_model()
+
 
 class TestPrecomputeGeometry:
     """``make_lc(geometry=precompute_geometry(...))`` must reproduce the
     per-call path for every combination of fixed / free parameters."""
 
-    _SOFT = 1.0 / (10.0 * STELLAR_GRID)
-    _WL = np.linspace(500.0, 600.0, 3)
-    AR = dict(ar_lat=jnp.array([5.0]), ar_long=jnp.array([0.0]),
-              ar_size=jnp.array([8.0]), ar_smoothness=jnp.array([_SM]))
-    ORBIT = {name: v for name, v in TRANSIT_PARAMS.items() if name != "k"}
-    C = jnp.full(3, 0.7)
+    _SOFT, AR, ORBIT, C = _GEO_SOFT, _GEO_AR, _GEO_ORBIT, _GEO_C
+    _close = staticmethod(_geo_close)
 
     @pytest.fixture(scope="class")
-    def model(self):
-        return build_system(
-            wavelength=self._WL, flux_quiet=np.ones(3), **BASE_PARAMS,
-            times=TIMES, P_rot=P_ROT, **TRANSIT_PARAMS,
-            stellar_grid_size=STELLAR_GRID, ve=VE, oversample=2,
-        )
+    def model(self, geo_model):
+        return geo_model
 
     @pytest.fixture(scope="class")
     def two_planet_model(self):
-        return build_system(
-            wavelength=self._WL, flux_quiet=np.ones(3), **BASE_PARAMS,
-            times=TIMES, P_rot=P_ROT,
-            t0=np.array([0.0, 0.04]), period=np.array([5.0, 7.0]),
-            a_over_rstar=np.array([10.0, 12.0]), inclination=np.array([np.pi / 2, np.pi / 2]),
-            k=np.array([0.1, 0.05]), stellar_grid_size=STELLAR_GRID, ve=VE,
-        )
+        return _geo_model(t0=np.array([0.0, 0.04]), period=np.array([5.0, 7.0]),
+                          a_over_rstar=np.array([10.0, 12.0]), inclination=np.array([np.pi / 2, np.pi / 2]),
+                          k=np.array([0.1, 0.05]))
 
     def _direct(self, model, **kw):
         return make_lc(model, flux_active=self.C, **self.AR, **kw)
-
-    @staticmethod
-    def _close(a, b):
-        np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-5, atol=1e-6)
 
     def test_ar_shapes_only(self, model):
         geo = precompute_geometry(model, **self.AR)
@@ -3776,26 +3790,17 @@ class TestQuietStarPath:
     """A call without active regions must equal one with an AR of contrast
     exactly 1 (the former dummy-AR implementation), for every planet variant."""
 
-    _SOFT = 1.0 / (10.0 * STELLAR_GRID)
-    _WL = np.linspace(500.0, 600.0, 3)
-    ORBIT = {name: v for name, v in TRANSIT_PARAMS.items() if name != "k"}
+    _SOFT, ORBIT = _GEO_SOFT, _GEO_ORBIT
     INERT_AR = dict(ar_lat=jnp.array([0.0]), ar_long=jnp.array([0.0]),
                     ar_size=jnp.array([10.0]), ar_smoothness=jnp.array([_SM]))
+    _close = staticmethod(_geo_close)
 
     @pytest.fixture(scope="class")
-    def model(self):
-        return build_system(
-            wavelength=self._WL, flux_quiet=np.ones(3), **BASE_PARAMS,
-            times=TIMES, P_rot=P_ROT, **TRANSIT_PARAMS,
-            stellar_grid_size=STELLAR_GRID, ve=2.0, oversample=2,
-        )
+    def model(self, geo_model):
+        return geo_model
 
     def _inert(self, model, **kw):
         return make_lc(model, flux_active=jnp.ones(3), **self.INERT_AR, **kw)
-
-    @staticmethod
-    def _close(a, b):
-        np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-5, atol=1e-6)
 
     def test_no_transit(self, small_model):
         c = jnp.ones(small_model["nwave"])
@@ -3833,25 +3838,9 @@ class TestColumnSums:
     and ``make_lc`` contracts them instead of the pixel grid; the result must
     equal the pixel path (``columns=False``) for every supported law."""
 
-    _SOFT = 1.0 / (10.0 * STELLAR_GRID)
-    _WL = np.linspace(500.0, 600.0, 3)
-    AR = dict(ar_lat=jnp.array([5.0]), ar_long=jnp.array([0.0]),
-              ar_size=jnp.array([8.0]), ar_smoothness=jnp.array([_SM]))
-    ORBIT = {name: v for name, v in TRANSIT_PARAMS.items() if name != "k"}
-    C = jnp.full(3, 0.7)
-    LAWS = {"linear": [0.4], "quadratic": [0.4, 0.2], "kipping3": [0.3, 0.2, 0.1],
-            "nonlinear4": [0.5, -0.1, 0.6, -0.25], "power2": [0.5, 0.6]}
-
-    def _model(self, law):
-        return build_system(
-            wavelength=self._WL, flux_quiet=np.ones(3), ld_coeffs=self.LAWS[law], inc_star=90.0,
-            ld_mode=law, times=TIMES, P_rot=P_ROT, **TRANSIT_PARAMS,
-            stellar_grid_size=STELLAR_GRID, ve=2.0, oversample=2,
-        )
-
-    @staticmethod
-    def _close(a, b):
-        np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=2e-5, atol=1e-6)
+    _SOFT, AR, ORBIT, C = _GEO_SOFT, _GEO_AR, _GEO_ORBIT, _GEO_C
+    _model = staticmethod(_geo_model)
+    _close = staticmethod(_geo_close)
 
     def _both(self, model, k_fixed, **kw):
         k_pre = dict(k=0.1) if k_fixed else {}
