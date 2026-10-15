@@ -37,8 +37,8 @@ Unocculted regions produce wavelength-dependent biases in the transit depth thro
 The planet signal and stellar surface are degenerate and must therefore be modeled together to constrain the planet properties.
 Conversely, because the transit chord scans the stellar disk, this joint modeling also turns each transit into a direct probe of the stellar surface.
 
-`SAJAX` is designed for this joint problem: rather than treating stellar contamination as a correction applied after the fact, it fits the chromatic spot-crossing signature and planetary transmission spectrum simultaneously, so that each transit constrains both the planet and the active region(s) it crosses.
-It provides a fast and flexible tool for exoplanet and stellar astronomers who need to (i) forward-model spectrophotometric time series of active stars, with or without transiting planets, and (ii) fit such models to data.
+`SAJAX` is designed for this joint problem. Rather than treating stellar contamination as a correction applied after the fact, it forward-models the chromatic active region signatures and planetary transmission spectrum simultaneously. 
+The result is a fast, flexible tool for exoplanet and stellar astronomers who need to simulate spectrophotometric time series of active stars, with or without transiting planets, or perform inference from data.
 
 
 # State of the field
@@ -129,7 +129,7 @@ The authors take full responsibility for the software and the content of this ma
 Its core depends on `JAX` [@jax2018github], `NumPy` [@Harris2020], `SciPy` [@Virtanen2020], `Matplotlib` [@Hunter2007] and `interpax`. 
 The example notebooks additionally use `NumPyro` [@Phan2019], `ArviZ` [@Kumar2019], `corner` [@ForemanMackey2016], `ExoTiC-LD` [@Grant2024], and `speclib` [@Rackham2024].
 
-We thank Julien de Wit, Benjamin V. Rackham, Catriona Murray, Zoe de Beurs, Prajwal Niraula and all other members of the Disruptive Planets team for fruitful discussions during the development of `SAJAX`. We additionally thank Benjamin V. Rackham for constructive feedback that strengthened this manuscript.
+We thank Julien de Wit, Benjamin V. Rackham, Catriona Murray, Zoe de Beurs, Prajwal Niraula and all other members of the Disruptive Planets team for fruitful discussions during the development of `SAJAX`. We additionally thank Benjamin V. Rackham for constructive feedback which greatly improved the quality of this paper.
 S.J.M. acknowledges support from the Massachusetts Institute of Technology through the Hurley Fellowship. 
 L.M.A. acknowledges support from the Massachusetts Institute of Technology through the Lester Wolfe Fellowship and the MIT Presidential Fellowship.
 The authors acknowledge the MIT Office of Research Computing and Data for providing high performance computing resources that have contributed to the research results reported within this paper.
