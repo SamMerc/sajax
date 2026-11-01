@@ -37,7 +37,7 @@ examples = [
     "speclib; python_version >= '3.11' and python_version < '3.14'",
     "exotic-ld",
     "ipywidgets",
-    "setuptools<81",
+    "setuptools<85",
     "astropy>=5",
     "pillow",
     "numpyro",

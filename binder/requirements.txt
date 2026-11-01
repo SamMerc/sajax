@@ -560,7 +560,7 @@ scipy==1.18.1 ; python_full_version >= '3.12'
     #   xarray-einstats
 semantic-version==2.10.0 ; python_full_version >= '3.11' and python_full_version < '3.14'
     # via asdf
-setuptools==80.10.2
+setuptools==84.2.1
     # via arviz
 shapely==2.1.2
     # via fleck
