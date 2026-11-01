@@ -568,7 +568,7 @@ six==1.17.0
     # via python-dateutil
 snowballstemmer==3.1.1
     # via sphinx
-soupsieve==2.9.2
+soupsieve==2.10
     # via beautifulsoup4
 speclib @ git+https://github.com/brackham/speclib.git@5377b48ffd972f53a37f252b54c6d546aefde0be ; python_full_version >= '3.11' and python_full_version < '3.14'
 specutils==1.20.3 ; python_full_version >= '3.11' and python_full_version < '3.14'
