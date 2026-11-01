@@ -673,7 +673,7 @@ tzdata==2026.3 ; python_full_version < '3.11' or sys_platform == 'emscripten' or
     # via pandas
 urllib3==2.7.0
     # via requests
-wadler-lindig==0.1.7
+wadler-lindig==0.1.8
     # via
     #   equinox
     #   jaxtyping
