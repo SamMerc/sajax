@@ -47,7 +47,7 @@ These fall into three broad families, distinguished by how they represent active
 *Analytic and semi-analytic* tools, such as `macula` [@Kipping2012], `spotrod` [@Beky2014], `STSP` [@Morris2017] and `fleck` [@Morris2020], describe circular active regions in closed or nearly closed form. 
 *Spherical-harmonic* codes such as `starry` [@Luger2019], `starry_process` [@Luger2021], and `StarryStarryProcess` [@Sagynbayeva2025] expand the stellar surface map into spherical harmonics, reducing inference to fitting the expansion coefficients. 
 This allows active regions of arbitrary shape, but it has some drawbacks: small regions require computationally demanding, high-degree terms; a truncated expansion can produce ringing effects; and certain combinations can produce negative intensities. 
-Finally, *grid-based* codes tessellate the surface and assign properties to each cell; examples include `PyTranSpot` [@Juvan2018], `SAGE` [@Chakraborty2024], `spot-model` [@Cracchiolo2021a; @Cracchiolo2021b], and `spotter` [@Garcia2025]. 
+Finally, *grid-based* codes tessellate the surface and assign properties to each cell. Examples include `PyTranSpot` [@Juvan2018], `SAGE` [@Chakraborty2024], `spot-model` [@Cracchiolo2021a; @Cracchiolo2021b], and `spotter` [@Garcia2025]. 
 The `SOAP` family [@Boisse2012; @Oshagh2013; @Dumusque2014; @Akinsanmi2018; @Serrano2020; @Cristo2025] and `ANTARESS` [@Bourrier2024] also model heterogeneous stellar surfaces, but with a primary focus on spectroscopic and radial-velocity observations.
 
 The two codes closest to `SAJAX` are `fleck` and `spotter`, both of which offer `JAX` implementations.
@@ -62,7 +62,7 @@ In practice, `SAJAX` is the more natural choice when active regions are large or
 
 
 # Software design
-Here, we describe the key features that underpin `SAJAX`'s core philosophy.
+Here, we describe the key features that underpin `SAJAX`'s core philosophy. An example implementation of SAJAX, to generate and fit data, is presented in \autoref{fig:main}.
 
 **Two-stage interface** - Inference requires thousands of model evaluations or more, and `SAJAX` is built around this use case. 
 The light curve model is split into two functions. 
@@ -102,6 +102,8 @@ A brightening region models a flare, and `SAJAX` includes a built-in flare templ
 Multiple transiting planets are also supported. 
 In keeping with `SAJAX`'s focus on inference, these features use separate code paths, so models that do not use them run no slower.
 
+![Example SAJAX simulation and fit of light curves for a planet transiting a star with a spot that has both an umbra and a penumbra. \textit{Panel A:} Geometry of the system, drawn with the injected parameters. \textit{Panel B:} Simulated light curves, offset vertically for visibility. The top curve is the white light curve and the ten below are the chromatic light curves, one per wavelength bin. For each, points are mock observations with $200$ ppm of white noise added and the black line is the best fit from an MCMC. Histograms to the right of each curve show its residuals which are consistent with Gaussian noise, indicating a good fit. \textit{Panels C, D, and E:} Retrieved penumbra contrast, umbra contrast, and transmission spectrum, respectively. Points are colored according to wavelength bin as in Panel B, and black curves show to the true spectra used to generate the data. The penumbra contrast and transmission spectra are recovered well, while the umbra contrast spectrum is offset from truth because of correlations with other fitted parameters, such as limb-darkening coefficients. \label{fig:main}](figures/main_plot.pdf){width=110%}
+
 # Research impact statement 
 `SAJAX` has not yet been used in a published study, but it is already being applied by the authors to model chromatic spot-crossing signatures in transit spectra of active stars and to study how the choice of Bayesian inference method affects the resulting parameters' constraints.
 Beyond these ongoing applications, its expected significance rests on three points. 
@@ -129,7 +131,7 @@ The authors take full responsibility for the software and the content of this ma
 Its core depends on `JAX` [@jax2018github], `NumPy` [@Harris2020], `SciPy` [@Virtanen2020], `Matplotlib` [@Hunter2007] and `interpax`. 
 The example notebooks additionally use `NumPyro` [@Phan2019], `ArviZ` [@Kumar2019], `corner` [@ForemanMackey2016], `ExoTiC-LD` [@Grant2024], and `speclib` [@Rackham2024].
 
-We thank Julien de Wit, Benjamin V. Rackham, Catriona Murray, Zoe de Beurs, Prajwal Niraula and all other members of the Disruptive Planets team for fruitful discussions during the development of `SAJAX`. We additionally thank Benjamin V. Rackham for constructive feedback which greatly improved the quality of this paper.
+We thank Julien de Wit, Benjamin V. Rackham, Catriona Murray, Zoe de Beurs, and Prajwal Niraula for fruitful discussions during the development of `SAJAX`. We additionally thank Benjamin V. Rackham for constructive feedback which greatly improved the quality of this paper.
 S.J.M. acknowledges support from the Massachusetts Institute of Technology through the Hurley Fellowship. 
 L.M.A. acknowledges support from the Massachusetts Institute of Technology through the Lester Wolfe Fellowship and the MIT Presidential Fellowship.
 The authors acknowledge the MIT Office of Research Computing and Data for providing high performance computing resources that have contributed to the research results reported within this paper.

@@ -11,7 +11,7 @@ description = "Stellar Activity Grid for Exoplanets - JAX implementation"
 authors = [
     { name = "Samson Mercier", email = "merci228@mit.edu" },
     { name = "Lucas Arthur", email = "lmarthur@mit.edu" },
-    { name = "Hritam Chakraborty", email = "Hritam.Chakraborty@unige.ch" },
+    { name = "Hritam Chakraborty", email = "Hritam.Chakraborty@warwick.ac.uk" },
 ]
 license = "MIT"
 readme = "README.md"
