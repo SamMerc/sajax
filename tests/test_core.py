@@ -474,13 +474,46 @@ class TestAROverlapLayering:
         assert on_disc.max() <= 1.3 + 1e-5
 
     def test_single_layer_matches_linear_contrast(self):
-        """One AR reduces to the pre-layering formula 1 - (1 - C) * shape."""
+        """One AR takes the shortcut branch: bit-identical to the
+        pre-layering formula 1 - (1 - C) * shape."""
         k1, k2 = jax.random.split(jax.random.PRNGKey(1))
         C = jax.random.uniform(k1, (1, 1000), maxval=1.6)
         a = jax.random.uniform(k2, (1, 1000))
-        np.testing.assert_allclose(
-            _composite_ar_layers(C, a), 1.0 - (1.0 - C[0]) * a[0], atol=1e-7,
+        np.testing.assert_array_equal(
+            _composite_ar_layers(C, a), 1.0 - (1.0 - C[0]) * a[0],
         )
+
+    def test_single_layer_branch_agrees_with_general_stack(self):
+        """The single-AR shortcut equals the general sorted stack: adding a
+        zero-opacity layer (any contrast) routes the same AR through the
+        sort + scan path without changing the result."""
+        k1, k2, k3 = jax.random.split(jax.random.PRNGKey(2), 3)
+        C = jax.random.uniform(k1, (1, 1000), maxval=1.6)
+        a = jax.random.uniform(k2, (1, 1000))
+        C_pad = jnp.concatenate([C, jax.random.uniform(k3, (1, 1000), maxval=1.6)])
+        a_pad = jnp.concatenate([a, jnp.zeros_like(a)])
+        np.testing.assert_allclose(
+            _composite_ar_layers(C, a), _composite_ar_layers(C_pad, a_pad), atol=1e-6,
+        )
+
+    def test_single_layer_branch_resolved_at_trace_time(self):
+        """nar is static, so a lone AR compiles to plain elementwise ops (no
+        sort/scan), while nar >= 2 keeps the sorted stack."""
+        def jaxpr_text(nar):
+            # str() includes nested sub-jaxprs (argsort is wrapped in its own jit)
+            C = jnp.ones((nar, 8)); a = jnp.ones((nar, 8))
+            return str(jax.make_jaxpr(_composite_ar_layers)(C, a))
+        single, multi = jaxpr_text(1), jaxpr_text(2)
+        assert "sort" not in single and "scan" not in single
+        assert "sort" in multi and "scan" in multi
+
+    def test_single_layer_branch_gradients(self):
+        """d/dC = shape and d/dshape = C - 1 through the shortcut branch."""
+        C = jnp.array([[0.3, 1.2, 0.0]])
+        a = jnp.array([[0.5, 1.0, 0.0]])
+        gC, ga = jax.grad(lambda C, a: _composite_ar_layers(C, a).sum(), argnums=(0, 1))(C, a)
+        np.testing.assert_allclose(gC, a)
+        np.testing.assert_allclose(ga, C - 1.0)
 
     def test_coldest_on_top_is_darkest_stacking(self):
         """Pixelwise, the sorted stack is never brighter than any fixed order."""

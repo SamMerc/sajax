@@ -412,6 +412,9 @@ def _composite_ar_layers(
     -------
     jnp.ndarray, shape (total_pixels,)
     """
+    if C_a.shape[0] == 1:
+        return 1.0 - (1.0 - C_a[0]) * ar_shapes[0]
+
     order = jnp.argsort(-C_a, axis=0)
     C_sorted     = jnp.take_along_axis(C_a, order, axis=0)
     shape_sorted = jnp.take_along_axis(ar_shapes, order, axis=0)
