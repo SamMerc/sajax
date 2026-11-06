@@ -5,6 +5,7 @@ Run with:
     pytest tests/
 """
 
+import itertools
 import warnings
 
 import numpy as np
@@ -22,6 +23,7 @@ from sajax.core import (
     _compute_all_planets_mask,
     _compute_ar_shape,
     _compute_single_phase,
+    _composite_ar_layers,
 )
 from sajax.planet import _compute_planet_mask
 from sajax.geometry import rotate_active_region
@@ -379,20 +381,40 @@ class TestMultiAR:
 
 
 # ===================================================================
-# AR overlap compounding (contrast-surface superposition, no more
-# hottest/coldest-wins winner-take-all)
+# AR overlap layering (Porter-Duff "over", coldest region on top)
 # ===================================================================
 
-class TestAROverlapCompounding:
+class TestAROverlapLayering:
     """
-    Overlapping active regions contribute simultaneously -- the contrast
-    surface sums their deviations from 1 (see core.py's module docstring) --
-    rather than one excluding the other. An umbra sitting inside a penumbra
-    should therefore combine to something darker than either component's
-    own contrast alone.
+    Overlapping active regions are alpha-composited onto the quiet
+    photosphere, stacked per pixel from hottest to coldest see 
+    ``_composite_ar_layers``): the coldest region wins wherever it is
+    opaque, the contrast surface stays within the component contrasts (so
+    flux never goes negative).
     """
 
-    def test_same_centre_overlap_deeper_than_either_alone(
+    @staticmethod
+    def _star_map(flux_active, lat, lon, size, sm, grid=60):
+        """No limb darkening, flat unit spectrum: the map *is* the contrast surface."""
+        model = build_system(
+            wavelength=np.array([550.0]), flux_quiet=np.array([1.0]),
+            ld_coeffs=[0.0, 0.0], inc_star=90.0,
+            times=_t([0.0]), P_rot=_P_ROT, stellar_grid_size=grid, ve=0.0,
+        )
+        lc, maps = make_lc(
+            model, jnp.asarray(flux_active, jnp.float32)[:, None],
+            jnp.asarray(lat, jnp.float32), jnp.asarray(lon, jnp.float32),
+            jnp.asarray(size, jnp.float32), jnp.asarray(sm, jnp.float32),
+            compute_map=True,
+        )
+        return np.array(lc), np.array(maps[0])
+
+    @staticmethod
+    def _centre(star_map):
+        c = star_map.shape[0] // 2
+        return float(star_map[c, c])
+
+    def test_same_centre_overlap_deeper_than_shallower_alone(
         self, flat_spectra, base_params
     ):
         wl, flux_quiet, _ = flat_spectra
@@ -412,32 +434,144 @@ class TestAROverlapCompounding:
             times=_t([0.0]), P_rot=_P_ROT, stellar_grid_size=50, ve=0.0,
         )
         assert float(combined[0][0, 0]) < float(shallower_alone[0][0, 0]), (
-            "overlapping components should compound, giving a deeper dip "
-            "than either component alone"
+            "the colder component should cover the warmer one, giving a "
+            "deeper dip than the warmer component alone"
         )
 
-    def test_exact_contrast_surface_value_at_shared_centre(self):
-        """
-        With no limb darkening, the flux at the exact shared centre of two
-        co-located ARs must equal 1 - [(1-C1)+(1-C2)] exactly.
-        """
-        wl = np.array([550.0])
-        flux_quiet = np.array([1.0])
-        params = dict(ld_coeffs=[0.0, 0.0], inc_star=90.0)
+    @pytest.mark.parametrize("flux_active", [[0.3, 0.7], [0.7, 0.3]])
+    def test_coldest_wins_at_shared_centre(self, flux_active):
+        """Two co-located ARs: the centre shows exactly the colder contrast,
+        whichever AR index it has."""
+        _, smap = self._star_map(flux_active, [0, 0], [0, 0], [15, 15], [50, 50])
+        assert abs(self._centre(smap) - 0.3) < 1e-4
+
+    def test_nested_umbra_contrast_recovered(self):
+        """A soft umbra (0.1) inside a soft penumbra (0.6) keeps its injected
+        contrast at its centre, instead of co-adding to 1 - (0.9 + 0.4)."""
+        _, smap = self._star_map([0.1, 0.6], [0, 0], [0, 0], [5, 15], [3, 3])
+        assert abs(self._centre(smap) - 0.1) < 1e-4
+
+    def test_spot_covers_facula(self):
+        _, smap = self._star_map([1.3, 0.5], [0, 0], [0, 0], [15, 15], [50, 50])
+        assert abs(self._centre(smap) - 0.5) < 1e-4
+
+    def test_ar_index_order_irrelevant(self):
+        lc_a, _ = self._star_map([0.2, 0.6, 1.2], [0, 5, -5], [0, 4, 8], [10, 15, 12], [3, 1, 20])
+        lc_b, _ = self._star_map([1.2, 0.2, 0.6], [-5, 0, 5], [8, 0, 4], [12, 10, 15], [20, 3, 1])
+        np.testing.assert_allclose(lc_a, lc_b, rtol=1e-6)
+
+    @pytest.mark.parametrize("contrast", [0.0, 0.05])
+    def test_stacked_dark_regions_never_negative(self, contrast):
+        """Under the old additive rule three overlapping C=0.05 spots gave
+        1 - 3*0.95 < 0; layering is bounded below by the coldest contrast."""
+        _, smap = self._star_map([contrast] * 3, [0, 2, -2], [0, 2, 1], [20, 20, 20], [50, 50, 50])
+        assert np.nanmin(smap) >= 0.0
+
+    def test_contrast_surface_bounded_by_components(self):
+        _, smap = self._star_map([0.3, 0.7, 1.3], [0, 3, -3], [0, 5, 2], [15, 20, 25], [2, 5, 1])
+        on_disc = smap[np.isfinite(smap) & (smap > 0)]
+        assert on_disc.min() >= 0.3 - 1e-5
+        assert on_disc.max() <= 1.3 + 1e-5
+
+    def test_single_layer_matches_linear_contrast(self):
+        """One AR takes the shortcut branch: bit-identical to the
+        pre-layering formula 1 - (1 - C) * shape."""
+        k1, k2 = jax.random.split(jax.random.PRNGKey(1))
+        C = jax.random.uniform(k1, (1, 1000), maxval=1.6)
+        a = jax.random.uniform(k2, (1, 1000))
+        np.testing.assert_array_equal(
+            _composite_ar_layers(C, a), 1.0 - (1.0 - C[0]) * a[0],
+        )
+
+    def test_single_layer_branch_agrees_with_general_stack(self):
+        """The single-AR shortcut equals the general sorted stack: adding a
+        zero-opacity layer (any contrast) routes the same AR through the
+        sort + scan path without changing the result."""
+        k1, k2, k3 = jax.random.split(jax.random.PRNGKey(2), 3)
+        C = jax.random.uniform(k1, (1, 1000), maxval=1.6)
+        a = jax.random.uniform(k2, (1, 1000))
+        C_pad = jnp.concatenate([C, jax.random.uniform(k3, (1, 1000), maxval=1.6)])
+        a_pad = jnp.concatenate([a, jnp.zeros_like(a)])
+        np.testing.assert_allclose(
+            _composite_ar_layers(C, a), _composite_ar_layers(C_pad, a_pad), atol=1e-6,
+        )
+
+    def test_single_layer_branch_resolved_at_trace_time(self):
+        """nar is static, so a lone AR compiles to plain elementwise ops (no
+        sort/scan), while nar >= 2 keeps the sorted stack."""
+        def jaxpr_text(nar):
+            # str() includes nested sub-jaxprs (argsort is wrapped in its own jit)
+            C = jnp.ones((nar, 8)); a = jnp.ones((nar, 8))
+            return str(jax.make_jaxpr(_composite_ar_layers)(C, a))
+        single, multi = jaxpr_text(1), jaxpr_text(2)
+        assert "sort" not in single and "scan" not in single
+        assert "sort" in multi and "scan" in multi
+
+    def test_single_layer_branch_gradients(self):
+        """d/dC = shape and d/dshape = C - 1 through the shortcut branch."""
+        C = jnp.array([[0.3, 1.2, 0.0]])
+        a = jnp.array([[0.5, 1.0, 0.0]])
+        gC, ga = jax.grad(lambda C, a: _composite_ar_layers(C, a).sum(), argnums=(0, 1))(C, a)
+        np.testing.assert_allclose(gC, a)
+        np.testing.assert_allclose(ga, C - 1.0)
+
+    def test_coldest_on_top_is_darkest_stacking(self):
+        """Pixelwise, the sorted stack is never brighter than any fixed order."""
+        k1, k2 = jax.random.split(jax.random.PRNGKey(0))
+        C = jax.random.uniform(k1, (4, 5000), maxval=1.6)
+        a = jax.random.uniform(k2, (4, 5000))
+        S = _composite_ar_layers(C, a)
+        for perm in itertools.permutations(range(4)):
+            S_fixed = jnp.ones_like(C[0])
+            for k in perm:
+                S_fixed = S_fixed + a[k] * (C[k] - S_fixed)
+            assert float(jnp.max(S - S_fixed)) <= 1e-6
+
+    def test_continuous_through_contrast_crossing(self):
+        """Sweeping one contrast through another's swaps their stacking order;
+        the surface must not jump at the swap."""
+        c0 = jnp.linspace(0.3, 0.7, 2001)
+        S = jax.vmap(lambda c: _composite_ar_layers(
+            jnp.array([[c], [0.5]]), jnp.array([[0.7], [0.6]]))[0])(c0)
+        steps = jnp.abs(jnp.diff(S))
+        assert float(steps.max()) < 3.0 * float(jnp.median(steps))
+
+    def test_gradients_finite_for_degenerate_overlaps(self):
         model = build_system(
-            wavelength=wl, flux_quiet=flux_quiet, **params,
-            times=_t(np.array([0.0])), P_rot=_P_ROT, stellar_grid_size=60, ve=0.0,
+            wavelength=np.array([500.0, 600.0]), flux_quiet=np.ones(2), ld_coeffs=[0.4, 0.2],
+            times=_t([0.0, 90.0]), P_rot=_P_ROT, stellar_grid_size=40,
         )
-        flux_active = jnp.array([[0.3], [0.7]])
-        result = make_lc(
-            model, flux_active, jnp.array([0.0, 0.0]), jnp.array([0.0, 0.0]),
-            jnp.array([15.0, 15.0]), jnp.array([50.0, 50.0]),
-            compute_map=True,
+        cases = [
+            ([[0.5, 0.5], [0.5, 0.5]], [0, 0],   [0, 0], [10, 10],   [3, 3]),     # co-located, tied
+            ([[0.0, 0.0], [0.6, 0.6]], [0, 0],   [0, 0], [5, 15],    [50, 50]),   # C = 0
+            ([[0.2, 0.9], [0.9, 0.2]], [0, 3],   [0, 3], [0.01, 40], [2000, 1]),  # crossing spectra, extremes
+            ([[1.3, 1.3], [0.4, 0.4]], [10, 12], [0, 5], [15, 8],    [5, 5]),     # facula + spot
+        ]
+        loss = lambda *p: make_lc(model, *p)[0].sum()
+        for case in cases:
+            params = [jnp.asarray(x, jnp.float32) for x in case]
+            grads = jax.grad(loss, argnums=(0, 1, 2, 3, 4))(*params)
+            assert all(bool(jnp.all(jnp.isfinite(g))) for g in grads)
+
+    def test_gradient_fd_agreement_for_overlapping_ars(self):
+        model = build_system(
+            wavelength=np.array([550.0]), flux_quiet=np.ones(1), ld_coeffs=[0.4, 0.2],
+            times=_t([0.0]), P_rot=_P_ROT, stellar_grid_size=60,
         )
-        star_map = np.array(result[1][0])
-        centre = star_map.shape[0] // 2
-        expected = 1.0 - ((1 - 0.3) + (1 - 0.7))
-        assert abs(star_map[centre, centre] - expected) < 1e-4
+        fa   = jnp.array([[0.2], [0.6], [1.2]], jnp.float32)
+        lat  = jnp.array([0.0, 4.0, -6.0], jnp.float32)
+        lon  = jnp.array([0.0, 3.0, 8.0], jnp.float32)
+        size = jnp.array([8.0, 18.0, 12.0], jnp.float32)
+        sm   = jnp.array([3.0, 2.0, 5.0], jnp.float32)
+        loss = lambda fa, size: make_lc(model, fa, lat, lon, size, sm)[0].sum()
+        g_fa, g_size = jax.grad(loss, argnums=(0, 1))(fa, size)
+        for i in range(3):
+            h = 0.01
+            fd_fa = (loss(fa.at[i, 0].add(h), size) - loss(fa.at[i, 0].add(-h), size)) / (2 * h)
+            h = 0.05
+            fd_sz = (loss(fa, size.at[i].add(h)) - loss(fa, size.at[i].add(-h))) / (2 * h)
+            np.testing.assert_allclose(float(g_fa[i, 0]), float(fd_fa), rtol=0.02)
+            np.testing.assert_allclose(float(g_size[i]), float(fd_sz), rtol=0.02)
 
     def test_non_overlapping_ars_independent(self, flat_spectra, base_params):
         """Two well-separated ARs shouldn't measurably interact."""
@@ -1747,8 +1881,8 @@ class TestTransitOversampling:
 # ===================================================================
 # 4b.  Multiple planets (trailing nplanet axis, mirroring TestMultiAR)
 #
-# Planets combine *multiplicatively* (opaque occulters), the opposite of
-# TestAROverlapCompounding's *additive* AR-contrast rule -- named/documented
+# Planets combine *multiplicatively* (opaque occulters), unlike
+# TestAROverlapLayering's coldest-on-top AR compositing -- named/documented
 # explicitly to avoid confusion, since both "multiple X" cases sit close
 # together conceptually.
 # ===================================================================

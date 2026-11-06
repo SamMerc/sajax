@@ -398,6 +398,35 @@ def _evaluate_ldc(
 # 4. Single-wavelength flux  (vmapped over the spectral axis)
 # ---------------------------------------------------------------------------
 
+def _composite_ar_layers(
+    C_a:       jnp.ndarray,  # (nar, total_pixels) spectral contrast per AR
+    ar_shapes: jnp.ndarray,  # (nar, total_pixels) opacity per AR, in [0, 1]
+) -> jnp.ndarray:
+    """
+    Porter-Duff "over" of every active region onto the quiet photosphere.
+    Stacked per pixel from hottest (bottom) to coldest (top)::
+
+        CS <- S + ar_shapes[a] * (C_a - S)
+
+    Returns
+    -------
+    jnp.ndarray, shape (total_pixels,)
+    """
+    if C_a.shape[0] == 1:
+        return 1.0 - (1.0 - C_a[0]) * ar_shapes[0]
+
+    order = jnp.argsort(-C_a, axis=0)
+    C_sorted     = jnp.take_along_axis(C_a, order, axis=0)
+    shape_sorted = jnp.take_along_axis(ar_shapes, order, axis=0)
+
+    def _over(S, layer):
+        c, a = layer
+        return S + a * (c - S), None
+
+    S, _ = jax.lax.scan(_over, jnp.ones_like(C_a[0]), (C_sorted, shape_sorted))
+    return S
+
+
 def _flux_at_wavelength(
     # --- vmapped: one scalar/slice per wavelength ---
     wavelength_target:    float,
@@ -427,15 +456,13 @@ def _flux_at_wavelength(
     """
     Compute disc-integrated flux for a single wavelength channel.
 
-    Builds the dimensionless "contrast surface"::
-
-        F_p/F_quiet = 1 - sum_a (1 - C_a) * ar_shapes[a]
-
-    where ``C_a = F_a / F_quiet`` is active region ``a``'s spectral
-    contrast, evaluated at each pixel's own Doppler-shifted wavelength and
-    with its own limb-darkening law. Overlapping active regions sum, so
-    e.g. an umbra sitting inside a penumbra contributes simultaneously (the
-    combined dip exceeds either component's own contrast).
+    Builds the dimensionless "contrast surface" F_p/F_quiet by alpha
+    compositing every active region onto the quiet photosphere (see
+    ``_composite_ar_layers``): ``ar_shapes[a]`` is AR ``a``'s opacity and
+    ``C_a = F_a / F_quiet`` its spectral contrast, evaluated at each pixel's
+    own Doppler-shifted wavelength and with its own limb-darkening law.
+    Overlapping active regions are stacked coldest to hottest, and the surface
+    always stays within the component contrasts (never negative).
 
     The planet mask is computed here, per wavelength, from ``k_wl`` -- not
     precomputed once per phase like ``ar_shapes`` -- because ``k`` (unlike
@@ -498,13 +525,13 @@ def _flux_at_wavelength(
     F_quiet_px  = F_quiet_local * ldc_quiet    # (total_pixels,)
     F_active_px = F_active_local * ldc_active  # (nar, total_pixels)
 
-    # ---- Contrast surface: overlapping ARs sum -----
+    # ---- Contrast surface: overlapping ARs layered, coldest wins style -----
     # Floored denominator: see _FLUX_RATIO_EPS -- pixels where F_quiet_px
     # is exactly 0 (e.g. an intensity_profile with I(mu=0)=0) still
     # contribute exactly 0 to arted_flux below, but without the floor the
     # 0/0 here would inject a NaN that corrupts the whole light curve.
     C_a = F_active_px / jnp.maximum(F_quiet_px[None, :], _FLUX_RATIO_EPS)  # (nar, total_pixels)
-    contrast_surface = 1.0 - jnp.sum((1.0 - C_a) * ar_shapes, axis=0)      # (total_pixels,)
+    contrast_surface = _composite_ar_layers(C_a, ar_shapes)                # (total_pixels,)
 
     arted_flux = F_quiet_px * contrast_surface
 
@@ -1074,9 +1101,8 @@ def build_system(
         planet). For a single planet (``nplanet == 1``), a bare array of
         length ``nwave`` is also accepted as that planet's chromatic depth
         (legacy convention). Multiple overlapping planets combine their
-        occultation multiplicatively (they are opaque, unlike active
-        regions' additive contrast -- see ``make_lc``), so overlapping
-        transits never drive flux negative.
+        occultation multiplicatively (they are opaque -- see ``make_lc``),
+        so overlapping transits never drive flux negative.
     ecc, omega_peri : float or array-like, shape (nplanet,), optional
         Orbital eccentricity and argument of periastron [rad]. Only
         meaningful together with a transit; default to 0.0 (circular,
@@ -1379,9 +1405,8 @@ def make_lc(
         planet). For a single planet (``nplanet == 1``), a bare array of
         length ``nwave`` is also accepted as that planet's chromatic depth
         (legacy convention). Multiple overlapping planets combine their
-        occultation multiplicatively (they are opaque, unlike active
-        regions' additive contrast -- see ``make_lc``), so overlapping
-        transits never drive flux negative.
+        occultation multiplicatively (they are opaque -- see ``make_lc``),
+        so overlapping transits never drive flux negative.
         The planet's parameters are all-or-nothing, exactly like the AR parameters:
         give every one of them to evaluate a transit at those (possibly
         traced) values instead of the static ones ``model`` was built
@@ -2133,9 +2158,9 @@ def quick_lc(
         planet). For a single planet (``nplanet == 1``), a bare array of
         length ``nwave`` is also accepted as that planet's chromatic depth
         (legacy convention). Multiple overlapping planets combine their
-        occultation multiplicatively (they are opaque, unlike active
-        regions' additive contrast -- see ``make_lc``), so overlapping
-        transits never drive flux negative.
+        occultation multiplicatively (they are opaque -- see ``make_lc``),
+        so overlapping transits never drive flux negative.
+
         The planet's parameters are all-or-nothing, exactly like the AR parameters:
         give every one of them to evaluate a transit at those (possibly
         traced) values instead of the static ones ``model`` was built
