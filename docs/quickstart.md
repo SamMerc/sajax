@@ -120,7 +120,7 @@ in the previous code, with
     ar_smoothness      = [4.0, 1.0],             # sharp-edged spot, soft-edged facula
 ```
 
-Active regions overlap additively - e.g. an umbra sitting inside a penumbra contributes on top of it, rather than one masking the other.
+Overlapping active regions are layered rather than co-added: the first region listed is on top, and each later region shows only through the regions above it. This keeps the flux from going negative and lets a fully opaque region show exactly its input contrast. List an umbra before its penumbra; otherwise the penumbra hides it.
 
 ### Case 3: Planetary transit
 #### a) Basic transit + stellar activity
@@ -206,7 +206,7 @@ in Case 3's snippet, with
     k                  = [0.1, 0.05],      # Rp/R* per planet
 ```
 
-Unlike active regions - which are spectral-contrast modulators and so overlap **additively** (Case 2) - planets are opaque occulters, so overlapping transits combine **multiplicatively**: the fraction of a pixel's flux surviving `nplanet` planets is `prod(1 - mask_i)`, not `1 - sum(mask_i)`. This keeps the occulted flux fraction physically bounded in `[0, 1]` even when two planets' discs overlap on the stellar grid, rather than letting their masks double-subtract past full occultation.
+Planets are opaque occulters, so overlapping transits combine **multiplicatively**: the fraction of a pixel's flux surviving `nplanet` planets is `prod(1 - mask_i)`, not `1 - sum(mask_i)`. This keeps the occulted flux fraction physically bounded in `[0, 1]` even when two planets' discs overlap on the stellar grid, rather than letting their masks double-subtract past full occultation.
 
 ### Case 4: Time-evolving active regions
 

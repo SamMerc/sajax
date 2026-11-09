@@ -32,7 +32,8 @@ cd sajax
 
 Useful flags: `--cpu` / `--gpu` to override the auto-detection (state `--gpu`
 explicitly when provisioning on a GPU-less HPC login node), `--docs` to add the
-sphinx dependencies, and `--check` to report what is already installed. 
+sphinx dependencies, `--examples` to add the dependencies used in the example notebooks, 
+and `--check` to report what is already installed. 
 
 Run commands in the environment with `uv run <cmd>` (e.g. `uv run pytest`), or
 activate it with `source .venv/bin/activate`.

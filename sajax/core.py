@@ -433,9 +433,9 @@ def _flux_at_wavelength(
 
     where ``C_a = F_a / F_quiet`` is active region ``a``'s spectral
     contrast, evaluated at each pixel's own Doppler-shifted wavelength and
-    with its own limb-darkening law. Overlapping active regions sum, so
-    e.g. an umbra sitting inside a penumbra contributes simultaneously (the
-    combined dip exceeds either component's own contrast).
+    with its own limb-darkening law. ``ar_shapes`` are already layered (see
+    ``_compute_single_phase``): the first-listed AR is on top, so overlapping
+    ARs do not co-add and the surface stays between 1 and their contrasts.
 
     The planet mask is computed here, per wavelength, from ``k_wl`` -- not
     precomputed once per phase like ``ar_shapes`` -- because ``k`` (unlike
@@ -498,7 +498,7 @@ def _flux_at_wavelength(
     F_quiet_px  = F_quiet_local * ldc_quiet    # (total_pixels,)
     F_active_px = F_active_local * ldc_active  # (nar, total_pixels)
 
-    # ---- Contrast surface: overlapping ARs sum -----
+    # ---- Contrast surface: ar_shapes are already layered -----
     # Floored denominator: see _FLUX_RATIO_EPS -- pixels where F_quiet_px
     # is exactly 0 (e.g. an intensity_profile with I(mu=0)=0) still
     # contribute exactly 0 to arted_flux below, but without the floor the
@@ -580,6 +580,11 @@ def _compute_single_phase(
             cart[0], cart[1], cart[2], sr, sm,
         )
     )(ar_cart_all, arsize_rads, ar_smoothness)
+    # Layering: the first-listed AR is on top; each AR shows only through those above it.
+    transmittance = jnp.cumprod(
+        jnp.vstack([jnp.ones_like(ar_shapes[:1]), 1.0 - ar_shapes[:-1]]), axis=0
+    )
+    ar_shapes = ar_shapes * transmittance
 
     # ---- vmap over wavelengths ----
     # ld_coeffs_active/I_profile_active have the wavelength axis second
@@ -1074,9 +1079,8 @@ def build_system(
         planet). For a single planet (``nplanet == 1``), a bare array of
         length ``nwave`` is also accepted as that planet's chromatic depth
         (legacy convention). Multiple overlapping planets combine their
-        occultation multiplicatively (they are opaque, unlike active
-        regions' additive contrast -- see ``make_lc``), so overlapping
-        transits never drive flux negative.
+        occultation multiplicatively (they are opaque -- see ``make_lc``),
+        so overlapping transits never drive flux negative.
     ecc, omega_peri : float or array-like, shape (nplanet,), optional
         Orbital eccentricity and argument of periastron [rad]. Only
         meaningful together with a transit; default to 0.0 (circular,
@@ -1301,7 +1305,8 @@ def make_lc(
     model : dict
         Pre-built model dict returned by ``build_system``.
     flux_active : jnp.ndarray, shape (nar, nwave), (nwave,), or (ntime, nar, nwave), optional
-        Per-active-region flux / spectrum. Must be >= 0.
+        Per-active-region flux / spectrum. Must be >= 0. Where active regions
+        overlap, the first listed is on top (list an umbra before its penumbra).
         - If (nwave,):     broadcasts to all active regions.
         - If (nar, nwave): each active region gets its own spectrum.
         - If (ntime, nar, nwave): each active region gets its own time-varying spectrum.
@@ -1379,9 +1384,8 @@ def make_lc(
         planet). For a single planet (``nplanet == 1``), a bare array of
         length ``nwave`` is also accepted as that planet's chromatic depth
         (legacy convention). Multiple overlapping planets combine their
-        occultation multiplicatively (they are opaque, unlike active
-        regions' additive contrast -- see ``make_lc``), so overlapping
-        transits never drive flux negative.
+        occultation multiplicatively (they are opaque -- see ``make_lc``),
+        so overlapping transits never drive flux negative.
         The planet's parameters are all-or-nothing, exactly like the AR parameters:
         give every one of them to evaluate a transit at those (possibly
         traced) values instead of the static ones ``model`` was built
@@ -2020,7 +2024,8 @@ def quick_lc(
     flux_quiet : array_like, shape (nwave,)
         Quiet-photosphere flux / spectrum.
     flux_active : jnp.ndarray, shape (nar, nwave), (nwave,), or (ntime, nar, nwave), optional
-        Per-active-region flux / spectrum. Must be >= 0.
+        Per-active-region flux / spectrum. Must be >= 0. Where active regions
+        overlap, the first listed is on top (list an umbra before its penumbra).
         - If (nwave,):     broadcasts to all active regions.
         - If (nar, nwave): each active region gets its own spectrum.
         - If (ntime, nar, nwave): each active region gets its own time-varying spectrum.
@@ -2133,9 +2138,8 @@ def quick_lc(
         planet). For a single planet (``nplanet == 1``), a bare array of
         length ``nwave`` is also accepted as that planet's chromatic depth
         (legacy convention). Multiple overlapping planets combine their
-        occultation multiplicatively (they are opaque, unlike active
-        regions' additive contrast -- see ``make_lc``), so overlapping
-        transits never drive flux negative.
+        occultation multiplicatively (they are opaque -- see ``make_lc``),
+        so overlapping transits never drive flux negative.
         The planet's parameters are all-or-nothing, exactly like the AR parameters:
         give every one of them to evaluate a transit at those (possibly
         traced) values instead of the static ones ``model`` was built
