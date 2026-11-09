@@ -120,7 +120,7 @@ in the previous code, with
     ar_smoothness      = [4.0, 1.0],             # sharp-edged spot, soft-edged facula
 ```
 
-Active regions overlap is treated in a coldest-wins scenario through composite layering. In doing so, active regions do not co-add, their contribution is at maximum the peak of any given individual active region's contrast. This prevents fluxes from going negative and ensures that was is simulated is exactly what is observed on the stellar surface.
+Overlapping active regions are layered rather than co-added: the first region listed is on top, and each later region shows only through the regions above it. This keeps the flux from going negative and lets a fully opaque region show exactly its input contrast. List an umbra before its penumbra; otherwise the penumbra hides it.
 
 ### Case 3: Planetary transit
 #### a) Basic transit + stellar activity

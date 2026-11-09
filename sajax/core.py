@@ -398,35 +398,6 @@ def _evaluate_ldc(
 # 4. Single-wavelength flux  (vmapped over the spectral axis)
 # ---------------------------------------------------------------------------
 
-def _composite_ar_layers(
-    C_a:       jnp.ndarray,  # (nar, total_pixels) spectral contrast per AR
-    ar_shapes: jnp.ndarray,  # (nar, total_pixels) opacity per AR, in [0, 1]
-) -> jnp.ndarray:
-    """
-    Porter-Duff "over" of every active region onto the quiet photosphere.
-    Stacked per pixel from hottest (bottom) to coldest (top)::
-
-        CS <- S + ar_shapes[a] * (C_a - S)
-
-    Returns
-    -------
-    jnp.ndarray, shape (total_pixels,)
-    """
-    if C_a.shape[0] == 1:
-        return 1.0 - (1.0 - C_a[0]) * ar_shapes[0]
-
-    order = jnp.argsort(-C_a, axis=0)
-    C_sorted     = jnp.take_along_axis(C_a, order, axis=0)
-    shape_sorted = jnp.take_along_axis(ar_shapes, order, axis=0)
-
-    def _over(S, layer):
-        c, a = layer
-        return S + a * (c - S), None
-
-    S, _ = jax.lax.scan(_over, jnp.ones_like(C_a[0]), (C_sorted, shape_sorted))
-    return S
-
-
 def _flux_at_wavelength(
     # --- vmapped: one scalar/slice per wavelength ---
     wavelength_target:    float,
@@ -456,13 +427,15 @@ def _flux_at_wavelength(
     """
     Compute disc-integrated flux for a single wavelength channel.
 
-    Builds the dimensionless "contrast surface" F_p/F_quiet by alpha
-    compositing every active region onto the quiet photosphere (see
-    ``_composite_ar_layers``): ``ar_shapes[a]`` is AR ``a``'s opacity and
-    ``C_a = F_a / F_quiet`` its spectral contrast, evaluated at each pixel's
-    own Doppler-shifted wavelength and with its own limb-darkening law.
-    Overlapping active regions are stacked coldest to hottest, and the surface
-    always stays within the component contrasts (never negative).
+    Builds the dimensionless "contrast surface"::
+
+        F_p/F_quiet = 1 - sum_a (1 - C_a) * ar_shapes[a]
+
+    where ``C_a = F_a / F_quiet`` is active region ``a``'s spectral
+    contrast, evaluated at each pixel's own Doppler-shifted wavelength and
+    with its own limb-darkening law. ``ar_shapes`` are already layered (see
+    ``_compute_single_phase``): the first-listed AR is on top, so overlapping
+    ARs do not co-add and the surface stays between 1 and their contrasts.
 
     The planet mask is computed here, per wavelength, from ``k_wl`` -- not
     precomputed once per phase like ``ar_shapes`` -- because ``k`` (unlike
@@ -525,13 +498,13 @@ def _flux_at_wavelength(
     F_quiet_px  = F_quiet_local * ldc_quiet    # (total_pixels,)
     F_active_px = F_active_local * ldc_active  # (nar, total_pixels)
 
-    # ---- Contrast surface: overlapping ARs layered, coldest wins style -----
+    # ---- Contrast surface: ar_shapes are already layered -----
     # Floored denominator: see _FLUX_RATIO_EPS -- pixels where F_quiet_px
     # is exactly 0 (e.g. an intensity_profile with I(mu=0)=0) still
     # contribute exactly 0 to arted_flux below, but without the floor the
     # 0/0 here would inject a NaN that corrupts the whole light curve.
     C_a = F_active_px / jnp.maximum(F_quiet_px[None, :], _FLUX_RATIO_EPS)  # (nar, total_pixels)
-    contrast_surface = _composite_ar_layers(C_a, ar_shapes)                # (total_pixels,)
+    contrast_surface = 1.0 - jnp.sum((1.0 - C_a) * ar_shapes, axis=0)      # (total_pixels,)
 
     arted_flux = F_quiet_px * contrast_surface
 
@@ -607,6 +580,11 @@ def _compute_single_phase(
             cart[0], cart[1], cart[2], sr, sm,
         )
     )(ar_cart_all, arsize_rads, ar_smoothness)
+    # Layering: the first-listed AR is on top; each AR shows only through those above it.
+    transmittance = jnp.cumprod(
+        jnp.vstack([jnp.ones_like(ar_shapes[:1]), 1.0 - ar_shapes[:-1]]), axis=0
+    )
+    ar_shapes = ar_shapes * transmittance
 
     # ---- vmap over wavelengths ----
     # ld_coeffs_active/I_profile_active have the wavelength axis second
@@ -1327,7 +1305,8 @@ def make_lc(
     model : dict
         Pre-built model dict returned by ``build_system``.
     flux_active : jnp.ndarray, shape (nar, nwave), (nwave,), or (ntime, nar, nwave), optional
-        Per-active-region flux / spectrum. Must be >= 0.
+        Per-active-region flux / spectrum. Must be >= 0. Where active regions
+        overlap, the first listed is on top (list an umbra before its penumbra).
         - If (nwave,):     broadcasts to all active regions.
         - If (nar, nwave): each active region gets its own spectrum.
         - If (ntime, nar, nwave): each active region gets its own time-varying spectrum.
@@ -2045,7 +2024,8 @@ def quick_lc(
     flux_quiet : array_like, shape (nwave,)
         Quiet-photosphere flux / spectrum.
     flux_active : jnp.ndarray, shape (nar, nwave), (nwave,), or (ntime, nar, nwave), optional
-        Per-active-region flux / spectrum. Must be >= 0.
+        Per-active-region flux / spectrum. Must be >= 0. Where active regions
+        overlap, the first listed is on top (list an umbra before its penumbra).
         - If (nwave,):     broadcasts to all active regions.
         - If (nar, nwave): each active region gets its own spectrum.
         - If (ntime, nar, nwave): each active region gets its own time-varying spectrum.
@@ -2160,7 +2140,6 @@ def quick_lc(
         (legacy convention). Multiple overlapping planets combine their
         occultation multiplicatively (they are opaque -- see ``make_lc``),
         so overlapping transits never drive flux negative.
-
         The planet's parameters are all-or-nothing, exactly like the AR parameters:
         give every one of them to evaluate a transit at those (possibly
         traced) values instead of the static ones ``model`` was built

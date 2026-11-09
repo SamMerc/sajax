@@ -45,7 +45,7 @@ _compute_planet_mask
 
 _compute_all_planets_mask
     Combine ``_compute_planet_mask`` over ``nplanet`` planets, multiplicatively
-    (planets are opaque occulters, unlike active regions' additive contrast).
+    (planets are opaque occulters).
 
 LdMode
     Type alias for supported limb-darkening laws.

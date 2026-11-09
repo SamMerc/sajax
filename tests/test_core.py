@@ -5,7 +5,6 @@ Run with:
     pytest tests/
 """
 
-import itertools
 import warnings
 
 import numpy as np
@@ -23,7 +22,6 @@ from sajax.core import (
     _compute_all_planets_mask,
     _compute_ar_shape,
     _compute_single_phase,
-    _composite_ar_layers,
 )
 from sajax.planet import _compute_planet_mask
 from sajax.geometry import rotate_active_region
@@ -381,16 +379,15 @@ class TestMultiAR:
 
 
 # ===================================================================
-# AR overlap layering (Porter-Duff "over", coldest region on top)
+# AR overlap layering (Porter-Duff "over", first-listed region on top)
 # ===================================================================
 
 class TestAROverlapLayering:
     """
     Overlapping active regions are alpha-composited onto the quiet
-    photosphere, stacked per pixel from hottest to coldest see 
-    ``_composite_ar_layers``): the coldest region wins wherever it is
-    opaque, the contrast surface stays within the component contrasts (so
-    flux never goes negative).
+    photosphere in list order (see ``_compute_single_phase``): the first
+    listed region wins wherever it is opaque, and the contrast surface stays
+    between 1 and the component contrasts (so flux never goes negative).
     """
 
     @staticmethod
@@ -434,16 +431,16 @@ class TestAROverlapLayering:
             times=_t([0.0]), P_rot=_P_ROT, stellar_grid_size=50, ve=0.0,
         )
         assert float(combined[0][0, 0]) < float(shallower_alone[0][0, 0]), (
-            "the colder component should cover the warmer one, giving a "
-            "deeper dip than the warmer component alone"
+            "the colder component, listed first, should cover the warmer one, "
+            "giving a deeper dip than the warmer component alone"
         )
 
     @pytest.mark.parametrize("flux_active", [[0.3, 0.7], [0.7, 0.3]])
-    def test_coldest_wins_at_shared_centre(self, flux_active):
-        """Two co-located ARs: the centre shows exactly the colder contrast,
-        whichever AR index it has."""
+    def test_first_listed_wins_at_shared_centre(self, flux_active):
+        """Two co-located ARs: the centre shows exactly the first-listed
+        contrast, whichever is colder."""
         _, smap = self._star_map(flux_active, [0, 0], [0, 0], [15, 15], [50, 50])
-        assert abs(self._centre(smap) - 0.3) < 1e-4
+        assert abs(self._centre(smap) - flux_active[0]) < 1e-4
 
     def test_nested_umbra_contrast_recovered(self):
         """A soft umbra (0.1) inside a soft penumbra (0.6) keeps its injected
@@ -451,13 +448,10 @@ class TestAROverlapLayering:
         _, smap = self._star_map([0.1, 0.6], [0, 0], [0, 0], [5, 15], [3, 3])
         assert abs(self._centre(smap) - 0.1) < 1e-4
 
-    def test_spot_covers_facula(self):
-        _, smap = self._star_map([1.3, 0.5], [0, 0], [0, 0], [15, 15], [50, 50])
-        assert abs(self._centre(smap) - 0.5) < 1e-4
-
-    def test_ar_index_order_irrelevant(self):
-        lc_a, _ = self._star_map([0.2, 0.6, 1.2], [0, 5, -5], [0, 4, 8], [10, 15, 12], [3, 1, 20])
-        lc_b, _ = self._star_map([1.2, 0.2, 0.6], [-5, 0, 5], [8, 0, 4], [12, 10, 15], [20, 3, 1])
+    def test_order_irrelevant_for_separate_ars(self):
+        """Swapping two far-apart ARs leaves the light curve unchanged."""
+        lc_a, _ = self._star_map([0.2, 0.8], [0, 0], [-50, 50], [5, 5], [20, 20])
+        lc_b, _ = self._star_map([0.8, 0.2], [0, 0], [50, -50], [5, 5], [20, 20])
         np.testing.assert_allclose(lc_a, lc_b, rtol=1e-6)
 
     @pytest.mark.parametrize("contrast", [0.0, 0.05])
@@ -472,69 +466,6 @@ class TestAROverlapLayering:
         on_disc = smap[np.isfinite(smap) & (smap > 0)]
         assert on_disc.min() >= 0.3 - 1e-5
         assert on_disc.max() <= 1.3 + 1e-5
-
-    def test_single_layer_matches_linear_contrast(self):
-        """One AR takes the shortcut branch: bit-identical to the
-        pre-layering formula 1 - (1 - C) * shape."""
-        k1, k2 = jax.random.split(jax.random.PRNGKey(1))
-        C = jax.random.uniform(k1, (1, 1000), maxval=1.6)
-        a = jax.random.uniform(k2, (1, 1000))
-        np.testing.assert_array_equal(
-            _composite_ar_layers(C, a), 1.0 - (1.0 - C[0]) * a[0],
-        )
-
-    def test_single_layer_branch_agrees_with_general_stack(self):
-        """The single-AR shortcut equals the general sorted stack: adding a
-        zero-opacity layer (any contrast) routes the same AR through the
-        sort + scan path without changing the result."""
-        k1, k2, k3 = jax.random.split(jax.random.PRNGKey(2), 3)
-        C = jax.random.uniform(k1, (1, 1000), maxval=1.6)
-        a = jax.random.uniform(k2, (1, 1000))
-        C_pad = jnp.concatenate([C, jax.random.uniform(k3, (1, 1000), maxval=1.6)])
-        a_pad = jnp.concatenate([a, jnp.zeros_like(a)])
-        np.testing.assert_allclose(
-            _composite_ar_layers(C, a), _composite_ar_layers(C_pad, a_pad), atol=1e-6,
-        )
-
-    def test_single_layer_branch_resolved_at_trace_time(self):
-        """nar is static, so a lone AR compiles to plain elementwise ops (no
-        sort/scan), while nar >= 2 keeps the sorted stack."""
-        def jaxpr_text(nar):
-            # str() includes nested sub-jaxprs (argsort is wrapped in its own jit)
-            C = jnp.ones((nar, 8)); a = jnp.ones((nar, 8))
-            return str(jax.make_jaxpr(_composite_ar_layers)(C, a))
-        single, multi = jaxpr_text(1), jaxpr_text(2)
-        assert "sort" not in single and "scan" not in single
-        assert "sort" in multi and "scan" in multi
-
-    def test_single_layer_branch_gradients(self):
-        """d/dC = shape and d/dshape = C - 1 through the shortcut branch."""
-        C = jnp.array([[0.3, 1.2, 0.0]])
-        a = jnp.array([[0.5, 1.0, 0.0]])
-        gC, ga = jax.grad(lambda C, a: _composite_ar_layers(C, a).sum(), argnums=(0, 1))(C, a)
-        np.testing.assert_allclose(gC, a)
-        np.testing.assert_allclose(ga, C - 1.0)
-
-    def test_coldest_on_top_is_darkest_stacking(self):
-        """Pixelwise, the sorted stack is never brighter than any fixed order."""
-        k1, k2 = jax.random.split(jax.random.PRNGKey(0))
-        C = jax.random.uniform(k1, (4, 5000), maxval=1.6)
-        a = jax.random.uniform(k2, (4, 5000))
-        S = _composite_ar_layers(C, a)
-        for perm in itertools.permutations(range(4)):
-            S_fixed = jnp.ones_like(C[0])
-            for k in perm:
-                S_fixed = S_fixed + a[k] * (C[k] - S_fixed)
-            assert float(jnp.max(S - S_fixed)) <= 1e-6
-
-    def test_continuous_through_contrast_crossing(self):
-        """Sweeping one contrast through another's swaps their stacking order;
-        the surface must not jump at the swap."""
-        c0 = jnp.linspace(0.3, 0.7, 2001)
-        S = jax.vmap(lambda c: _composite_ar_layers(
-            jnp.array([[c], [0.5]]), jnp.array([[0.7], [0.6]]))[0])(c0)
-        steps = jnp.abs(jnp.diff(S))
-        assert float(steps.max()) < 3.0 * float(jnp.median(steps))
 
     def test_gradients_finite_for_degenerate_overlaps(self):
         model = build_system(
@@ -1882,7 +1813,7 @@ class TestTransitOversampling:
 # 4b.  Multiple planets (trailing nplanet axis, mirroring TestMultiAR)
 #
 # Planets combine *multiplicatively* (opaque occulters), unlike
-# TestAROverlapLayering's coldest-on-top AR compositing -- named/documented
+# TestAROverlapLayering's first-listed-on-top AR compositing -- named/documented
 # explicitly to avoid confusion, since both "multiple X" cases sit close
 # together conceptually.
 # ===================================================================
