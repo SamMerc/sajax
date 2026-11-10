@@ -31,7 +31,6 @@ Key Features
 
    examples/introduction
    examples/inference
-   examples/comparison
 
 
 .. toctree::

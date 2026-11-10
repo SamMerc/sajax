@@ -3,17 +3,6 @@ core.py -- JAX-accelerated stellar active region light-curve engine.
 
 This module is a complete rewrite of ``SAGE1/sage.py`` in JAX.
 
-JIT compilation
----------------
-*Do NOT jit(make_lc) directly* -- it contains Python-level
-control flow on model metadata.  Instead, the inner _compute_all_phases
-is the hot path and is safe to JIT via::
-
-    from jax import jit
-    _compute_all_phases_jit = jit(_compute_all_phases, static_argnames=[
-        "star_pixel_rad", "total_pixels", "ld_mode",
-        "plot_map_wavelength", "n", "transit_softness"
-    ])
 """
 
 from __future__ import annotations
@@ -31,6 +20,8 @@ import interpax
 
 from .geometry import rotate_active_region
 from .planet import _compute_all_planets_mask, compute_multi_planet_sky_positions
+
+_MIN_RESOLVED_PLANET_PX = 5.0
 
 # Type alias
 LdMode = Literal[
@@ -431,7 +422,8 @@ def _flux_at_wavelength(
     col_idx:         jnp.ndarray, # (total_pixels,) int
     vel_col:         jnp.ndarray, # (n,)
     ld_mode:        LdMode,
-) -> tuple[float, jnp.ndarray]:
+    compute_map:     bool = False,
+) -> tuple[float, Optional[jnp.ndarray]]:
     """
     Compute disc-integrated flux for a single wavelength channel.
 
@@ -441,9 +433,9 @@ def _flux_at_wavelength(
 
     where ``C_a = F_a / F_quiet`` is active region ``a``'s spectral
     contrast, evaluated at each pixel's own Doppler-shifted wavelength and
-    with its own limb-darkening law. Overlapping active regions sum, so
-    e.g. an umbra sitting inside a penumbra contributes simultaneously (the
-    combined dip exceeds either component's own contrast).
+    with its own limb-darkening law. ``ar_shapes`` are already layered (see
+    ``_compute_single_phase``): the first-listed AR is on top, so overlapping
+    ARs do not co-add and the surface stays between 1 and their contrasts.
 
     The planet mask is computed here, per wavelength, from ``k_wl`` -- not
     precomputed once per phase like ``ar_shapes`` -- because ``k`` (unlike
@@ -464,10 +456,16 @@ def _flux_at_wavelength(
     The combined planet mask is 1 for pixels occulted by any planet; those
     pixels contribute zero flux regardless of active-region status.
 
+    ``compute_map`` (default False): ``arted_flux`` is only needed to
+    visually plot the 2D stellar map -- the light curve itself only needs
+    the scalar ``total_flux``. Thus, ``compute_map`` is default False to skip
+    the creation of ``arted_flux`` and avoid un-necessary computation.
+
     Returns
     -------
     total_flux : float            - active-region'ed integrated flux
-    arted_flux : (total_pixels,)  - per-pixel flux values (for map output)
+    arted_flux : (total_pixels,) or None    - per-pixel flux (for map output),
+                                               None when compute_map=False
     """
     planet_mask = _compute_all_planets_mask(
         x_disc, y_disc, star_pixel_rad, planet_xyz, k_wl, transit_softness,
@@ -500,7 +498,7 @@ def _flux_at_wavelength(
     F_quiet_px  = F_quiet_local * ldc_quiet    # (total_pixels,)
     F_active_px = F_active_local * ldc_active  # (nar, total_pixels)
 
-    # ---- Contrast surface: overlapping ARs sum -----
+    # ---- Contrast surface: ar_shapes are already layered -----
     # Floored denominator: see _FLUX_RATIO_EPS -- pixels where F_quiet_px
     # is exactly 0 (e.g. an intensity_profile with I(mu=0)=0) still
     # contribute exactly 0 to arted_flux below, but without the floor the
@@ -514,8 +512,10 @@ def _flux_at_wavelength(
     # Multiplication (not jnp.where) so gradients flow through the planet mask.
     arted_flux = arted_flux * (1.0 - planet_mask)
 
-    total_flux = jnp.sum(arted_flux) / jnp.float32(total_pixels)
-    return total_flux, arted_flux
+    # Experimentation revealed that the following dot product
+    # is measurably faster than jnp.sum.
+    total_flux = jnp.dot(arted_flux, jnp.ones_like(arted_flux)) / jnp.float32(total_pixels)
+    return total_flux, (arted_flux if compute_map else None)
 
 
 # ---------------------------------------------------------------------------
@@ -549,7 +549,8 @@ def _compute_single_phase(
     n:                   int,         # full grid side (for map scatter)
     flat_indices:        jnp.ndarray, # (total_pixels,) scatter indices
     transit_softness:    float = 0.0, # see _compute_planet_mask
-) -> tuple[jnp.ndarray, jnp.ndarray]:
+    compute_map:         bool = False,
+) -> tuple[jnp.ndarray, Optional[jnp.ndarray]]:
     """
     Full spectral computation for one rotational phase, including optional
     pixel-level planet occultation.
@@ -569,7 +570,8 @@ def _compute_single_phase(
                              to the quiet-star baseline -- divide by that
                              yourself, e.g. via a quiet-star-only call to
                              ``make_lc``, if you want relative flux)
-    star_map              : (n, n)  flux map at plot_map_wavelength
+    star_map              : (n, n) or None  flux map at plot_map_wavelength,
+                             None when compute_map=False
     """
     # ---- active region shapes: (nar, total_pixels) -----------------------
     ar_shapes = vmap(
@@ -578,6 +580,11 @@ def _compute_single_phase(
             cart[0], cart[1], cart[2], sr, sm,
         )
     )(ar_cart_all, arsize_rads, ar_smoothness)
+    # Layering: the first-listed AR is on top; each AR shows only through those above it.
+    transmittance = jnp.cumprod(
+        jnp.vstack([jnp.ones_like(ar_shapes[:1]), 1.0 - ar_shapes[:-1]]), axis=0
+    )
+    ar_shapes = ar_shapes * transmittance
 
     # ---- vmap over wavelengths ----
     # ld_coeffs_active/I_profile_active have the wavelength axis second
@@ -603,6 +610,7 @@ def _compute_single_phase(
             col_idx          = col_idx,
             vel_col          = vel_col,
             ld_mode         = ld_mode,
+            compute_map      = compute_map,
         ),
         in_axes=(0, 0, 1, 0, 1, 1),
     )
@@ -615,6 +623,9 @@ def _compute_single_phase(
         I_profile_active,
         k,
     )
+
+    if not compute_map:
+        return flux_per_wavelength, None
 
     # ---- Reconstruct 2D map at plot_map_wavelength ----------------------
     map_idx   = jnp.argmin(jnp.abs(wavelength - plot_map_wavelength))
@@ -655,7 +666,8 @@ def _compute_all_phases(
     n:                   int,
     flat_indices:        jnp.ndarray,
     transit_softness:    float = 0.0,
-) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    compute_map:         bool = False,
+) -> tuple[jnp.ndarray, Optional[jnp.ndarray]]:
     """
     vmap ``_compute_single_phase`` over the phase axis.
 
@@ -664,10 +676,13 @@ def _compute_all_phases(
     ``jnp.full((nphase, 1, 3), [0, 0, -1e10])`` and an all-zero ``k`` to
     disable transit (no performance overhead).
 
+    ``compute_map=False`` skips the per-phase 2D map reconstruction inside
+    ``_compute_single_phase`` to save on computation.
+
     Returns
     -------
     lc_raw    : (nphase, nwave)
-    star_maps : (nphase, n, n)
+    star_maps : (nphase, n, n), or None when compute_map=False
     """
     _phase_vmap = vmap(
         functools.partial(
@@ -695,6 +710,7 @@ def _compute_all_phases(
             n                   = n,
             flat_indices        = flat_indices,
             transit_softness    = transit_softness,
+            compute_map         = compute_map,
         ),
         in_axes=(0,0), # vmap over both ar_carts and planet_xyz
     )
@@ -735,7 +751,8 @@ def _compute_all_phases_evolving(
     n:                  int,
     flat_indices:       jnp.ndarray,
     transit_softness:   float = 0.0,
-) -> tuple[jnp.ndarray, jnp.ndarray]:
+    compute_map:        bool = False,
+) -> tuple[jnp.ndarray, Optional[jnp.ndarray]]:
     """
     Time-varying counterpart to ``_compute_all_phases``. Used only when make_lc() is given at least
     one AR parameter with a time axis. Identical to _compute_all_phases except
@@ -743,10 +760,13 @@ def _compute_all_phases_evolving(
     position is rebuilt and rotated fresh every phase. This function's existence adds no cost to 
     _compute_all_phases or any caller that doesn't use it.
 
+    ``compute_map=False`` skips the per-phase 2D map reconstruction inside
+    ``_compute_single_phase`` to save on computation.
+
     Returns
     -------
     lc_raw    : (nphase, nwave)
-    star_maps : (nphase, n, n)
+    star_maps : (nphase, n, n), or None when compute_map=False
     """
     def _single_phase(ar_lat_ph, ar_long_ph, arsize_ph, smooth_ph, flux_ph,
                        planet_xyz_ph, phase_deg):
@@ -770,7 +790,7 @@ def _compute_all_phases_evolving(
             star_pixel_rad=star_pixel_rad, total_pixels=total_pixels,
             arsize_rads=arsize_ph, ar_smoothness=smooth_ph, k=k, ld_mode=ld_mode,
             plot_map_wavelength=plot_map_wavelength, n=n, flat_indices=flat_indices,
-            transit_softness=transit_softness,
+            transit_softness=transit_softness, compute_map=compute_map,
         )
 
     _phase_vmap = vmap(_single_phase, in_axes=(0, 0, 0, 0, 0, 0, 0))
@@ -1059,9 +1079,8 @@ def build_system(
         planet). For a single planet (``nplanet == 1``), a bare array of
         length ``nwave`` is also accepted as that planet's chromatic depth
         (legacy convention). Multiple overlapping planets combine their
-        occultation multiplicatively (they are opaque, unlike active
-        regions' additive contrast -- see ``make_lc``), so overlapping
-        transits never drive flux negative.
+        occultation multiplicatively (they are opaque -- see ``make_lc``),
+        so overlapping transits never drive flux negative.
     ecc, omega_peri : float or array-like, shape (nplanet,), optional
         Orbital eccentricity and argument of periastron [rad]. Only
         meaningful together with a transit; default to 0.0 (circular,
@@ -1268,6 +1287,7 @@ def make_lc(
     sp_orb: Optional[float | jnp.ndarray] = None,
     k: Optional[float | jnp.ndarray] = None,
     transit_softness: float = 0.0,
+    compute_map: bool = False,
 ) -> tuple:
     """
     Evaluate the light curve for a given set of active region and planetary parameters.
@@ -1285,7 +1305,8 @@ def make_lc(
     model : dict
         Pre-built model dict returned by ``build_system``.
     flux_active : jnp.ndarray, shape (nar, nwave), (nwave,), or (ntime, nar, nwave), optional
-        Per-active-region flux / spectrum. Must be >= 0.
+        Per-active-region flux / spectrum. Must be >= 0. Where active regions
+        overlap, the first listed is on top (list an umbra before its penumbra).
         - If (nwave,):     broadcasts to all active regions.
         - If (nar, nwave): each active region gets its own spectrum.
         - If (ntime, nar, nwave): each active region gets its own time-varying spectrum.
@@ -1363,9 +1384,8 @@ def make_lc(
         planet). For a single planet (``nplanet == 1``), a bare array of
         length ``nwave`` is also accepted as that planet's chromatic depth
         (legacy convention). Multiple overlapping planets combine their
-        occultation multiplicatively (they are opaque, unlike active
-        regions' additive contrast -- see ``make_lc``), so overlapping
-        transits never drive flux negative.
+        occultation multiplicatively (they are opaque -- see ``make_lc``),
+        so overlapping transits never drive flux negative.
         The planet's parameters are all-or-nothing, exactly like the AR parameters:
         give every one of them to evaluate a transit at those (possibly
         traced) values instead of the static ones ``model`` was built
@@ -1394,10 +1414,14 @@ def make_lc(
         transit-geometry parameter on the fixed pixel grid, so
         ``jax.grad`` w.r.t. ``k``/``a_over_rstar``/``inclination``/``t0``/
         ``period``/``ecc``/``omega_peri`` is exactly 0 almost everywhere
-        regardless of the values passed in above. Set this > 0 (e.g. a few
-        tenths of a pixel in R* units) to get a smooth, non-zero gradient
-        for gradient-based retrieval of those parameters. See
-        ``_compute_planet_mask`` for details and trade-offs.
+        regardless of the values passed in above. Set this > 0 to get a
+        smooth, non-zero gradient for gradient-based retrieval of those
+        parameters. Use ``default_transit_softness`` for the value.
+    compute_map : bool, optional
+        Default False. The per-phase ``(n, n)`` stellar pixel map
+        (``star_maps`` below) is useful for plotting/diagnostics but constructing
+        it roughly doubles this function's wall-clock cost. Thus, it is set to False
+        by default. Users can set it to True when they want the map.
 
     Returns
     -------
@@ -1818,6 +1842,7 @@ def make_lc(
         nplanet        = 1
         planet_xyz_all = jnp.zeros((nphase_compute, 1, 3)).at[:, :, 2].set(-1e10)
         k_val          = 0.0
+        transit_softness = 0.0
 
     # ---- Broadcast k to (nplanet, nwave): see _prepare_transit_k for the
     # full shape convention. A scalar means the same (achromatic) radius
@@ -1855,6 +1880,7 @@ def make_lc(
             n                   = model["n"],
             flat_indices        = model["flat_indices"],
             transit_softness    = transit_softness,
+            compute_map         = compute_map,
         )
     else:
         lc_raw, star_maps = _compute_all_phases_evolving(
@@ -1885,6 +1911,7 @@ def make_lc(
             n                   = model["n"],
             flat_indices        = model["flat_indices"],
             transit_softness    = transit_softness,
+            compute_map         = compute_map,
         )
 
     # ---- Oversample averaging --------------------------------------------
@@ -1893,8 +1920,10 @@ def make_lc(
         lc_raw = lc_raw.reshape(nphase_original, oversample, nwave).mean(axis=1)
 
         # star_maps: take only the first sub-exposure per original phase
-        # (averaging 2D maps is expensive and rarely useful)
-        star_maps = star_maps[::oversample]
+        # (averaging 2D maps is expensive and rarely useful). None when
+        # compute_map=False -- nothing to subsample.
+        if star_maps is not None:
+            star_maps = star_maps[::oversample]
 
     # ---- Single-wavelength convenience: drop the now-degenerate nwave
     # axis so single-channel callers get (nphase,) instead of (nphase, 1) ---
@@ -1902,6 +1931,39 @@ def make_lc(
         lc_raw = lc_raw[..., 0]
 
     return lc_raw, star_maps
+
+
+def default_transit_softness(model: dict, k: Optional[float] = None) -> float:
+    """
+    Recommended ``transit_softness`` for a model: half a pixel,
+    ``0.5 / model["star_pixel_rad"]``.
+
+    Parameters
+    ----------
+    model : dict
+        As returned by ``build_system``.
+    k : float or array_like, optional
+        Approximate planet-to-star radius ratio. Only used to warn when the
+        smallest planet spans too few pixels for the grid to resolve.
+
+    Returns
+    -------
+    float
+        ``transit_softness`` in units of R*.
+    """
+    star_pixel_rad = float(model["star_pixel_rad"])
+    if k is not None:
+        k_min = float(np.min(np.asarray(k, dtype=float)))
+        if k_min * star_pixel_rad < _MIN_RESOLVED_PLANET_PX:
+            warnings.warn(
+                f"default_transit_softness: the planet spans only "
+                f"{2.0 * k_min * star_pixel_rad:.1f} pixels (k={k_min:g}, "
+                f"stellar_grid_size={star_pixel_rad:g}), so the pixel grid itself "
+                f"-- not transit_softness -- dominates the transit depth error. "
+                f"Raise stellar_grid_size for an accurate depth.",
+                UserWarning, stacklevel=2,
+            )
+    return 0.5 / star_pixel_rad
 
 
 def quick_lc(
@@ -1935,6 +1997,7 @@ def quick_lc(
     sp_orb: float | np.ndarray = 0.0,
     ar_time_interp: ArTimeInterp = "linear",
     verbose: bool = False,
+    compute_map: bool = True,
 ) -> tuple:
     """
     Convenience wrapper: build model and evaluate in one call.
@@ -1961,7 +2024,8 @@ def quick_lc(
     flux_quiet : array_like, shape (nwave,)
         Quiet-photosphere flux / spectrum.
     flux_active : jnp.ndarray, shape (nar, nwave), (nwave,), or (ntime, nar, nwave), optional
-        Per-active-region flux / spectrum. Must be >= 0.
+        Per-active-region flux / spectrum. Must be >= 0. Where active regions
+        overlap, the first listed is on top (list an umbra before its penumbra).
         - If (nwave,):     broadcasts to all active regions.
         - If (nar, nwave): each active region gets its own spectrum.
         - If (ntime, nar, nwave): each active region gets its own time-varying spectrum.
@@ -2074,9 +2138,8 @@ def quick_lc(
         planet). For a single planet (``nplanet == 1``), a bare array of
         length ``nwave`` is also accepted as that planet's chromatic depth
         (legacy convention). Multiple overlapping planets combine their
-        occultation multiplicatively (they are opaque, unlike active
-        regions' additive contrast -- see ``make_lc``), so overlapping
-        transits never drive flux negative.
+        occultation multiplicatively (they are opaque -- see ``make_lc``),
+        so overlapping transits never drive flux negative.
         The planet's parameters are all-or-nothing, exactly like the AR parameters:
         give every one of them to evaluate a transit at those (possibly
         traced) values instead of the static ones ``model`` was built
@@ -2104,6 +2167,11 @@ def quick_lc(
     verbose : bool, optional
         If True, print informational messages (LDC broadcasting, phase
         oversampling) while building the model. Default False.
+    compute_map : bool, optional
+        Default True (unlike ``make_lc``'s own default of False) -- a
+        one-off call like this one is commonly used to plot/inspect the
+        stellar map, so the map is returned by default here. Set False for
+        a light-curve-only call if you don't need it.
 
     Returns
     -------
@@ -2115,7 +2183,8 @@ def quick_lc(
                     quiet-star baseline -- divide by that yourself if you
                     want relative flux). If ``nwave == 1``, the wavelength
                     axis is dropped and this is shape (ntimes,).
-    ``star_maps`` - (ntimes, n, n) stellar flux map per phase
+    ``star_maps`` - (ntimes, n, n) stellar flux map per phase, or None
+                    when compute_map=False
                     (maps are from the *first* sub-exposure of each phase
                     when oversampling is active)
     """
@@ -2142,6 +2211,7 @@ def quick_lc(
         jnp.asarray(np.atleast_1d(np.asarray(ar_smoothness, dtype=np.float32))),
         None if ld_coeffs_active is None else jnp.asarray(np.asarray(ld_coeffs_active, dtype=np.float32)),
         None if I_profile_active  is None else jnp.asarray(np.asarray(I_profile_active,  dtype=np.float32)),
+        compute_map=compute_map,
     )
-    return np.array(lc), np.array(star_maps)
+    return np.array(lc), (None if star_maps is None else np.array(star_maps))
 

@@ -17,6 +17,7 @@ from sajax import quick_lc, build_stellar_grid
 from sajax.core import (
     build_system,
     make_lc,
+    default_transit_softness,
     flare_template,
     _compute_all_planets_mask,
     _compute_ar_shape,
@@ -378,20 +379,39 @@ class TestMultiAR:
 
 
 # ===================================================================
-# AR overlap compounding (contrast-surface superposition, no more
-# hottest/coldest-wins winner-take-all)
+# AR overlap layering (Porter-Duff "over", first-listed region on top)
 # ===================================================================
 
-class TestAROverlapCompounding:
+class TestAROverlapLayering:
     """
-    Overlapping active regions contribute simultaneously -- the contrast
-    surface sums their deviations from 1 (see core.py's module docstring) --
-    rather than one excluding the other. An umbra sitting inside a penumbra
-    should therefore combine to something darker than either component's
-    own contrast alone.
+    Overlapping active regions are alpha-composited onto the quiet
+    photosphere in list order (see ``_compute_single_phase``): the first
+    listed region wins wherever it is opaque, and the contrast surface stays
+    between 1 and the component contrasts (so flux never goes negative).
     """
 
-    def test_same_centre_overlap_deeper_than_either_alone(
+    @staticmethod
+    def _star_map(flux_active, lat, lon, size, sm, grid=60):
+        """No limb darkening, flat unit spectrum: the map *is* the contrast surface."""
+        model = build_system(
+            wavelength=np.array([550.0]), flux_quiet=np.array([1.0]),
+            ld_coeffs=[0.0, 0.0], inc_star=90.0,
+            times=_t([0.0]), P_rot=_P_ROT, stellar_grid_size=grid, ve=0.0,
+        )
+        lc, maps = make_lc(
+            model, jnp.asarray(flux_active, jnp.float32)[:, None],
+            jnp.asarray(lat, jnp.float32), jnp.asarray(lon, jnp.float32),
+            jnp.asarray(size, jnp.float32), jnp.asarray(sm, jnp.float32),
+            compute_map=True,
+        )
+        return np.array(lc), np.array(maps[0])
+
+    @staticmethod
+    def _centre(star_map):
+        c = star_map.shape[0] // 2
+        return float(star_map[c, c])
+
+    def test_same_centre_overlap_deeper_than_shallower_alone(
         self, flat_spectra, base_params
     ):
         wl, flux_quiet, _ = flat_spectra
@@ -411,31 +431,78 @@ class TestAROverlapCompounding:
             times=_t([0.0]), P_rot=_P_ROT, stellar_grid_size=50, ve=0.0,
         )
         assert float(combined[0][0, 0]) < float(shallower_alone[0][0, 0]), (
-            "overlapping components should compound, giving a deeper dip "
-            "than either component alone"
+            "the colder component, listed first, should cover the warmer one, "
+            "giving a deeper dip than the warmer component alone"
         )
 
-    def test_exact_contrast_surface_value_at_shared_centre(self):
-        """
-        With no limb darkening, the flux at the exact shared centre of two
-        co-located ARs must equal 1 - [(1-C1)+(1-C2)] exactly.
-        """
-        wl = np.array([550.0])
-        flux_quiet = np.array([1.0])
-        params = dict(ld_coeffs=[0.0, 0.0], inc_star=90.0)
+    @pytest.mark.parametrize("flux_active", [[0.3, 0.7], [0.7, 0.3]])
+    def test_first_listed_wins_at_shared_centre(self, flux_active):
+        """Two co-located ARs: the centre shows exactly the first-listed
+        contrast, whichever is colder."""
+        _, smap = self._star_map(flux_active, [0, 0], [0, 0], [15, 15], [50, 50])
+        assert abs(self._centre(smap) - flux_active[0]) < 1e-4
+
+    def test_nested_umbra_contrast_recovered(self):
+        """A soft umbra (0.1) inside a soft penumbra (0.6) keeps its injected
+        contrast at its centre, instead of co-adding to 1 - (0.9 + 0.4)."""
+        _, smap = self._star_map([0.1, 0.6], [0, 0], [0, 0], [5, 15], [3, 3])
+        assert abs(self._centre(smap) - 0.1) < 1e-4
+
+    def test_order_irrelevant_for_separate_ars(self):
+        """Swapping two far-apart ARs leaves the light curve unchanged."""
+        lc_a, _ = self._star_map([0.2, 0.8], [0, 0], [-50, 50], [5, 5], [20, 20])
+        lc_b, _ = self._star_map([0.8, 0.2], [0, 0], [50, -50], [5, 5], [20, 20])
+        np.testing.assert_allclose(lc_a, lc_b, rtol=1e-6)
+
+    @pytest.mark.parametrize("contrast", [0.0, 0.05])
+    def test_stacked_dark_regions_never_negative(self, contrast):
+        """Under the old additive rule three overlapping C=0.05 spots gave
+        1 - 3*0.95 < 0; layering is bounded below by the coldest contrast."""
+        _, smap = self._star_map([contrast] * 3, [0, 2, -2], [0, 2, 1], [20, 20, 20], [50, 50, 50])
+        assert np.nanmin(smap) >= 0.0
+
+    def test_contrast_surface_bounded_by_components(self):
+        _, smap = self._star_map([0.3, 0.7, 1.3], [0, 3, -3], [0, 5, 2], [15, 20, 25], [2, 5, 1])
+        on_disc = smap[np.isfinite(smap) & (smap > 0)]
+        assert on_disc.min() >= 0.3 - 1e-5
+        assert on_disc.max() <= 1.3 + 1e-5
+
+    def test_gradients_finite_for_degenerate_overlaps(self):
         model = build_system(
-            wavelength=wl, flux_quiet=flux_quiet, **params,
-            times=_t(np.array([0.0])), P_rot=_P_ROT, stellar_grid_size=60, ve=0.0,
+            wavelength=np.array([500.0, 600.0]), flux_quiet=np.ones(2), ld_coeffs=[0.4, 0.2],
+            times=_t([0.0, 90.0]), P_rot=_P_ROT, stellar_grid_size=40,
         )
-        flux_active = jnp.array([[0.3], [0.7]])
-        result = make_lc(
-            model, flux_active, jnp.array([0.0, 0.0]), jnp.array([0.0, 0.0]),
-            jnp.array([15.0, 15.0]), jnp.array([50.0, 50.0]),
+        cases = [
+            ([[0.5, 0.5], [0.5, 0.5]], [0, 0],   [0, 0], [10, 10],   [3, 3]),     # co-located, tied
+            ([[0.0, 0.0], [0.6, 0.6]], [0, 0],   [0, 0], [5, 15],    [50, 50]),   # C = 0
+            ([[0.2, 0.9], [0.9, 0.2]], [0, 3],   [0, 3], [0.01, 40], [2000, 1]),  # crossing spectra, extremes
+            ([[1.3, 1.3], [0.4, 0.4]], [10, 12], [0, 5], [15, 8],    [5, 5]),     # facula + spot
+        ]
+        loss = lambda *p: make_lc(model, *p)[0].sum()
+        for case in cases:
+            params = [jnp.asarray(x, jnp.float32) for x in case]
+            grads = jax.grad(loss, argnums=(0, 1, 2, 3, 4))(*params)
+            assert all(bool(jnp.all(jnp.isfinite(g))) for g in grads)
+
+    def test_gradient_fd_agreement_for_overlapping_ars(self):
+        model = build_system(
+            wavelength=np.array([550.0]), flux_quiet=np.ones(1), ld_coeffs=[0.4, 0.2],
+            times=_t([0.0]), P_rot=_P_ROT, stellar_grid_size=60,
         )
-        star_map = np.array(result[1][0])
-        centre = star_map.shape[0] // 2
-        expected = 1.0 - ((1 - 0.3) + (1 - 0.7))
-        assert abs(star_map[centre, centre] - expected) < 1e-4
+        fa   = jnp.array([[0.2], [0.6], [1.2]], jnp.float32)
+        lat  = jnp.array([0.0, 4.0, -6.0], jnp.float32)
+        lon  = jnp.array([0.0, 3.0, 8.0], jnp.float32)
+        size = jnp.array([8.0, 18.0, 12.0], jnp.float32)
+        sm   = jnp.array([3.0, 2.0, 5.0], jnp.float32)
+        loss = lambda fa, size: make_lc(model, fa, lat, lon, size, sm)[0].sum()
+        g_fa, g_size = jax.grad(loss, argnums=(0, 1))(fa, size)
+        for i in range(3):
+            h = 0.01
+            fd_fa = (loss(fa.at[i, 0].add(h), size) - loss(fa.at[i, 0].add(-h), size)) / (2 * h)
+            h = 0.05
+            fd_sz = (loss(fa, size.at[i].add(h)) - loss(fa, size.at[i].add(-h))) / (2 * h)
+            np.testing.assert_allclose(float(g_fa[i, 0]), float(fd_fa), rtol=0.02)
+            np.testing.assert_allclose(float(g_size[i]), float(fd_sz), rtol=0.02)
 
     def test_non_overlapping_ars_independent(self, flat_spectra, base_params):
         """Two well-separated ARs shouldn't measurably interact."""
@@ -1745,8 +1812,8 @@ class TestTransitOversampling:
 # ===================================================================
 # 4b.  Multiple planets (trailing nplanet axis, mirroring TestMultiAR)
 #
-# Planets combine *multiplicatively* (opaque occulters), the opposite of
-# TestAROverlapCompounding's *additive* AR-contrast rule -- named/documented
+# Planets combine *multiplicatively* (opaque occulters), unlike
+# TestAROverlapLayering's first-listed-on-top AR compositing -- named/documented
 # explicitly to avoid confusion, since both "multiple X" cases sit close
 # together conceptually.
 # ===================================================================
@@ -2988,6 +3055,7 @@ class TestTimeVaryingAR:
             evolving_model_oversampled, flux_active=jnp.array(FLUX_SPOT),
             ar_lat=jnp.array([0.0]), ar_long=jnp.array([0.0]), ar_size=ar_size_t,
             ar_smoothness=jnp.array([_SM]),
+            compute_map=True,
         )
         assert np.array(lc).shape == (self._NTIME,)  # nwave == 1: axis already dropped
         assert star_maps.shape[0] == self._NTIME
@@ -3425,3 +3493,198 @@ class TestBjdReferenceEpoch:
 
         g = jax.grad(f)(self._T0_BJD)
         assert jnp.isfinite(g)
+
+
+# ========================================================================
+# 11.  Soft planet mask -- area-matched sigmoid edge
+# ========================================================================
+
+class TestSoftPlanetMask:
+    """
+    The ``softness > 0`` branch of ``_compute_planet_mask`` is judged against
+    the *analytic* disc area ``pi * k**2``, never against the hard mask: on
+    a pixel grid the hard mask is itself a biased estimator (float32 ties at
+    the boundary and pixel quantisation both make it under-count), and the
+    soft mask is the more accurate of the two.  A plain sigmoid centred on
+    ``d = k`` over-covers by ``(pi**2 / 3) * (softness / k)**2`` in relative
+    area; the implementation shrinks the sigmoid midpoint to cancel that.
+    A 100-px grid so that sub-pixel softness values are resolved.
+    """
+
+    _GRID = 100
+
+    @pytest.fixture(autouse=True)
+    def _grid(self):
+        g = build_stellar_grid(self._GRID, 0.0)
+        self.x   = jnp.asarray(g["x"])
+        self.y   = jnp.asarray(g["y"])
+        self.spr = g["star_pixel_rad"]
+
+    def _mask(self, k, softness):
+        return _compute_planet_mask(self.x, self.y, self.spr, 0.0, 0.0, 5.0, k, softness)
+
+    def _area(self, mask):
+        """Mask-weighted area in units of R*^2 (each pixel is 1/spr^2)."""
+        return float(jnp.sum(mask)) / self.spr ** 2
+
+    def _uncorrected_sigmoid_area(self, k, softness):
+        """Reference: a sigmoid centred exactly on d = k, i.e. the mask
+        without the k_eff correction, computed inline so the test can't
+        drift with the implementation."""
+        d = jnp.sqrt((self.x / self.spr) ** 2 + (self.y / self.spr) ** 2)
+        return self._area(jax.nn.sigmoid((k - d) / softness))
+
+    @pytest.mark.parametrize("ratio", [0.025, 0.05, 0.1])
+    def test_area_matches_analytic_disc(self, ratio):
+        """softness / k is what governs the area accuracy; up to a tenth of
+        k the soft mask recovers pi k^2 to better than 1 percent."""
+        k = 0.1
+        area = self._area(self._mask(k, ratio * k))
+        assert area == pytest.approx(np.pi * k ** 2, rel=1e-2)
+
+    @pytest.mark.parametrize("k", [0.02, 0.05, 0.1])
+    def test_soft_mask_beats_hard_mask_against_analytic_area(self, k):
+        """Guards against 'fixing' the soft mask back toward the hard one:
+        at the default half-pixel softness the soft area is strictly closer to the
+        analytic disc than the hard-edge count is."""
+        softness = 0.5 / self.spr
+        analytic = np.pi * k ** 2
+        err_soft = abs(self._area(self._mask(k, softness)) - analytic)
+        err_hard = abs(self._area(self._mask(k, 0.0)) - analytic)
+        assert err_soft < err_hard
+
+    def test_area_matched_midpoint_beats_uncorrected_sigmoid(self):
+        k, softness = 0.1, 0.01   # softness / k = 0.1
+        analytic = np.pi * k ** 2
+        err_corrected   = abs(self._area(self._mask(k, softness)) - analytic)
+        err_uncorrected = abs(self._uncorrected_sigmoid_area(k, softness) - analytic)
+        assert err_corrected < 0.2 * err_uncorrected
+
+    @pytest.mark.parametrize("ratio", [0.05, 0.1])
+    def test_uncorrected_excess_matches_prediction(self, ratio):
+        """The excess area an uncentred sigmoid removes, relative to the
+        analytic disc, is (pi^2 / 3) (softness / k)^2 to leading order.
+        Measured as uncorrected minus corrected so pixelation cancels."""
+        k = 0.1
+        softness = ratio * k
+        excess = (self._uncorrected_sigmoid_area(k, softness)
+                  - self._area(self._mask(k, softness))) / (np.pi * k ** 2)
+        assert excess == pytest.approx((np.pi ** 2 / 3.0) * ratio ** 2, rel=0.15)
+
+    def test_grad_wrt_k_is_finite_and_nonzero(self):
+        g = jax.grad(lambda k: jnp.sum(self._mask(k, 0.5 / self.spr)))(jnp.float32(0.1))
+        assert jnp.isfinite(g)
+        assert float(g) > 0.0
+
+    def test_zero_k_gives_empty_mask_and_finite_grad(self):
+        """k = 0 (a no-planet tracer) must not divide by zero inside the
+        k_eff correction: the mask is all zeros and the gradient is finite."""
+        softness = 0.5 / self.spr
+        mask = self._mask(0.0, softness)
+        assert not jnp.any(mask)
+        g = jax.grad(lambda k: jnp.sum(self._mask(k, softness)))(jnp.float32(0.0))
+        assert jnp.isfinite(g)
+
+    def test_zero_softness_is_exactly_binary(self):
+        mask = np.array(self._mask(0.1, 0.0))
+        assert set(np.unique(mask).tolist()) <= {0.0, 1.0}
+
+
+# ========================================================================
+# 12.  default_transit_softness -- half a pixel, from the grid alone
+# ========================================================================
+
+def _grid_model(grid):
+    """Single-epoch (mid-transit) combined model on a ``grid``-px star."""
+    return build_system(
+        wavelength=WAVELENGTH, flux_quiet=FLUX_QUIET, **BASE_PARAMS,
+        times=np.array([0.0]), P_rot=P_ROT, **TRANSIT_PARAMS,
+        stellar_grid_size=grid, ve=VE, ld_mode="quadratic", oversample=1,
+    )
+
+
+def _analytic_central_depth(k, u1, u2, n=200_001):
+    """Depth of a planet of radius ``k`` centred on a quadratically
+    limb-darkened disc: integral(I 2 pi r, 0..k) / integral(I 2 pi r, 0..1),
+    I(r) = 1 - u1 (1 - mu) - u2 (1 - mu)^2, mu = sqrt(1 - r^2)."""
+    def integral(upper):
+        r  = np.linspace(0.0, upper, n)
+        mu = np.sqrt(np.clip(1.0 - r ** 2, 0.0, 1.0))
+        I  = 1.0 - u1 * (1.0 - mu) - u2 * (1.0 - mu) ** 2
+        return np.trapezoid(I * 2.0 * np.pi * r, r)
+    return integral(k) / integral(1.0)
+
+
+@pytest.fixture(scope="module")
+def models():
+    return {grid: _grid_model(grid) for grid in (50, 100, 200)}
+
+
+class TestDefaultTransitSoftness:
+
+    @staticmethod
+    def _kwargs(**overrides):
+        """make_lc kwargs for an inert AR plus the shared transit set."""
+        kwargs = dict(
+            flux_active=jnp.array(FLUX_QUIET),
+            ar_lat=jnp.array([0.0]), ar_long=jnp.array([180.0]),
+            ar_size=jnp.array([0.0]), ar_smoothness=jnp.array([_SM]),
+            **TRANSIT_PARAMS,
+        )
+        kwargs.update(overrides)
+        return kwargs
+
+    def _depth(self, model, k, softness):
+        """Relative depth at mid-transit, with the baseline taken from a
+        k = 0 evaluation of the same model rather than from the light curve."""
+        in_transit = make_lc(model, transit_softness=softness, **self._kwargs(k=k))[0]
+        baseline   = make_lc(model, transit_softness=softness, **self._kwargs(k=0.0))[0]
+        return 1.0 - float(in_transit[0]) / float(baseline[0])
+
+    @pytest.mark.parametrize("grid", [50, 100, 200])
+    def test_half_pixel_of_the_grid(self, models, grid):
+        assert default_transit_softness(models[grid]) == pytest.approx(0.5 / grid)
+
+    def test_scales_inversely_with_grid(self, models):
+        s50, s100, s200 = (default_transit_softness(models[g]) for g in (50, 100, 200))
+        assert s50 == pytest.approx(2.0 * s100)
+        assert s100 == pytest.approx(2.0 * s200)
+
+    def test_independent_of_k(self, models):
+        model = models[100]
+        assert default_transit_softness(model, k=0.05) == default_transit_softness(model, k=0.2)
+        assert default_transit_softness(model, k=0.1) == default_transit_softness(model)
+
+    def test_warns_when_planet_spans_too_few_pixels(self, models):
+        with pytest.warns(UserWarning, match="spans only"):
+            default_transit_softness(models[50], k=0.03)
+
+    def test_array_k_warns_on_smallest_planet(self, models):
+        """``build_system`` takes ``k`` with a trailing (nplanet,) axis, so the
+        same array must be accepted here; the smallest planet drives the warning."""
+        with pytest.warns(UserWarning, match="spans only"):
+            default_transit_softness(models[100], k=np.array([0.1, 0.03]))
+
+    def test_no_warning_when_planet_is_resolved(self, models):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            default_transit_softness(models[100], k=0.1)
+
+    def test_depth_at_default_matches_analytic_and_beats_hard_edge(self, models):
+        model = models[100]
+        k = TRANSIT_PARAMS["k"]
+        u1, u2 = BASE_PARAMS["ld_coeffs"]
+        analytic   = _analytic_central_depth(k, u1, u2)
+        depth_soft = self._depth(model, k, default_transit_softness(model, k=k))
+        depth_hard = self._depth(model, k, 0.0)
+        assert depth_soft == pytest.approx(analytic, rel=1e-2)
+        assert abs(depth_soft - analytic) < abs(depth_hard - analytic)
+
+    def test_gradient_flows_at_default(self, models):
+        model = models[100]
+        softness = default_transit_softness(model)
+        g = jax.grad(
+            lambda k: jnp.sum(make_lc(model, transit_softness=softness, **self._kwargs(k=k))[0])
+        )(jnp.float32(TRANSIT_PARAMS["k"]))
+        assert jnp.isfinite(g)
+        assert float(g) != 0.0

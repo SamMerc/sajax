@@ -53,3 +53,8 @@ exotic_ld_data/
 # JAX / XLA compilation cache
 jax_cache/
 __jax_cache__/
+
+docs/examples/comparison.ipynb
+
+# Local development scratch (benchmarks, etc.)
+dev/

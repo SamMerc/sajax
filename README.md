@@ -6,6 +6,7 @@
 
 ![Tests](https://github.com/SamMerc/sajax/actions/workflows/tests.yml/badge.svg)
 [![codecov](https://codecov.io/gh/SamMerc/sajax/branch/main/graph/badge.svg)](https://codecov.io/gh/SamMerc/sajax)
+[![License: MIT](https://img.shields.io/badge/License-MIT-purple.svg)](LICENCE)
 
 SAJAX is a package that models contamination of exoplanet spectro-photometric time series by active regions (spots, faculae, and flares) on the stellar surface. Its core functionality builds on [SAGE](https://github.com/chakrah/sage) ([Chakraborty et al. 2024](https://www.aanda.org/articles/aa/abs/2024/05/aa47727-23/aa47727-23.html)), and it draws additional inspiration from [ANTARESS](https://gitlab.unige.ch/spice_dune/antaress) ([Bourrier et al. 2024](https://www.aanda.org/articles/aa/full_html/2024/11/aa49203-24/aa49203-24.html)).
 
@@ -31,7 +32,8 @@ cd sajax
 
 Useful flags: `--cpu` / `--gpu` to override the auto-detection (state `--gpu`
 explicitly when provisioning on a GPU-less HPC login node), `--docs` to add the
-sphinx dependencies, and `--check` to report what is already installed. 
+sphinx dependencies, `--examples` to add the dependencies used in the example notebooks, 
+and `--check` to report what is already installed. 
 
 Run commands in the environment with `uv run <cmd>` (e.g. `uv run pytest`), or
 activate it with `source .venv/bin/activate`.
@@ -48,7 +50,6 @@ sajax/
 ├── docs/
 │   ├── examples/
 │   │   ├── introduction.ipynb
-│   │   ├── comparison.ipynb
 │   │   ├── inference.ipynb
 ├── tests/
 │   ├── test_core.py

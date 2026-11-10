@@ -364,6 +364,8 @@ def compute_multi_planet_sky_positions(
 
 _MASK_D_TINY = 1e-12  # floor under the sqrt so d(sqrt)/d(d2) doesn't blow up
                        # for a pixel landing exactly at the planet's centre.
+_MASK_K_TINY = 1e-6   # floor under k in the soft branch so the k_eff
+                       # area correction never divides by a k = 0 tracer.
 
 
 def _compute_planet_mask(
@@ -398,10 +400,8 @@ def _compute_planet_mask(
     Passing ``softness > 0`` replaces the hard threshold with a sigmoid of
     that transition width (in stellar radii), giving a smooth, non-zero
     gradient w.r.t. every transit-geometry parameter -- for gradient-based
-    retrieval only. It biases the effective transit depth/duration slightly
-    (a soft edge occults less than a hard one right at the boundary), so it
-    is opt-in and defaults off; ``quick_lc`` / physical simulation
-    is unaffected unless requested.
+    retrieval only. It is opt-in and defaults off; ``quick_lc`` / physical
+    simulation is unaffected unless requested.
 
     Parameters
     ----------
@@ -426,7 +426,11 @@ def _compute_planet_mask(
 
     if softness > 0.0:
         d = jnp.sqrt(jnp.maximum(d2, _MASK_D_TINY))
-        disc_mask = jax.nn.sigmoid((k - d) / softness)
+        k_safe    = jnp.maximum(k, _MASK_K_TINY)
+        k_eff     = k_safe * jax.lax.rsqrt(
+            1.0 + (jnp.pi ** 2 / 3.0) * (softness / k_safe) ** 2
+        )
+        disc_mask = jax.nn.sigmoid((k_eff - d) / softness)
     else:
         # Hard disc mask: pixel is occulted iff it lies within the planet disc.
         disc_mask = (d2 < k ** 2).astype(jnp.float32)
