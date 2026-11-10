@@ -13,9 +13,9 @@ authors:
 affiliations:
   - name: Department of Earth, Atmospheric and Planetary Sciences, Massachusetts Institute of Technology, 77 Massachusetts Avenue, Cambridge, MA 02139, USA
     index: 1
-  - name: University of Warwick
+  - name: Department of Physics, University of Warwick, Gibbet Hill Road, Coventry CV4 7AL, UK
     index: 2
-date: 12 October 2026
+date: 9 November 2026
 bibliography: paper.bib
 
 ---
@@ -24,7 +24,7 @@ bibliography: paper.bib
 When a planet passes in front of its host star, the resulting flux dip reveals the planet's size, orbit and, across wavelengths, its atmosphere. 
 However, the stellar surface is not uniform: magnetic activity produces dark spots, bright faculae and short-lived flares that bias the measured transit depth, and leave their own spectral signatures. 
 `SAJAX` is a Python package that simulates these effects. 
-It places any number of active regions, each with its own spectrum and limb-darkening coefficients, on a pixelated grid of the visible stellar disk, rotates the star, and optionally transits one or more planets across it.
+It places any number of active regions, each with its own spectrum and limb-darkening, on a pixelated grid of the visible stellar disk, rotates the star, and optionally transits one or more planets across it.
 `SAJAX` offers active regions with tunable edge smoothness, from Gaussian to hard-edged, and properties that can evolve in time, capturing phenomena such as spot growth, latitudinal drift and flares. 
 Written in `JAX` [@jax2018github], it returns spectroscopic light curves, runs on CPUs and GPUs, and provides exact gradients for modern inference tools.
 
@@ -46,25 +46,23 @@ The result is a fast, flexible tool for exoplanet and stellar astronomers who ne
 These fall into three broad families, distinguished by how they represent active regions. 
 *Analytic and semi-analytic* tools, such as `macula` [@Kipping2012], `spotrod` [@Beky2014], `STSP` [@Morris2017] and `fleck` [@Morris2020], describe circular active regions in closed or nearly closed form. 
 *Spherical-harmonic* codes such as `starry` [@Luger2019], `starry_process` [@Luger2021], and `StarryStarryProcess` [@Sagynbayeva2025] expand the stellar surface map into spherical harmonics, reducing inference to fitting the expansion coefficients. 
-This allows active regions of arbitrary shape, but it has some drawbacks: small regions require computationally demanding, high-degree terms; a truncated expansion can produce ringing effects; and certain combinations can produce negative intensities. 
+This allows active regions of arbitrary shape, but it has some drawbacks: small regions require computationally demanding, high-degree terms; a truncated expansion can produce ringing effects; and certain combinations can produce negative flux. 
 Finally, *grid-based* codes tessellate the surface and assign properties to each cell. Examples include `PyTranSpot` [@Juvan2018], `SAGE` [@Chakraborty2024], `spot-model` [@Cracchiolo2021a; @Cracchiolo2021b], and `spotter` [@Garcia2025]. 
-The `SOAP` family [@Boisse2012; @Oshagh2013; @Dumusque2014; @Akinsanmi2018; @Serrano2020; @Cristo2025] and `ANTARESS` [@Bourrier2024] also model heterogeneous stellar surfaces, but with a primary focus on spectroscopic and radial-velocity observations.
+The `SOAP` family [@Boisse2012; @Oshagh2013; @Dumusque2014; @Akinsanmi2018; @Serrano2020; @Cristo2025] and `ANTARESS` [@Bourrier2024, Mercier et al., 2026, in prep] also model heterogeneous stellar surfaces, but with a primary focus on spectroscopic and radial-velocity observations.
 
 The two codes closest to `SAJAX` are `fleck` and `spotter`, both of which offer `JAX` implementations.
 `fleck` computes each active region's flux from its projected area and the limb-darkening at its center, and treats an active region as visible or hidden according to where its center lies on the visible hemisphere. 
 This is efficient and accurate for small active regions, but breaks down for large ones, such as those found on active M dwarfs. 
 `spotter` is built on a HEALPix map of the whole sphere [@Gorski2005]. It supports arbitrarily shaped active regions and Gaussian-process surface models. 
-
 `SAJAX` extends `SAGE`, a grid-based `NumPy` code that assigns separate spectra to the quiet photosphere and spots but relies on Python loops and does not model planetary occultations. 
 Its guiding philosophy is to be a lightweight, inference-focused model: each active region is described by a small set of physically interpretable parameters (position, size, edge smoothness, spectrum and limb-darkening) rather than a free-form surface map, and the model is differentiable and cheap.
-
 In practice, `SAJAX` is the more natural choice when active regions are large or overlapping, where `fleck`'s point-source treatment breaks down. As a grid-based code `SAJAX` trades some of `fleck`'s analytical speed for flexibility, but remains fast enough for the thousands of evaluations inference requires. It shines when inferring a planet's transmission spectrum jointly with active regions, particularly when the latter require distinct treatment: e.g. their own limb-darkening law, an umbra nested in a penumbra, or successive crossings of regions at different temperatures.
 
 
 # Software design
-Here, we describe the key features that underpin `SAJAX`'s core philosophy. An example implementation of SAJAX, to generate and fit data, is presented in \autoref{fig:main}.
+Here, we describe the key features that underpin `SAJAX`'s core philosophy. An example implementation of `SAJAX`, to generate and fit data, is presented in \autoref{fig:main}.
 
-**Two-stage interface** - Inference requires thousands of model evaluations or more, and `SAJAX` is built around this use case. 
+**Two-stage interface** - Inference requires thousands of model evaluations or more, and `SAJAX` is built around this requirement. 
 The light curve model is split into two functions. 
 `build_system` runs once in `NumPy` and performs the most expensive, parameter-independent work: building the stellar grid, limb-darkening angles, rotational velocity field, and, for a fixed orbit, planet positions. 
 `make_lc` then takes the output of `build_system`, together with the active region, limb-darkening and (optionally) planetary parameters, and produces the light curve(s). 
@@ -72,25 +70,25 @@ As a pure `JAX` function, `make_lc` can be passed to `jit`, `vmap` and `grad`, m
 
 **Grid** - `SAJAX` keeps `SAGE`'s sky-plane Cartesian grid: a disk of radius $R$ pixels in which every pixel has the same projected area, so disk integration is a plain sum. 
 Only the visible hemisphere is stored. 
-We tested several grid parameterizations, and the sky-plane Cartesian grid was consistently the fastest: because its pixels are defined in the plane of the sky and already carry equal projected area, disk integration requires no re-projection of grid cells onto the sky plane.
+We tested several grid parameterizations, and the sky-plane Cartesian grid was consistently the fastest: because its pixels are defined in the sky-plane and already carry equal projected area, disk integration requires no re-projection of grid cells onto the sky-plane.
 It is also more economical than a HEALPix sphere, requiring half as many pixels for equal resolution at the disk center.
 The cost is that resolution on the stellar surface degrades toward the limb.
 
 **Active regions** - Each region is a super-Gaussian with respect to the spherical distance $\theta$ from its center,
 $$S_a(\theta) = \exp\left[-\left(\frac{1-\cos\theta}{1-\cos r_a}\right)^{n_a}\right],$$
 with angular radius $r_a$ and smoothness $n_a$. 
-$n_a = 1$ gives a Gaussian, and $n_a \to \infty$ recovers the hard-edged parameterization. 
+$n_a = 1$ gives a Gaussian, and $n \to \infty$ recovers the hard-edged parameterization. 
 Because the profile is smooth for finite $n_a$, gradients with respect to position and size are well defined. 
-Each surface component — the quiet photosphere, denoted q, or an active region $a$ — carries its own spectrum $F(\lambda)$ and its own limb-darkening law $L(\mu)$, normalized so that $2\int_0^1 L(\mu)\,\mu\,\mathrm{d}\mu = 1$.
-The contribution of the pixel at $\mu_j$ is then
-$$f_j(\lambda) = F_\mathrm{q}(\lambda)\,L_\mathrm{q}(\mu_j)\left[1 - \sum_a \left(1 - \frac{F_a(\lambda)\,L_a(\mu_j)}{F_\mathrm{q}(\lambda)\,L_\mathrm{q}(\mu_j)}\right) S_a\right],$$
-and, because every pixel subtends the same projected area, the disk-integrated flux is the mean over the $N$ pixels of the disk,
-$$F(\lambda) = \frac{1}{N}\sum_{j=1}^{N} f_j(\lambda),$$
-with occulted pixels contributing zero.
-The bracketed contrasts are dimensionless, so $F(\lambda)$ carries the units of the input spectra, and a spotless, untransited star returns $F_\mathrm{q}(\lambda)$.
-Overlapping regions add, so an umbra inside a penumbra needs no special treatment. 
-Because contrasts combine additively, a stack of strongly overlapping dark regions can in principle drive a pixel's contribution negative. To avoid this and ensure the surface remains physical, `SAJAX` clips it at zero.
+Each surface component — the quiet photosphere, denoted $q$, or an active region $a$ — carries its own spectrum $F(\lambda)$ and limb-darkening law $L(\mu)$.
 Spectra are sampled at each pixel's rotationally Doppler-shifted wavelength.
+Regions are layered in the order provided, so each is visible only through those above it. 
+Therefore, region $a$ has effective weight $$w_a = S_a \prod_{b<a}\left(1 - S_b\right),$$ and the flux contribution of the pixel at viewing angle $\mu_j$ is $$f_j(\lambda) = F_q(\lambda),L_q(\mu_j)\left[1 - \sum_a \left(1 - \frac{F_a(\lambda),L_a(\mu_j)}{F_q(\lambda),L_q(\mu_j)}\right) w_a\right].$$
+Because every pixel subtends the same projected area, the disk-integrated flux is the mean over the $N$ pixels of the disk,
+$$F(\lambda) = \frac{1}{N}\sum_{j=1}^{N} f_j(\lambda),$$
+with planet-occulted pixels contributing zero.
+The bracketed contrasts are dimensionless, so $F(\lambda)$ carries the units of the input spectra, and a spotless, un-transited star returns $F_q(\lambda)$.
+Overlapping active regions never combine to produce more (or less) flux than that set by the injected contrasts. This prevents the introduction of unphysical, negative fluxes on the stellar surface and ensures the model remains self-consistent. 
+A spot with an umbra and penumbra (as illustrated in \autoref{fig:main}) is handled by listing the umbra first.
 
 **Planets** - Planets on Keplerian orbits occult pixels directly, so active region crossings follow naturally from the geometry. 
 By default, each planet is a hard pixel mask, which blocks gradient flow for the orbital parameters. 
@@ -102,7 +100,7 @@ A brightening region models a flare, and `SAJAX` includes a built-in flare templ
 Multiple transiting planets are also supported. 
 In keeping with `SAJAX`'s focus on inference, these features use separate code paths, so models that do not use them run no slower.
 
-![Example SAJAX simulation and fit of light curves for a planet transiting a star with a spot that has both an umbra and a penumbra. \textit{Panel A:} Geometry of the system, drawn with the injected parameters. \textit{Panel B:} Simulated light curves, offset vertically for visibility. The top curve is the white light curve and the ten below are the chromatic light curves, one per wavelength bin. For each, points are mock observations with $200$ ppm of white noise added and the black line is the best fit from an MCMC. Histograms to the right of each curve show its residuals which are consistent with Gaussian noise, indicating a good fit. \textit{Panels C, D, and E:} Retrieved penumbra contrast, umbra contrast, and transmission spectrum, respectively. Points are colored according to wavelength bin as in Panel B, and black curves show to the true spectra used to generate the data. The penumbra contrast and transmission spectra are recovered well, while the umbra contrast spectrum is offset from truth because of correlations with other fitted parameters, such as limb-darkening coefficients. \label{fig:main}](figures/main_plot.pdf){width=110%}
+![Example `SAJAX` simulation and fit of light curves for a planet transiting a star with a spot that has an umbra, a penumbra, and non-zero smoothness. \textit{Panel A:} Geometry of the system, drawn with the best-fit model. \textit{Panel B:} Simulated light curves, offset vertically for visibility. The top curve is the white light curve and the ten below are the chromatic light curves, one per wavelength bin. For each, points are mock observations with $300$ ppm of white noise added, and the black line is the best fit from `NumPyro`'s No U-Turn Sampler MCMC algorithm. Histograms to the right of each curve show its residuals which are consistent with Gaussian noise, indicating a good fit. \textit{Panels C, D, and E:} Retrieved penumbra contrast, umbra contrast, and transmission spectrum, respectively. Points and errorbars are colored according to wavelength bin as in Panel B, and correspond the posterior median and interquartile range. Black curves show the true spectra used to generate the data. The spectra, and in particular their relative variations, are well recovered. Both the umbra and penumbra contrast spectra are offset from truth because of correlations with other fitted parameters (e.g., limb-darkening coefficients). The spot smoothness, a free parameter shared by the umbra and penumbra, is retrieved as $3.5^{+0.9}_{-1.6}$, consistent with the injected value of 4.\label{fig:main}](figures/main_plot.pdf){width=110%}
 
 # Research impact statement 
 `SAJAX` has not yet been used in a published study, but it is already being applied by the authors to model chromatic spot-crossing signatures in transit spectra of active stars and to study how the choice of Bayesian inference method affects the resulting parameters' constraints.
@@ -115,7 +113,7 @@ The inference example follows a well-established approach, fitting the white lig
 # Future directions
 `SAJAX` will be maintained as a lightweight, fast tool compatible with evolving inference software, and we are considering three potential extensions. 
 The first, and most substantial, is producing radial-velocity time series, capturing the range of phenomena required of such models. 
-Building this directly into `SAJAX` will reduce the cost of joint fits to transit and radial-velocity data (e.g. Rossiter-McLaughlin analyses): instead of two separate model evaluations per likelihood call, the light-curve and radial-velocity models could share a single pass over the grid built by `build_system`.
+Building this directly into `SAJAX` will reduce the cost of joint fits to transit and radial-velocity data (e.g., in Rossiter-McLaughlin analyses [@Rossiter1924; @McLaughlin1924]): instead of two separate model evaluations per likelihood call, the light-curve and radial-velocity models could share a single pass over the grid built by `build_system`.
 The second is modeling oblate planets. 
 To our knowledge, no existing software computes the transit of an oblate planet across a star with active regions. 
 JWST data are only beginning to constrain planetary oblateness [@Cassese2024; @Dholakia2025], and having a differentiable `JAX` framework for such cases would allow the information content of such observations to be explored directly.
@@ -131,7 +129,7 @@ The authors take full responsibility for the software and the content of this ma
 Its core depends on `JAX` [@jax2018github], `NumPy` [@Harris2020], `SciPy` [@Virtanen2020], `Matplotlib` [@Hunter2007] and `interpax`. 
 The example notebooks additionally use `NumPyro` [@Phan2019], `ArviZ` [@Kumar2019], `corner` [@ForemanMackey2016], `ExoTiC-LD` [@Grant2024], and `speclib` [@Rackham2024].
 
-We thank Julien de Wit, Benjamin V. Rackham, Catriona Murray, Zoe de Beurs, and Prajwal Niraula for fruitful discussions during the development of `SAJAX`. We additionally thank Benjamin V. Rackham for constructive feedback which greatly improved the quality of this paper.
+We thank Julien de Wit, Benjamin V. Rackham, Catriona Murray, Zoe de Beurs, and Prajwal Niraula for fruitful discussions during the development of `SAJAX`. We additionally thank Benjamin V. Rackham for continued, constructive feedback which greatly improved the quality of this paper.
 S.J.M. acknowledges support from the Massachusetts Institute of Technology through the Hurley Fellowship. 
 L.M.A. acknowledges support from the Massachusetts Institute of Technology through the Lester Wolfe Fellowship and the MIT Presidential Fellowship.
 The authors acknowledge the MIT Office of Research Computing and Data for providing high performance computing resources that have contributed to the research results reported within this paper.
