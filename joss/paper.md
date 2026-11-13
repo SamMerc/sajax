@@ -33,7 +33,7 @@ The transit method has grown from a detection technique into a versatile tool fo
 Early applications were limited by instrumental precision, a barrier that next-generation facilities such as the James Webb Space Telescope have largely lifted [@Rustamkulov2023]. 
 At this new level of precision, our imperfect knowledge of host stars has become the primary source of systematic error in transit spectrophotometry.
 Of the many forms of stellar contamination, the most impactful for transits are magnetic active regions, such as spots, faculae and flares.
-Unocculted regions produce wavelength-dependent biases in the transit depth through the transit light source effect [@Pont2007; @Pont2008; McCullough2014; @Rackham2017; @Rackham2018; @Rackham2019; @Rackham2023], while occulted ones lead to in-transit bumps that skew the measured depth if not modeled [@Silva2003; @Murray2026]. 
+Unocculted regions produce wavelength-dependent biases in the transit depth through the transit light source effect [@Pont2007; @Pont2008; @McCullough2014; @Rackham2017; @Rackham2018; @Rackham2019; @Rackham2023], while occulted ones lead to in-transit bumps that skew the measured depth if not modeled [@Silva2003; @Murray2026]. 
 The planet signal and stellar surface are degenerate and must therefore be modeled together to constrain the planet properties.
 Conversely, because the transit chord scans the stellar disk, this joint modeling also turns each transit into a direct probe of the stellar surface.
 
