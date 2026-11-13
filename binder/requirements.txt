@@ -47,7 +47,7 @@ asdf-transform-schemas==0.6.0 ; python_full_version >= '3.11' and python_full_ve
     #   asdf-wcs-schemas
 asdf-wcs-schemas==0.5.0 ; python_full_version >= '3.11' and python_full_version < '3.14'
     # via gwcs
-astroid==4.3.1
+astroid==4.3.4
     # via sphinx-autoapi
 astropy==6.1.7 ; python_full_version < '3.11'
     # via
