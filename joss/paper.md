@@ -132,6 +132,7 @@ The example notebooks additionally use `NumPyro` [@Phan2019], `ArviZ` [@Kumar201
 We thank Julien de Wit, Benjamin V. Rackham, Catriona Murray, Zoe de Beurs, and Prajwal Niraula for fruitful discussions during the development of `SAJAX`. We additionally thank Benjamin V. Rackham for continued, constructive feedback which greatly improved the quality of this paper.
 S.J.M. acknowledges support from the Massachusetts Institute of Technology through the Hurley Fellowship. 
 L.M.A. acknowledges support from the Massachusetts Institute of Technology through the Lester Wolfe Fellowship and the MIT Presidential Fellowship.
+H.C. acknowledges support from the Swiss National Science Foundation (SNSF) under the Postdoc Mobility grant P500-2_239025. 
 The authors acknowledge the MIT Office of Research Computing and Data for providing high performance computing resources that have contributed to the research results reported within this paper.
 
 # References
