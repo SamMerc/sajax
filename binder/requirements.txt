@@ -479,7 +479,7 @@ pygments==2.21.0
     #   ipython-pygments-lexers
     #   pydata-sphinx-theme
     #   sphinx
-pyparsing==3.3.2
+pyparsing==3.3.3
     # via matplotlib
 python-dateutil==2.9.0.post0
     # via
