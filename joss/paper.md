@@ -33,7 +33,7 @@ The transit method has grown from a detection technique into a versatile tool fo
 Early applications were limited by instrumental precision, a barrier that next-generation facilities such as the James Webb Space Telescope have largely lifted [@Rustamkulov2023]. 
 At this new level of precision, our imperfect knowledge of host stars has become the primary source of systematic error in transit spectrophotometry.
 Of the many forms of stellar contamination, the most impactful for transits are magnetic active regions, such as spots, faculae and flares.
-Unocculted regions produce wavelength-dependent biases in the transit depth through the transit light source effect [@Rackham2017; @Rackham2018; @Rackham2019; @Rackham2023], while occulted ones lead to in-transit bumps that skew the measured depth if not modeled [@Murray2026]. 
+Unocculted regions produce wavelength-dependent biases in the transit depth through the transit light source effect [@Pont2007; @Pont2008; McCullough2014; @Rackham2017; @Rackham2018; @Rackham2019; @Rackham2023], while occulted ones lead to in-transit bumps that skew the measured depth if not modeled [@Silva2003; @Murray2026]. 
 The planet signal and stellar surface are degenerate and must therefore be modeled together to constrain the planet properties.
 Conversely, because the transit chord scans the stellar disk, this joint modeling also turns each transit into a direct probe of the stellar surface.
 
@@ -54,7 +54,7 @@ The two codes closest to `SAJAX` are `fleck` and `spotter`, both of which offer 
 `fleck` computes each active region's flux from its projected area and the limb-darkening at its center, and treats an active region as visible or hidden according to where its center lies on the visible hemisphere. 
 This is efficient and accurate for small active regions, but breaks down for large ones, such as those found on active M dwarfs. 
 `spotter` is built on a HEALPix map of the whole sphere [@Gorski2005]. It supports arbitrarily shaped active regions and Gaussian-process surface models. 
-`SAJAX` extends `SAGE`, a grid-based `NumPy` code that assigns separate spectra to the quiet photosphere and spots but relies on Python loops and does not model planetary occultations. 
+`SAJAX` extends `SAGE`, a grid-based `NumPy` code that assigns separate spectra to the quiet photosphere and spots but relies on Python loops. 
 Its guiding philosophy is to be a lightweight, inference-focused model: each active region is described by a small set of physically interpretable parameters (position, size, edge smoothness, spectrum and limb-darkening) rather than a free-form surface map, and the model is differentiable and cheap.
 In practice, `SAJAX` is the more natural choice when active regions are large or overlapping, where `fleck`'s point-source treatment breaks down. As a grid-based code `SAJAX` trades some of `fleck`'s analytical speed for flexibility, but remains fast enough for the thousands of evaluations inference requires. It shines when inferring a planet's transmission spectrum jointly with active regions, particularly when the latter require distinct treatment: e.g. their own limb-darkening law, an umbra nested in a penumbra, or successive crossings of regions at different temperatures.
 
