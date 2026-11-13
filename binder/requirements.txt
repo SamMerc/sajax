@@ -128,7 +128,7 @@ equinox==0.13.8
     #   tinygp
 exceptiongroup==1.3.1 ; python_full_version < '3.11'
     # via ipython
-executing==2.2.1
+executing==2.3.0
     # via stack-data
 exotic-ld==3.2.0
 fastjsonschema==2.22.2
