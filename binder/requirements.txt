@@ -217,7 +217,7 @@ jaxlib==0.10.2 ; python_full_version >= '3.11'
     #   numpyro
     #   sajax
     #   spotter
-jaxoplanet==0.1.0
+jaxoplanet==0.2.0
 jaxopt==0.8.5
 jaxtyping==0.3.7 ; python_full_version < '3.11'
     # via
