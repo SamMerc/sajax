@@ -677,7 +677,7 @@ wadler-lindig==0.1.8
     # via
     #   equinox
     #   jaxtyping
-wcwidth==0.8.2
+wcwidth==0.9.4
     # via prompt-toolkit
 widgetsnbextension==4.0.16
     # via ipywidgets
