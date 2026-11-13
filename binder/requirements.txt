@@ -148,7 +148,7 @@ h5py==3.16.0 ; python_full_version < '3.14'
     # via
     #   arviz
     #   speclib
-healpy==1.20.0
+healpy==1.20.1
     # via spotter
 idna==3.20
     # via requests
