@@ -20,37 +20,36 @@ arviz-stats==1.3.1 ; python_full_version >= '3.12'
     # via
     #   arviz
     #   arviz-plots
-asdf==5.3.1 ; python_full_version >= '3.11' and python_full_version < '3.14'
+asdf==5.3.1 ; python_full_version < '3.14'
     # via
     #   asdf-astropy
     #   asdf-coordinates-schemas
     #   gwcs
     #   specutils
-asdf-astropy==0.11.0 ; python_full_version >= '3.11' and python_full_version < '3.14'
+asdf-astropy==0.11.0 ; python_full_version < '3.14'
     # via
     #   gwcs
     #   specutils
-asdf-coordinates-schemas==0.5.1 ; python_full_version >= '3.11' and python_full_version < '3.14'
+asdf-coordinates-schemas==0.5.1 ; python_full_version < '3.14'
     # via
     #   asdf-astropy
     #   asdf-wcs-schemas
-asdf-standard==1.5.0 ; python_full_version >= '3.11' and python_full_version < '3.14'
+asdf-standard==1.5.0 ; python_full_version < '3.14'
     # via
     #   asdf
     #   asdf-astropy
     #   asdf-coordinates-schemas
     #   asdf-transform-schemas
     #   asdf-wcs-schemas
-asdf-transform-schemas==0.6.0 ; python_full_version >= '3.11' and python_full_version < '3.14'
+asdf-transform-schemas==0.6.0 ; python_full_version < '3.14'
     # via
     #   asdf-astropy
     #   asdf-wcs-schemas
-asdf-wcs-schemas==0.5.0 ; python_full_version >= '3.11' and python_full_version < '3.14'
+asdf-wcs-schemas==0.5.0 ; python_full_version < '3.14'
     # via gwcs
 astroid==4.3.1
     # via sphinx-autoapi
-astropy==6.1.7 ; python_full_version < '3.11'
-astropy==7.2.2 ; python_full_version >= '3.11'
+astropy==7.2.2
     # via
     #   asdf-astropy
     #   gwcs
@@ -90,23 +89,14 @@ colorama==0.4.6 ; sys_platform == 'win32'
     #   tqdm
 comm==0.2.3
     # via ipykernel
-contourpy==1.3.2 ; python_full_version < '3.11'
-    # via matplotlib
-contourpy==1.3.3 ; python_full_version >= '3.11'
+contourpy==1.3.3
     # via matplotlib
 corner==2.3.0
 cycler==0.12.1
     # via matplotlib
 debugpy==1.8.21
     # via ipykernel
-decorator==5.3.1 ; python_full_version < '3.11'
-    # via ipython
-docutils==0.21.2 ; python_full_version < '3.11'
-    # via
-    #   myst-parser
-    #   pydata-sphinx-theme
-    #   sphinx
-docutils==0.22.4 ; python_full_version >= '3.11'
+docutils==0.22.4
     # via
     #   myst-parser
     #   pydata-sphinx-theme
@@ -115,8 +105,6 @@ equinox==0.13.8
     # via
     #   interpax
     #   lineax
-exceptiongroup==1.3.1 ; python_full_version < '3.11'
-    # via ipython
 executing==2.2.1
     # via stack-data
 exotic-ld==3.2.0
@@ -126,7 +114,7 @@ fonttools==4.65.0
     # via matplotlib
 greenlet==3.5.6 ; platform_machine == 'AMD64' or platform_machine == 'WIN32' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'ppc64le' or platform_machine == 'win32' or platform_machine == 'x86_64'
     # via sqlalchemy
-gwcs==1.0.3 ; python_full_version >= '3.11' and python_full_version < '3.14'
+gwcs==1.0.3 ; python_full_version < '3.14'
     # via
     #   ndcube
     #   specutils
@@ -151,46 +139,25 @@ ipykernel==7.3.0
     # via
     #   myst-nb
     #   sajax
-ipython==8.39.0 ; python_full_version < '3.11'
+ipython==9.16.1
     # via
     #   ipykernel
     #   myst-nb
-ipython==9.16.1 ; python_full_version >= '3.11'
-    # via
-    #   ipykernel
-    #   myst-nb
-ipython-pygments-lexers==1.1.1 ; python_full_version >= '3.11'
+ipython-pygments-lexers==1.1.1
     # via ipython
-jax==0.6.2 ; python_full_version < '3.11'
+jax==0.10.2
     # via
     #   equinox
     #   interpax
     #   lineax
     #   numpyro
     #   sajax
-jax==0.10.2 ; python_full_version >= '3.11'
-    # via
-    #   equinox
-    #   interpax
-    #   lineax
-    #   numpyro
-    #   sajax
-jaxlib==0.6.2 ; python_full_version < '3.11'
+jaxlib==0.10.2
     # via
     #   jax
     #   numpyro
     #   sajax
-jaxlib==0.10.2 ; python_full_version >= '3.11'
-    # via
-    #   jax
-    #   numpyro
-    #   sajax
-jaxtyping==0.3.7 ; python_full_version < '3.11'
-    # via
-    #   equinox
-    #   interpax
-    #   lineax
-jaxtyping==0.3.11 ; python_full_version >= '3.11'
+jaxtyping==0.3.11
     # via
     #   equinox
     #   interpax
@@ -203,7 +170,7 @@ jinja2==3.1.6
     #   pydata-sphinx-theme
     #   sphinx
     #   sphinx-autoapi
-jmespath==1.1.0 ; python_full_version >= '3.11' and python_full_version < '3.14'
+jmespath==1.1.0 ; python_full_version < '3.14'
     # via asdf
 jsonschema==4.26.0
     # via nbformat
@@ -227,22 +194,13 @@ lazy-loader==0.6 ; python_full_version >= '3.12'
     # via arviz-base
 lineax==0.1.0
     # via interpax
-markdown-it-py==3.0.0 ; python_full_version < '3.11'
-    # via
-    #   mdit-py-plugins
-    #   myst-parser
-markdown-it-py==4.2.0 ; python_full_version >= '3.11'
+markdown-it-py==4.2.0
     # via
     #   mdit-py-plugins
     #   myst-parser
 markupsafe==3.0.3
     # via jinja2
-matplotlib==3.10.9 ; python_full_version < '3.11'
-    # via
-    #   arviz
-    #   corner
-    #   sajax
-matplotlib==3.11.1 ; python_full_version >= '3.11'
+matplotlib==3.11.1
     # via
     #   arviz
     #   corner
@@ -263,9 +221,7 @@ multipledispatch==1.0.0
     # via numpyro
 myst-nb==1.4.0
     # via sajax
-myst-parser==4.0.1 ; python_full_version < '3.11'
-    # via myst-nb
-myst-parser==5.1.0 ; python_full_version >= '3.11'
+myst-parser==5.1.0
     # via myst-nb
 nbclient==0.11.0
     # via
@@ -276,31 +232,11 @@ nbformat==5.11.1
     #   jupyter-cache
     #   myst-nb
     #   nbclient
-ndcube==2.4.1 ; python_full_version >= '3.11' and python_full_version < '3.14'
+ndcube==2.4.1 ; python_full_version < '3.14'
     # via specutils
 nest-asyncio2==1.7.2
     # via ipykernel
-numpy==2.2.6 ; python_full_version < '3.11'
-    # via
-    #   arviz
-    #   astropy
-    #   contourpy
-    #   exotic-ld
-    #   h5netcdf
-    #   h5py
-    #   interpax
-    #   jax
-    #   jaxlib
-    #   matplotlib
-    #   ml-dtypes
-    #   numpyro
-    #   pandas
-    #   pyerfa
-    #   sajax
-    #   scipy
-    #   xarray
-    #   xarray-einstats
-numpy==2.4.6 ; python_full_version == '3.11.*'
+numpy==2.4.6 ; python_full_version < '3.12'
     # via
     #   arviz
     #   asdf
@@ -354,9 +290,7 @@ numpy==2.5.2 ; python_full_version >= '3.12'
     #   synphot
     #   xarray
     #   xarray-einstats
-numpyro==0.19.0 ; python_full_version < '3.11'
-    # via numpyro-ext
-numpyro==0.21.0 ; python_full_version >= '3.11'
+numpyro==0.21.0
     # via numpyro-ext
 numpyro-ext==0.0.4
 opt-einsum==3.4.0
@@ -372,14 +306,9 @@ packaging==26.3
     #   lazy-loader
     #   matplotlib
     #   pooch
-    #   pydata-sphinx-theme
     #   sphinx
     #   xarray
-pandas==2.3.3 ; python_full_version < '3.11'
-    # via
-    #   arviz
-    #   xarray
-pandas==3.0.5 ; python_full_version >= '3.11'
+pandas==3.0.5
     # via
     #   arviz
     #   xarray
@@ -394,7 +323,7 @@ platformdirs==4.11.3
     #   arviz
     #   jupyter-core
     #   pooch
-pooch==1.9.0 ; python_full_version >= '3.11' and python_full_version < '3.14'
+pooch==1.9.0 ; python_full_version < '3.14'
     # via speclib
 prompt-toolkit==3.0.53
     # via ipython
@@ -408,9 +337,7 @@ pure-eval==0.2.3
     # via stack-data
 pycparser==3.0 ; implementation_name == 'pypy'
     # via cffi
-pydata-sphinx-theme==0.15.4 ; python_full_version < '3.11'
-    # via sphinx-book-theme
-pydata-sphinx-theme==0.20.0 ; python_full_version >= '3.11'
+pydata-sphinx-theme==0.20.0
     # via sphinx-book-theme
 pyerfa==2.0.1.5
     # via astropy
@@ -428,8 +355,6 @@ python-dateutil==2.9.0.post0
     #   jupyter-client
     #   matplotlib
     #   pandas
-pytz==2026.3.post1 ; python_full_version < '3.11'
-    # via pandas
 pyyaml==6.0.3
     # via
     #   asdf
@@ -452,25 +377,13 @@ requests==2.34.2
     #   pooch
     #   pydata-sphinx-theme
     #   sphinx
-roman-numerals==4.1.0 ; python_full_version >= '3.11'
+roman-numerals==4.1.0
     # via sphinx
-rpds-py==0.30.0 ; python_full_version < '3.11'
+rpds-py==2026.6.3
     # via
     #   jsonschema
     #   referencing
-rpds-py==2026.6.3 ; python_full_version >= '3.11'
-    # via
-    #   jsonschema
-    #   referencing
-scipy==1.15.3 ; python_full_version < '3.11'
-    # via
-    #   arviz
-    #   exotic-ld
-    #   jax
-    #   jaxlib
-    #   sajax
-    #   xarray-einstats
-scipy==1.17.1 ; python_full_version == '3.11.*'
+scipy==1.17.1 ; python_full_version < '3.12'
     # via
     #   arviz
     #   exotic-ld
@@ -494,7 +407,7 @@ scipy==1.18.1 ; python_full_version >= '3.12'
     #   specutils
     #   synphot
     #   xarray-einstats
-semantic-version==2.10.0 ; python_full_version >= '3.11' and python_full_version < '3.14'
+semantic-version==2.10.0 ; python_full_version < '3.14'
     # via asdf
 setuptools==80.10.2
     # via arviz
@@ -504,19 +417,10 @@ snowballstemmer==3.1.1
     # via sphinx
 soupsieve==2.10
     # via beautifulsoup4
-speclib @ git+https://github.com/brackham/speclib.git@5377b48ffd972f53a37f252b54c6d546aefde0be ; python_full_version >= '3.11' and python_full_version < '3.14'
-specutils==1.20.3 ; python_full_version >= '3.11' and python_full_version < '3.14'
+speclib @ git+https://github.com/brackham/speclib.git@5377b48ffd972f53a37f252b54c6d546aefde0be ; python_full_version < '3.14'
+specutils==1.20.3 ; python_full_version < '3.14'
     # via speclib
-sphinx==8.1.3 ; python_full_version < '3.11'
-    # via
-    #   myst-nb
-    #   myst-parser
-    #   pydata-sphinx-theme
-    #   sajax
-    #   sphinx-autoapi
-    #   sphinx-book-theme
-    #   sphinx-copybutton
-sphinx==9.0.4 ; python_full_version == '3.11.*'
+sphinx==9.0.4 ; python_full_version < '3.12'
     # via
     #   myst-nb
     #   myst-parser
@@ -536,9 +440,7 @@ sphinx==9.1.0 ; python_full_version >= '3.12'
     #   sphinx-copybutton
 sphinx-autoapi==3.8.0
     # via sajax
-sphinx-book-theme==1.1.4 ; python_full_version < '3.11'
-    # via sajax
-sphinx-book-theme==1.4.0 ; python_full_version >= '3.11'
+sphinx-book-theme==1.4.0
     # via sajax
 sphinx-copybutton==0.5.2
     # via sajax
@@ -558,12 +460,10 @@ sqlalchemy==2.0.55
     # via jupyter-cache
 stack-data==0.6.3
     # via ipython
-synphot==1.7.0 ; python_full_version >= '3.11' and python_full_version < '3.14'
+synphot==1.7.0 ; python_full_version < '3.14'
     # via speclib
 tabulate==0.10.0
     # via jupyter-cache
-tomli==2.4.1 ; python_full_version < '3.11'
-    # via sphinx
 tornado==6.5.8
     # via
     #   ipykernel
@@ -586,18 +486,15 @@ typing-extensions==4.16.0
     # via
     #   arviz
     #   arviz-base
-    #   astroid
     #   beautifulsoup4
     #   equinox
-    #   exceptiongroup
     #   ipython
     #   jupyter-client
     #   lineax
     #   myst-nb
-    #   pydata-sphinx-theme
     #   referencing
     #   sqlalchemy
-tzdata==2026.3 ; python_full_version < '3.11' or sys_platform == 'emscripten' or sys_platform == 'win32'
+tzdata==2026.3 ; sys_platform == 'emscripten' or sys_platform == 'win32'
     # via pandas
 urllib3==2.7.0
     # via requests
@@ -607,19 +504,13 @@ wadler-lindig==0.1.8
     #   jaxtyping
 wcwidth==0.8.2
     # via prompt-toolkit
-xarray==2025.6.1 ; python_full_version < '3.11'
-    # via
-    #   arviz
-    #   xarray-einstats
-xarray==2026.7.0 ; python_full_version >= '3.11'
+xarray==2026.7.0
     # via
     #   arviz
     #   arviz-base
     #   arviz-stats
     #   xarray-einstats
-xarray-einstats==0.8.0 ; python_full_version < '3.11'
-    # via arviz
-xarray-einstats==0.9.1 ; python_full_version == '3.11.*'
+xarray-einstats==0.9.1 ; python_full_version < '3.12'
     # via arviz
 xarray-einstats==0.11.0 ; python_full_version >= '3.12'
     # via arviz-stats
