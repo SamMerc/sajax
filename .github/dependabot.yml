@@ -8,3 +8,5 @@ updates:
       python-dependencies:
         patterns:
           - "*"
+    ignore:
+      - dependency-name: "setuptools"
