@@ -102,9 +102,7 @@ docutils==0.22.4
     #   pydata-sphinx-theme
     #   sphinx
 equinox==0.13.8
-    # via
-    #   interpax
-    #   lineax
+    # via interpax
 executing==2.2.1
     # via stack-data
 exotic-ld==3.2.0
@@ -133,9 +131,9 @@ importlib-metadata==9.0.1
     #   asdf
     #   jupyter-cache
     #   myst-nb
-interpax==0.3.14
+interpax==0.3.16
     # via sajax
-ipykernel==7.3.0
+ipykernel==7.4.0
     # via
     #   myst-nb
     #   sajax
@@ -149,9 +147,11 @@ jax==0.10.2
     # via
     #   equinox
     #   interpax
-    #   lineax
+    #   jaxkd
     #   numpyro
     #   sajax
+jaxkd==0.1.2
+    # via interpax
 jaxlib==0.10.2
     # via
     #   jax
@@ -161,7 +161,6 @@ jaxtyping==0.3.11
     # via
     #   equinox
     #   interpax
-    #   lineax
 jedi==0.20.0
     # via ipython
 jinja2==3.1.6
@@ -192,15 +191,13 @@ kiwisolver==1.5.1
     # via matplotlib
 lazy-loader==0.6 ; python_full_version >= '3.12'
     # via arviz-base
-lineax==0.1.0
-    # via interpax
 markdown-it-py==4.2.0
     # via
     #   mdit-py-plugins
     #   myst-parser
 markupsafe==3.0.3
     # via jinja2
-matplotlib==3.11.1
+matplotlib==3.11.2
     # via
     #   arviz
     #   corner
@@ -290,7 +287,7 @@ numpy==2.5.2 ; python_full_version >= '3.12'
     #   synphot
     #   xarray
     #   xarray-einstats
-numpyro==0.21.0
+numpyro==0.22.0
     # via numpyro-ext
 numpyro-ext==0.0.4
 opt-einsum==3.4.0
@@ -316,7 +313,7 @@ parso==0.8.7
     # via jedi
 pexpect==4.9.0 ; sys_platform != 'emscripten' and sys_platform != 'win32'
     # via ipython
-pillow==12.3.0
+pillow==13.0.0
     # via matplotlib
 platformdirs==4.11.3
     # via
@@ -327,10 +324,8 @@ pooch==1.9.0 ; python_full_version < '3.14'
     # via speclib
 prompt-toolkit==3.0.53
     # via ipython
-psutil==7.2.2
-    # via
-    #   ipykernel
-    #   ipython
+psutil==7.2.2 ; sys_platform != 'cygwin' and sys_platform != 'emscripten'
+    # via ipython
 ptyprocess==0.7.0 ; sys_platform != 'emscripten' and sys_platform != 'win32'
     # via pexpect
 pure-eval==0.2.3
@@ -438,7 +433,7 @@ sphinx==9.1.0 ; python_full_version >= '3.12'
     #   sphinx-autoapi
     #   sphinx-book-theme
     #   sphinx-copybutton
-sphinx-autoapi==3.8.0
+sphinx-autoapi==3.9.0
     # via sajax
 sphinx-book-theme==1.4.0
     # via sajax
@@ -490,7 +485,6 @@ typing-extensions==4.16.0
     #   equinox
     #   ipython
     #   jupyter-client
-    #   lineax
     #   myst-nb
     #   referencing
     #   sqlalchemy
