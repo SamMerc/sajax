@@ -3559,7 +3559,7 @@ provides-extras = ["dev", "docs", "cuda"]
 [package.metadata.requires-dev]
 examples = [
     { name = "arviz" },
-    { name = "astropy", specifier = ">=5" },
+    { name = "astropy", specifier = ">=5,<8" },
     { name = "corner" },
     { name = "exotic-ld" },
     { name = "numpyro" },
