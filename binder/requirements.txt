@@ -404,7 +404,7 @@ scipy==1.18.1 ; python_full_version >= '3.12'
     #   xarray-einstats
 semantic-version==2.10.0 ; python_full_version < '3.14'
     # via asdf
-setuptools==84.2.1
+setuptools==80.10.2
     # via arviz
 six==1.17.0
     # via python-dateutil
