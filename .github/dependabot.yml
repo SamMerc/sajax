@@ -4,6 +4,9 @@ updates:
     directory: "/"
     schedule:
       interval: "monthly"
+    # binder/requirements.txt is generated from uv.lock by .github/workflows/sync-binder.yml
+    exclude-paths:
+      - "binder/**"
     groups:
       python-dependencies:
         patterns:
