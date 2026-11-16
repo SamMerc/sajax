@@ -49,7 +49,7 @@ asdf-wcs-schemas==0.5.0 ; python_full_version < '3.14'
     # via gwcs
 astroid==4.3.1
     # via sphinx-autoapi
-astropy==7.2.2
+astropy==7.2.3
     # via
     #   asdf-astropy
     #   gwcs
@@ -57,7 +57,7 @@ astropy==7.2.2
     #   speclib
     #   specutils
     #   synphot
-astropy-iers-data==0.2026.8.18.14.22.31
+astropy-iers-data==0.2026.11.16.0.37.44
     # via astropy
 asttokens==3.0.2
     # via stack-data
