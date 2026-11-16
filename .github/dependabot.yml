@@ -13,3 +13,6 @@ updates:
           - "*"
     ignore:
       - dependency-name: "setuptools"
+      # speclib caps astropy<8; Dependabot's astropy 8 bump is unresolvable and fails the whole group.
+      - dependency-name: "astropy"
+        update-types: ["version-update:semver-major"]
