@@ -4,6 +4,7 @@ prune binder
 prune exotic_ld_data
 prune sage_output
 prune dist
+prune joss
 exclude coverage.xml
 exclude uv.lock
 exclude setup_env.sh
