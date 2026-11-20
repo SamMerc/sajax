@@ -43,6 +43,8 @@ htmlcov/
 sage_output/
 *.npy
 *.npz
+# ...except the data behind the JOSS paper figure
+!joss/figures/*.npz
 
 # exotic-ld's runtime data cache.
 # speclib's own cache lives under ~/.speclib/ (outside the repo) so needs no entry here.
