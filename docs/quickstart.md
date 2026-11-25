@@ -59,7 +59,7 @@ SAJAX supports multiple limb-darkening laws:
 
 - `linear` - 1 coefficient
 - `quadratic` - 2 coefficients (most common)
-- `power2`, `kipping3` - alternative parameterizations
+- `power2`, `sing3` - alternative parameterizations
 - `nonlinear4` - 4-coefficient law
 - `intensity_profile` - full I(mu) profile
 

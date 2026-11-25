@@ -28,7 +28,7 @@ LdMode = Literal[
     "linear",          # 1 coeff  : u
     "quadratic",       # 2 coeffs : u1, u2
     "power2",          # 2 coeffs : c, alpha
-    "kipping3",        # 3 coeffs : c1, c2, c3
+    "sing3",           # 3 coeffs : c1, c2, c3
     "nonlinear4",      # 4 coeffs : c1, c2, c3, c4
     "intensity_profile",
 ]
@@ -38,7 +38,7 @@ _N_COEFFS: dict[str, int] = {
     "linear":     1,
     "quadratic":  2,
     "power2":     2,
-    "kipping3":   3,
+    "sing3":      3,
     "nonlinear4": 4,
 }
 
@@ -372,12 +372,12 @@ def _evaluate_ldc(
     elif ld_mode == "power2":
         # I(mu) = 1 - a*(1 - mu^b)
         result = 1.0 - ld_coeffs_wl[0] * (1.0 - mu_disc ** ld_coeffs_wl[1])
-    elif ld_mode == "kipping3":
-        # I(mu) = 1 - c1*(1-mu^0.5) - c2*(1-mu) - c3*(1-mu^(3/2))
+    elif ld_mode == "sing3":
+        # I(mu) = 1 - c1*(1-mu) - c2*(1-mu^(3/2)) - c3*(1-mu^2)
         result = (1.0
-                  - ld_coeffs_wl[0] * (1.0 - mu_disc ** 0.5)
-                  - ld_coeffs_wl[1] * (1.0 - mu_disc)
-                  - ld_coeffs_wl[2] * (1.0 - mu_disc ** 1.5))
+                  - ld_coeffs_wl[0] * (1.0 - mu_disc)
+                  - ld_coeffs_wl[1] * (1.0 - mu_disc ** 1.5)
+                  - ld_coeffs_wl[2] * (1.0 - mu_disc ** 2))
     else:  # "nonlinear4"  -- Claret (2000) four-parameter law
         # I(mu) = 1 - sum_{k=1}^{4} c_k*(1 - mu^(k/2))
         result = (1.0
@@ -1028,7 +1028,7 @@ def build_system(
         - ``"linear"``:     [u]
         - ``"quadratic"``:  [u1, u2]
         - ``"power2"``:     [c, alpha]
-        - ``"kipping3"``:   [c1, c2, c3]
+        - ``"sing3"``:      [c1, c2, c3]
         - ``"nonlinear4"``: [c1, c2, c3, c4]
         Each element may be a scalar (broadcast to all wavelengths) or an
         array of length ``nwave``. Active regions carry their own,
@@ -2082,7 +2082,7 @@ def quick_lc(
         - ``"linear"``:     [u]
         - ``"quadratic"``:  [u1, u2]
         - ``"power2"``:     [c, alpha]
-        - ``"kipping3"``:   [c1, c2, c3]
+        - ``"sing3"``:      [c1, c2, c3]
         - ``"nonlinear4"``: [c1, c2, c3, c4]
         Each element may be a scalar (broadcast to all wavelengths) or an
         array of length ``nwave``. Active regions carry their own,
