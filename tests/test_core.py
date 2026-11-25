@@ -538,7 +538,7 @@ class TestLDCModes:
         ("linear",      [0.3]),
         ("quadratic",   [0.3, 0.1]),
         ("power2",      [0.4, 0.6]),
-        ("kipping3",    [0.2, 0.3, 0.1]),
+        ("sing3",       [0.2, 0.3, 0.1]),
         ("nonlinear4",  [0.1, 0.2, 0.15, 0.05]),
     ])
     def test_analytic_ld_modes(
